@@ -1,11 +1,13 @@
 /**
  * postEngine.ts — محرك نتيجة POST (الاختبار الذاتي عند التشغيل).
  *
- * منطق حتمي بالترتيب: لا طاقة ← قطع تغذية/معالج ← ذاكرة ← تحذيرات ما بعد POST.
+ * منطق حتمي بالترتيب: عطل مزود الطاقة ← لا طاقة ← قطع تغذية/معالج ← ذاكرة
+ * (غائبة أو غير متوافقة) ← مبرد ← عرض ← تهوية ← تخزين ← إقلاع سليم.
  * كل نتيجة محاكاة تعليمية (isSimulated: true) وتتضمن SIM_NOTE_AR لتمييز أن
  * الأجهزة الحقيقية قد تختلف عن المنصة المرجعية (LGA1700/DDR5/ATX).
  */
 
+import { isInstalled } from '../types';
 import type { DiagnosisFinding, SimulationState } from '../types';
 
 export const SIM_NOTE_AR =
@@ -13,7 +15,28 @@ export const SIM_NOTE_AR =
 
 /** يشغّل محاكاة POST على الحالة الحالية ويعيد نتيجة تشخيص واحدة. */
 export function runPost(s: SimulationState): DiagnosisFinding {
-  const { flags, parts } = s;
+  const { flags, parts, peripherals } = s;
+
+  // 0) مزود طاقة معطل — الضغط على الزر لا ينتج عنه شيء (سيناريو تعليمي F12).
+  if (peripherals.psuDead) {
+    return {
+      code: 'POWER_OFF',
+      titleAr: 'لا استجابة للتشغيل — اشتباه مزود الطاقة',
+      detailsAr: [
+        'كابل الكهرباء موصول والزر مضغوط، لكن لا مراوح تدور ولا أضواء ولا صفارة — استجابة ميتة تمامًا.',
+        'الشك يتجه إلى مزود الطاقة نفسه أو مسار التيار أمامه، وليس إلى القطع الداخلية.',
+        'الدليل الحاسم تعليميًا: مراوح لا تتحرك إطلاقًا مع كهرباء موصولة وغطاء مغلق.',
+        SIM_NOTE_AR,
+      ],
+      nextStepsAr: [
+        'تأكد أن كابل الكهرباء من الحائط إلى PSU سليم ومقفول في مكانه.',
+        'في جهاز حقيقي: جرّب كابلًا آخر وافحص مفتاح 115/230V خلف PSU — ولم تفتح PSU أبدًا (خطر قاتل).',
+        'المحاكاة تسمح باستبدال مزود الطاقة معيبٍ بأخر من المخزن التعليمي.',
+        SIM_NOTE_AR,
+      ],
+      isSimulated: true,
+    };
+  }
 
   // 1) لا طاقة — لا يبدأ أي فحص أصلًا.
   if (!flags.powerOn || !flags.acConnected) {
@@ -27,22 +50,22 @@ export function runPost(s: SimulationState): DiagnosisFinding {
       ],
       nextStepsAr: [
         'وصّل كابل الكهرباء من الحائط إلى مزود الطاقة.',
-        'تأكد أن التجميعة مكتملة والغطاء مغلق، ثم شغّل من زر الطاقة وأعد الفحص.',
+        'تأكد أن الغطاء مغلق، ثم شغّل من زر الطاقة وأعد الفحص.',
       ],
       isSimulated: true,
     };
   }
 
   // 2) قطع التغذية/المعالج الحرجة — فشل POST مباشر.
-  if (parts.cpu === 'removed' || parts.atx24 === 'removed' || parts.eps === 'removed') {
+  if (!isInstalled(parts.cpu) || !isInstalled(parts.atx24) || !isInstalled(parts.eps)) {
     const causes: string[] = [];
-    if (parts.cpu === 'removed') {
+    if (!isInstalled(parts.cpu)) {
       causes.push('لا يوجد POST: المعالج غير مثبت — بدونه لا ينفّذ الجهاز أي أمر إقلاع.');
     }
-    if (parts.atx24 === 'removed') {
+    if (!isInstalled(parts.atx24)) {
       causes.push('لا يوجد POST: كابل ATX 24-pin غير موصل — اللوحة الأم بلا تغذية رئيسية.');
     }
-    if (parts.eps === 'removed') {
+    if (!isInstalled(parts.eps)) {
       causes.push('لا يوجد POST: كابل EPS 8-pin غير موصل — المعالج بلا تغذية.');
     }
     return {
@@ -63,19 +86,28 @@ export function runPost(s: SimulationState): DiagnosisFinding {
     };
   }
 
-  // 3) الذاكرة ناقصة — فشل POST مع نمط بيب تعليمي.
-  if (parts.ram === 'removed') {
+  // 3) الذاكرة غائبة أو غير متوافقة — فشل POST مع نمط بيب تعليمي.
+  if (!isInstalled(parts.ram) || peripherals.ramIncompatible) {
+    const causes: string[] = [];
+    if (!isInstalled(parts.ram)) {
+      causes.push('لا يوجد POST: الذاكرة غير مثبتة — لا يمكن تنفيذ الاختبار الذاتي بلا ذاكرة.');
+    }
+    if (peripherals.ramIncompatible) {
+      causes.push('لا يوجد POST: الذاكرة المركّبة غير متوافقة مع اللوحة (نوع/سرعة خارج نطاق الدعم) — المقبسان لكل طرف يعني وحدة غير مطابقة تُرفض في الاختبار الذاتي.');
+    }
     return {
       code: 'POST_FAIL',
-      titleAr: 'فشل POST — الذاكرة غير مثبتة',
+      titleAr: 'فشل POST — مشكلة في الذاكرة',
       detailsAr: [
-        'لا يوجد POST: الذاكرة غير مثبتة — لا يمكن تنفيذ الاختبار الذاتي بلا ذاكرة.',
-        'نمط بيب تعليمي (نصيًا): بيبات متكررة قصيرة — وهو نمط شائع لعطل/غياب الذاكرة، لكن أنماط البيب تختلف بين المنصات وشركات BIOS/UEFI.',
+        ...causes,
+        'نمط بيب تعليمي (نصيًا): بيبات متكررة قصيرة (خمس بيبات عند عدم التوافق) — لكن أنماط البيب تختلف بين المنصات وشركات BIOS/UEFI.',
+        'الذاكرة شرط أساسي لنجاح POST نفسه — لا يصل النظام لمرحلة الصورة أبدًا بدونها.',
         SIM_NOTE_AR,
       ],
       nextStepsAr: [
         'أطفئ وافصل الكهرباء وافتح الغطاء.',
-        'حرّر المزالج وركّب الوحدة بمحاذاة سن الفتحة (Keying) ثم اضغط حتى طقّة المزالج على الطرفين.',
+        'أعد تركيب الوحدة بمحاذاة سن الفتحة (Keying) واضغط حتى طقّة المزالج على الطرفين.',
+        'إن تكرر الفشل: جرّب وحدة أخرى معروفة سلامتها، وتحقق من قائمة التوافق (QVL) للوحة.',
         'أعد التشغيل وأعد الفحص.',
       ],
       isSimulated: true,
@@ -83,7 +115,7 @@ export function runPost(s: SimulationState): DiagnosisFinding {
   }
 
   // 4) المبرد ناقص — POST ناجح مع تحذير حراري/حماية.
-  if (parts.cooler === 'removed') {
+  if (!isInstalled(parts.cooler)) {
     return {
       code: 'POST_PASS_BOOT_WARNING',
       titleAr: 'POST ناجح مع تحذير — مبرد المعالج مفقود',
@@ -101,7 +133,7 @@ export function runPost(s: SimulationState): DiagnosisFinding {
   }
 
   // 5) بطاقة الرسوميات ناقصة — لا إشارة عرض (المعالج المرجعي بلا رسوميات مدمجة).
-  if (parts.gpu === 'removed') {
+  if (!isInstalled(parts.gpu)) {
     return {
       code: 'POST_PASS_BOOT_WARNING',
       titleAr: 'POST ناجح مع تحذير — لا إشارة عرض',
@@ -119,7 +151,7 @@ export function runPost(s: SimulationState): DiagnosisFinding {
   }
 
   // 6) البطاقة مثبتة لكن بلا كابل طاقة.
-  if (parts.gpuPower === 'removed' && parts.gpu === 'installed') {
+  if (!isInstalled(parts.gpuPower)) {
     return {
       code: 'POST_PASS_BOOT_WARNING',
       titleAr: 'POST ناجح مع تحذير — بطاقة بلا كابل طاقة',
@@ -136,30 +168,59 @@ export function runPost(s: SimulationState): DiagnosisFinding {
     };
   }
 
-  // 7) كل شيء سليم لكن بلا تخزين — POST ≠ إقلاع.
-  if (parts.ssd === 'removed') {
+  // 7) التهوية ناقصة — POST ناجح مع تحذير تهوية.
+  if (!isInstalled(parts.fans)) {
+    return {
+      code: 'POST_PASS_BOOT_WARNING',
+      titleAr: 'POST ناجح مع تحذير — تهوية الهيكل ناقصة',
+      detailsAr: [
+        'مراوح الهيكل غير مثبتة: POST ناجح والإقلاع ممكن، لكن درجات الحرارة ستتراكم مع كل دقيقة عمل.',
+        'منافذ SYS_FAN فارغة قد تُظهر تنبيه Fan Error في بعض اللوحات، والهواء الساكن داخل الهيكل يرفع حرارة البطاقة ومراحل التغذية تدريجيًا.',
+        SIM_NOTE_AR,
+      ],
+      nextStepsAr: [
+        'أطفئ وركّب مراوح الهيكل باتجاه تدفق صحيح: دخول من الأمام وخروج من الخلف.',
+        'وصّل موصلات المراوح برؤوس SYS_FAN/CPU_FAN على اللوحة.',
+      ],
+      isSimulated: true,
+    };
+  }
+
+  // 8) التخزين ناقص أو غير موصول — POST ≠ إقلاع (القرص الميكانيكي بديل إقلاع صالح).
+  const hasM2 = isInstalled(parts.ssd);
+  const hasHdd = isInstalled(parts.hdd) && isInstalled(parts.sataData) && isInstalled(parts.sataPower);
+  if (!hasM2 && !hasHdd) {
+    const causes: string[] = [];
+    if (!isInstalled(parts.ssd) && !isInstalled(parts.hdd)) {
+      causes.push('لا يوجد جهاز تخزين مثبت أصلًا — لا M.2 ولا قرص ميكانيكي.');
+    } else if (!isInstalled(parts.ssd) && !hasHdd) {
+      causes.push('قرص M.2 غائب، والقرص الميكانيكي موجود لكن كابلاته غير مكتملة (بيانات/طاقة) — لا جهاز إقلاع صالح.');
+    } else {
+      causes.push('قرص M.2 غائب — القرص الميكانيكي موجود وكابلاته سليمة لكنه بلا نظام تشغيل.');
+    }
     return {
       code: 'POST_PASS_BOOT_WARNING',
       titleAr: 'POST ناجح مع تحذير — لا جهاز إقلاع',
       detailsAr: [
+        ...causes,
         'POST ناجح لكن لا يوجد جهاز إقلاع — انتبه: POST منفصل عن الإقلاع.',
-        'قد تظهر رسالة No Boot Device أو يدخل الجهاز إعدادات UEFI تلقائيًا.',
+        'تدخل المحاكاة إعدادات UEFI تلقائيًا وتعرض قائمة أجهزة الإقلاع الفارغة.',
         SIM_NOTE_AR,
       ],
       nextStepsAr: [
-        'أطفئ وركّب قرص M.2 أو وصّل قرصًا آخر عليه نظام تشغيل.',
+        'أطفئ وركّب قرص M.2، أو ثبّت القرص الميكانيكي وكابليه (بيانات من اللوحة وطاقة من PSU).',
         'راجع ترتيب الإقلاع (Boot Order) في إعدادات UEFI.',
       ],
       isSimulated: true,
     };
   }
 
-  // 8) التجميعة مكتملة — POST ناجح وإقلاع سليم.
+  // 9) التجميعة مكتملة — POST ناجح وإقلاع سليم.
   return {
     code: 'POST_PASS_BOOT_OK',
     titleAr: 'POST ناجح والإقلاع سليم',
     detailsAr: [
-      'اختبار POST ناجح: التغذية والمعالج والذاكرة وعرض الصورة مكتملة في المحاكاة.',
+      'اختبار POST ناجح: التغذية والمعالج والذاكرة والعرض والتخزين مكتملة في المحاكاة.',
       'الإقلاع إلى نظام التشغيل متوقع بلا تحذيرات.',
       SIM_NOTE_AR,
     ],

@@ -21,6 +21,7 @@ import type {
   SimulationState,
   StepResult,
 } from '../types';
+import { CABLE_IDS, isInstalled } from '../types';
 
 /** الأسماء العربية المعتمدة للقطع — تظهر في الرسائل والقوائم التعليمية. */
 export const PART_NAMES_AR: Record<ComponentId, string> = {
@@ -32,11 +33,19 @@ export const PART_NAMES_AR: Record<ComponentId, string> = {
   gpu: 'بطاقة الرسوميات',
   psu: 'مزود الطاقة',
   ssd: 'قرص M.2',
+  hdd: 'القرص الميكانيكي 3.5"',
   fans: 'مراوح الهيكل',
   atx24: 'كابل ATX 24-pin',
   eps: 'كابل EPS',
   gpuPower: 'كابل طاقة البطاقة',
+  sataData: 'كابل SATA للبيانات',
+  sataPower: 'كابل SATA للطاقة',
 };
+
+/** هل القطعة كابل (فصل/توصيل بحركة واحدة بلا فصل جزئي)؟ */
+export function isCable(id: ComponentId): boolean {
+  return CABLE_IDS.includes(id);
+}
 
 /** هل الجهاز آمن للعمل الداخلي؟ (مطفأ + كهرباء مفصولة) */
 export function isSafeForInternals(s: SimulationState): boolean {
@@ -61,7 +70,13 @@ function flagReq(flag: MachineFlag, labelAr: string, hintAr: string, failAr: str
 }
 
 function partReq(id: ComponentId, want: PartStatus, labelAr: string, hintAr: string, failAr: string): Requirement {
-  return { source: 'base', labelAr, hintAr, done: (s) => s.parts[id] === want, failAr, actionPart: id };
+  // دلالة موسّعة: want='removed' تعني «ليست مثبتة» بأي حال (في الصينية/بانتظار/تالفة) —
+  // وwant='installed' تعني مثبتة فعلًا. هذا يسمح للقطع المفصولة جزئيًا بالمتابعة دون عوائق مصطنعة.
+  const done =
+    want === 'installed'
+      ? (s: SimulationState) => isInstalled(s.parts[id])
+      : (s: SimulationState) => !isInstalled(s.parts[id]);
+  return { source: 'base', labelAr, hintAr, done, failAr, actionPart: id };
 }
 
 // ============ شروط مشتركة ============
@@ -137,6 +152,11 @@ const REMOVE_REQS: Record<ComponentId, Requirement[]> = {
     PANEL_OPEN_REMOVE,
     flagReq('m2ScrewOut', 'فك برغي تثبيت M.2', 'برغي صغير في نهاية القرص.', 'فك برغي تثبيت M.2 أولًا — القرص مثبت به في نهايته.'),
   ],
+  hdd: [
+    PANEL_OPEN_REMOVE,
+    partReq('sataData', 'removed', 'فصل كابل SATA للبيانات', 'الطرف الرفيع من اللوحة إلى خلفية القرص.', 'افصل كابل SATA للبيانات عن القرص أولًا — الكابل الموصول يمنع سحب القرص من القفص.'),
+    partReq('sataPower', 'removed', 'فصل كابل SATA للطاقة', 'الموصل الأعرض من مزود الطاقة.', 'افصل كابل SATA للطاقة عن القرص أولًا — لا تسحب القرص وكابليه موصولَين.'),
+  ],
   fans: [
     PANEL_OPEN_REMOVE,
     flagReq('fanScrewsOut', 'فك براغي المراوح', 'ثبّت المروحة بيدك أثناء الفك.', 'فك براغي مراوح الهيكل أولًا.'),
@@ -145,6 +165,8 @@ const REMOVE_REQS: Record<ComponentId, Requirement[]> = {
   atx24: [PANEL_OPEN_REMOVE],
   eps: [PANEL_OPEN_REMOVE],
   gpuPower: [PANEL_OPEN_REMOVE],
+  sataData: [PANEL_OPEN_REMOVE],
+  sataPower: [PANEL_OPEN_REMOVE],
 };
 
 // ============ جدول اعتماديات التركيب (المصدر النهائي للحقيقة) ============
@@ -182,6 +204,11 @@ const INSTALL_REQS: Record<ComponentId, Requirement[]> = {
     PANEL_OPEN_INSTALL,
     flagReq('m2ScrewOut', 'برغي M.2 مفكوك (حالة التجهيز)', 'أدخل القرص مائلًا ثم اربط البرغي.', 'فعّل علم «برغي تثبيت M.2 مفكوك»، أدخل القرص بزاوية مائلة، اضغطه للأسفل ثم اربط البرغي.'),
   ],
+  hdd: [
+    PANEL_OPEN_INSTALL,
+    partReq('sataData', 'removed', 'ترك كابل البيانات مفصولًا', 'الكابلان يوصان بعد تثبيت القرص.', 'اترك كابل SATA للبيانات مفصولًا حتى تثبّت القرص في القفص، ثم وصّل الكابلين.'),
+    partReq('sataPower', 'removed', 'ترك كابل الطاقة مفصولًا', 'الكابلان يوصان بعد تثبيت القرص.', 'اترك كابل SATA للطاقة مفصولًا حتى تثبّت القرص في القفص، ثم وصّل الكابلين.'),
+  ],
   fans: [
     PANEL_OPEN_INSTALL,
     flagReq('fanScrewsOut', 'براغي المراوح مفكوكة (حالة التجهيز)', 'ثبّت المروحة في موضعها ثم اربط براغيها.', 'جهّز الموضع: فعّل علم «براغي مراوح الهيكل مفكوكة»، ثبّت المروحة في موضعها ثم اربط براغيها.'),
@@ -197,6 +224,14 @@ const INSTALL_REQS: Record<ComponentId, Requirement[]> = {
   gpuPower: [
     PANEL_OPEN_INSTALL,
     partReq('gpu', 'installed', 'وجود البطاقة مثبتة', 'طاقة البطاقة آخر خطوة في تركيبها.', 'ركّب بطاقة الرسوميات أولًا قبل توصيل كابل طاقتها.'),
+  ],
+  sataData: [
+    PANEL_OPEN_INSTALL,
+    partReq('hdd', 'installed', 'وجود القرص الميكانيكي مثبتًا', 'كابل البيانات يوصَل بعد تثبيت القرص.', 'ثبّت القرص الميكانيكي في قفصه أولًا ثم وصّل كابل SATA للبيانات حتى طقّة المزلاج.'),
+  ],
+  sataPower: [
+    PANEL_OPEN_INSTALL,
+    partReq('hdd', 'installed', 'وجود القرص الميكانيكي مثبتًا', 'طاقة القرص تُوصَل بعد تثبيته.', 'ثبّت القرص الميكانيكي في قفصه أولًا ثم وصّل كابل SATA للطاقة (الموصل الأعرض).'),
   ],
 };
 
@@ -286,7 +321,7 @@ export function applyRemove(s: SimulationState, id: ComponentId): SimulationStat
   if (id !== 'case') {
     parts[id] = 'removed'; // الهيكل لا يُفك — الحالة تبقى كما هي
   }
-  return { flags: { ...s.flags }, parts };
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
 }
 
 /** يركّب القطعة (تغيير parts[id] فقط — الأعلام لا تُعدَّل هنا). */
@@ -295,5 +330,42 @@ export function applyInstall(s: SimulationState, id: ComponentId): SimulationSta
   if (id !== 'case') {
     parts[id] = 'installed'; // الهيكل موجود دائمًا — لا تغيير
   }
-  return { flags: { ...s.flags }, parts };
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+}
+
+// ============ انتقالات آلة الحالات الثمانية ============
+
+/** فصل جزئي: installed → separated (القطعة ما زالت في مكانها والبراغي/المزالج مفتوحة) */
+export function applyDetach(s: SimulationState, id: ComponentId): SimulationState {
+  const parts: Record<ComponentId, PartStatus> = { ...s.parts };
+  parts[id] = 'separated';
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+}
+
+/** استخراج كلي: separated (أو أي حالة) → removed في صينية القطع */
+export function applyExtract(s: SimulationState, id: ComponentId): SimulationState {
+  const parts: Record<ComponentId, PartStatus> = { ...s.parts };
+  parts[id] = 'removed';
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+}
+
+/** التقاط من الصينية: removed → awaiting (AWAITING_INSTALL) */
+export function applyPrepare(s: SimulationState, id: ComponentId): SimulationState {
+  const parts: Record<ComponentId, PartStatus> = { ...s.parts };
+  parts[id] = 'awaiting';
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+}
+
+/** تلف تدريبي مقصود (وضع الاستكشاف): أي حالة → damaged */
+export function applyDamage(s: SimulationState, id: ComponentId): SimulationState {
+  const parts: Record<ComponentId, PartStatus> = { ...s.parts };
+  parts[id] = 'damaged';
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+}
+
+/** استبدال القطعة التالفة بأخرى سليمة من المخزن التعليمي: damaged → removed */
+export function applyRepair(s: SimulationState, id: ComponentId): SimulationState {
+  const parts: Record<ComponentId, PartStatus> = { ...s.parts };
+  parts[id] = 'removed';
+  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
 }

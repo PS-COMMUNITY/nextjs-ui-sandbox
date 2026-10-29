@@ -7,7 +7,7 @@
  * - applyToggleFlag: قلب العلم على نسخة جديدة بلا شروط — يُستدعى بعد نجاح canToggleFlag.
  */
 
-import { COMPONENT_IDS } from '../types';
+import { COMPONENT_IDS, isInstalled } from '../types';
 import type { ComponentId, MachineFlag, SimulationState, StepResult } from '../types';
 
 /** أسماء عربية للقطع — تظهر في رسالة «أول قطعة ناقصة» عند محاولة التشغيل. */
@@ -20,10 +20,13 @@ const PART_LABELS_AR: Record<ComponentId, string> = {
   gpu: 'بطاقة الرسوميات',
   psu: 'مزود الطاقة',
   ssd: 'قرص M.2',
+  hdd: 'القرص الميكانيكي',
   fans: 'مراوح الهيكل',
   atx24: 'كابل ATX 24-pin',
   eps: 'كابل EPS',
   gpuPower: 'كابل طاقة البطاقة',
+  sataData: 'كابل SATA للبيانات',
+  sataPower: 'كابل SATA للطاقة',
 };
 
 /** بطاقة تعريف عربية لكل علم: تسمية قصيرة + إرشاد تعليمي. */
@@ -113,17 +116,19 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
       if (s.flags.panelOpen) {
         return {
           ok: false,
-          messageAr: 'أعد تركيب القطع وأغلق الغطاء قبل التشغيل — الغطاء الجانبي ما زال مفتوحًا.',
+          messageAr: 'أغلق الغطاء الجانبي قبل التشغيل — الغطاء ما زال مفتوحًا.',
         };
       }
-      const missing = COMPONENT_IDS.find((id) => s.parts[id] === 'removed');
-      if (missing !== undefined) {
+      // القطعة النصف مفكوكة (فصل جزئي) تمنع التشغيل — أكمل استخراجها أو أعدها
+      const half = COMPONENT_IDS.find((id) => id !== 'case' && s.parts[id] === 'separated');
+      if (half !== undefined) {
         return {
           ok: false,
-          messageAr: `أعد تركيب القطع وأغلق الغطاء قبل التشغيل — أول قطعة ناقصة: ${PART_LABELS_AR[missing]}.`,
+          messageAr: `أكمل فك ${PART_LABELS_AR[half]} أو أعد تركيبها أولًا — لا يُشغّل الجهاز وقطعة نصف مفكوكة داخله.`,
         };
       }
-      return { ok: true, messageAr: 'التجميعة مكتملة والغطاء مغلق — يمكنك التشغيل.' };
+      // القطع المفقودة/التالفة لا تمنع الضغط على الزر — ستظهر نتيجتها في فحص POST (ثلاثة مصائر ممكنة)
+      return { ok: true, messageAr: 'بدء التشغيل — راقب شاشة العرض لقراءة نتيجة POST.' };
     }
     return { ok: true, messageAr: 'الإطفاء مسموح في أي وقت — وهو أول خطوة السلامة دائمًا.' };
   }
@@ -147,7 +152,7 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
 
   // مزلاج PCIe: يُغلق بعد تركيب البطاقة وكابل طاقتها كاملين (تعليميًا).
   if (f === 'pcieLatchOpen' && !turningOn) {
-    if (s.parts.gpu !== 'installed' || s.parts.gpuPower !== 'installed') {
+    if (!isInstalled(s.parts.gpu) || !isInstalled(s.parts.gpuPower)) {
       return { ok: false, messageAr: 'ثبّت البطاقة وكابل طاقتها قبل إغلاق المزلاج' };
     }
     return { ok: true, messageAr: 'البطاقة وكابل طاقتها مثبتان — أغلق المزلاج ليمسك البطاقة في الفتحة.' };
@@ -155,7 +160,7 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
 
   // مزالج RAM: تُغلق لتثبيت وحدة موجودة في الفتحة.
   if (f === 'ramClipsOpen' && !turningOn) {
-    if (s.parts.ram !== 'installed') {
+    if (!isInstalled(s.parts.ram)) {
       return { ok: false, messageAr: 'ثبّت الذاكرة أولًا — المزالج تُغلق لتثبيت وحدة موجودة داخل الفتحة.' };
     }
     return { ok: true, messageAr: 'اضغط الوحدة للأسفل حتى تسمع طقّة انغلاق المزالج على الطرفين.' };
@@ -163,7 +168,7 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
 
   // رافعة المقبس: تُخفض لتثبيت معالج موجود.
   if (f === 'cpuLeverOpen' && !turningOn) {
-    if (s.parts.cpu !== 'installed') {
+    if (!isInstalled(s.parts.cpu)) {
       return { ok: false, messageAr: 'ثبّت المعالج أولًا ثم اخفض الرافعة لتثبيته في المقبس.' };
     }
     return { ok: true, messageAr: 'اخفض الرافعة تحت القفل لتثبيت المعالج في المقبس.' };
@@ -182,5 +187,5 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
 export function applyToggleFlag(s: SimulationState, f: MachineFlag): SimulationState {
   const flags: Record<MachineFlag, boolean> = { ...s.flags };
   flags[f] = !s.flags[f];
-  return { flags, parts: { ...s.parts } };
+  return { flags, parts: { ...s.parts }, peripherals: { ...s.peripherals } };
 }

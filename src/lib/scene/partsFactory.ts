@@ -15,12 +15,13 @@
 import * as THREE from 'three';
 import type { ComponentId } from '../types';
 import type { SceneQuality, FlagVisuals, PartVisuals } from './visualTypes';
-import { BOARD, CASE, COLORS, MOUNTS, TRAY } from './layout';
+import { BOARD, CASE, COLORS, MOUNTS, PERIPH, TRAY } from './layout';
 import {
   brushedTexture,
   fanGrillTexture,
   frontBadgeTexture,
   gpuPlateTexture,
+  hddLabelTexture,
   m2LabelTexture,
   pcbTexture,
   psuLabelTexture,
@@ -129,9 +130,9 @@ function makeScrew(r: number, length: number, axis: Axis = 'y'): THREE.Mesh {
 }
 
 /** كابل أنبوبي على منحنى CatmullRom (نقاط محلية داخل مجموعة القطعة) */
-function makeCable(points: THREE.Vector3[], radius: number): THREE.Mesh {
+function makeCable(points: THREE.Vector3[], radius: number, color = 0x181d24): THREE.Mesh {
   const curve = new THREE.CatmullRomCurve3(points);
-  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, radius, 8, false), mat(0x181d24, 0.3, 0.6));
+  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, radius, 8, false), mat(color, 0.3, 0.6));
   if (castEnabled) m.castShadow = true;
   return m;
 }
@@ -1158,11 +1159,14 @@ function buildTrayTable(): THREE.Group {
     { id: 'gpuPower', size: [0.4, 0.45] },
     { id: 'cooler', size: [0.7, 0.95] },
     { id: 'ssd', size: [0.3, 0.9] },
+    { id: 'hdd', size: [1.1, 1.5] },
     { id: 'fans', size: [1.0, 1.0] },
     { id: 'psu', size: [1.5, 1.5] },
     { id: 'motherboard', size: [2.05, 2.4] },
     { id: 'atx24', size: [0.4, 0.6] },
     { id: 'eps', size: [0.35, 0.5] },
+    { id: 'sataData', size: [0.4, 0.5] },
+    { id: 'sataPower', size: [0.45, 0.5] },
   ];
   const markerMat = mat(0x24303a, 0.2, 0.8);
   for (const mk of markers) {
@@ -1215,6 +1219,264 @@ function buildTrayTable(): THREE.Group {
 }
 
 // ============================================================
+// القرص الميكانيكي 3.5" (dynamic.hdd) — علبة معدنية وملصق ومنفذا SATA خلفيان
+// ============================================================
+
+function buildHdd(): THREE.Group {
+  scope('hdd');
+  const g = new THREE.Group();
+  g.name = 'part-hdd';
+  const bodyMat = mat(COLORS.aluminum, 0.75, 0.38, { map: brushedTexture('#9aa3ad') });
+  g.add(box(1.02, 0.26, 1.47, bodyMat, 0, 0, 0, true, true)); // الجسم
+  // إطار داخلي أغمق أعلى/أسفل (تفصيل مسطح)
+  g.add(box(0.94, 0.02, 1.39, mat(0x6f7780, 0.7, 0.45), 0, 0.135, 0, false));
+  g.add(box(0.94, 0.02, 1.39, mat(0x6f7780, 0.7, 0.45), 0, -0.135, 0, false));
+  // ملصق علوي
+  const labelT = hddLabelTexture();
+  if (labelT) {
+    g.add(plane(0.86, 1.2, mat(0xffffff, 0.25, 0.6, { map: labelT }), 'y', 0, 0.15, 0.02));
+  }
+  // منفدا SATA على الوجه الخلفي (-Z): بيانات (صغير) + طاقة (أعرض) بأطراف ذهبية
+  const gold = mat(0xc9a23f, 0.9, 0.3);
+  g.add(box(0.06, 0.1, 0.06, mat(0x0d1116, 0.3, 0.55), -0.25, 0, -0.745, false));
+  g.add(box(0.05, 0.09, 0.04, gold, -0.25, 0, -0.772, false)); // بيانات
+  g.add(box(0.14, 0.1, 0.06, mat(0x0d1116, 0.3, 0.55), -0.02, 0, -0.745, false));
+  g.add(box(0.13, 0.09, 0.04, gold, -0.02, 0, -0.772, false)); // طاقة
+  // ثقوب براغي الأركان الأربعة
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(cyl(0.024, 0.012, mat(0x0d1116, 0.3, 0.6), 'y', sx * 0.45, 0.135, sz * 0.67, false));
+    }
+  }
+  setComponentId(g, 'hdd');
+  return g;
+}
+
+// ============================================================
+// كابل SATA للبيانات (dynamic.sataData) — أحمر رفيع من اللوحة إلى خلفية القرص
+// ============================================================
+
+function buildSataData(): THREE.Group {
+  scope('sataData');
+  const g = new THREE.Group();
+  g.name = 'part-sata-data';
+  // موصل الطرف عند منفذ اللوحة
+  g.add(box(0.05, 0.09, 0.1, mat(0x8c1d1d, 0.3, 0.55), 0, 0, 0, true, true));
+  g.add(box(0.035, 0.07, 0.02, mat(0xc9a23f, 0.9, 0.3), -0.04, 0, -0.02, false));
+  // كابل أحمر رفيع: منفذ اللوحة (1.78,2.2,2.35) → انحناء لطيف → خلفية القرص (1.05,0.8,2.8)
+  g.add(makeCable(cablePoints(MOUNTS.sataData, [
+    [1.78, 2.2, 2.35],
+    [1.6, 1.45, 2.62],
+    [1.3, 0.95, 2.66],
+    [1.12, 0.8, 2.72],
+  ]), 0.022, 0x8c1d1d));
+  setComponentId(g, 'sataData');
+  return g;
+}
+
+// ============================================================
+// كابل SATA للطاقة (dynamic.sataPower) — أسود أعرض من PSU إلى خلفية القرص
+// ============================================================
+
+function buildSataPower(): THREE.Group {
+  scope('sataPower');
+  const g = new THREE.Group();
+  g.name = 'part-sata-power';
+  g.add(box(0.13, 0.1, 0.12, mat(COLORS.black, 0.3, 0.5), 0, 0, 0, true, true));
+  g.add(box(0.11, 0.08, 0.02, mat(0xc9a23f, 0.9, 0.3), -0.06, 0, -0.03, false));
+  g.add(makeCable(cablePoints(MOUNTS.sataPower, [
+    [1.28, 0.78, 2.9],
+    [1.24, 0.76, 2.6],
+    [1.12, 0.8, 2.5],
+  ]), 0.032, 0x11161c));
+  setComponentId(g, 'sataPower');
+  return g;
+}
+
+// ============================================================
+// الطرفيات: الشاشة + لوحة المفاتيح + الفأرة (الجلسة 4 — المواصفة §5)
+// ليست قطع PC — تُنقر عبر callbacks.onPeripheral
+// ============================================================
+
+function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
+  scope('monitor');
+  const g = new THREE.Group();
+  g.name = 'periph-monitor';
+  g.userData['peripheral'] = 'monitor';
+
+  // قاعدة + عمود
+  g.add(box(2.0, 0.1, 1.3, mat(COLORS.metalDark, 0.6, 0.45), 0, 0.05, 0, true, true));
+  g.add(box(0.34, 1.35, 0.22, mat(COLORS.metalDark, 0.6, 0.45), 0, 0.75, -0.18, true));
+  // الإطار
+  const bezelW = PERIPH.screenW + 0.22;
+  const bezelH = PERIPH.screenH + 0.2;
+  const bezel = box(bezelW, bezelH, 0.14, mat(0x14181e, 0.4, 0.5), 0, 0, 0, true, true);
+  bezel.position.set(PERIPH.screenCenterLocal[0], PERIPH.screenCenterLocal[1] + 0.05, PERIPH.screenCenterLocal[2] - 0.07);
+  g.add(bezel);
+  // لمبة طاقة صغيرة على الحافة السفلية
+  const led = box(0.05, 0.05, 0.02, mat(COLORS.green, 0.2, 0.5, { emissive: 0x22c55e, emissiveIntensity: 0.9 }), -bezelW / 2 + 0.22, PERIPH.screenCenterLocal[1] + 0.05 - bezelH / 2 + 0.07, 0.08, false);
+  g.add(led);
+
+  // سطح العرض — مادة أساسية يستبدلها PCScene بنسيج الرسّام
+  const screenMat = new THREE.MeshBasicMaterial({ color: 0x05070c });
+  const screen = new THREE.Mesh(new THREE.PlaneGeometry(PERIPH.screenW, PERIPH.screenH), screenMat);
+  screen.position.set(PERIPH.screenCenterLocal[0], PERIPH.screenCenterLocal[1] + 0.05, PERIPH.screenCenterLocal[2]);
+  screen.name = 'monitor-screen';
+  g.add(screen);
+
+  // زر التشغيل (قابل للنقر) أسفل يمين الإطار
+  const btn = box(0.12, 0.12, 0.05, mat(0x2a323c, 0.5, 0.4), bezelW / 2 - 0.2, PERIPH.screenCenterLocal[1] + 0.05 - bezelH / 2 + 0.09, 0.075, false);
+  btn.userData['peripheral'] = 'monitor-power';
+  g.add(btn);
+
+  // كابل إشارة من الشاشة نحو البطاقة (يُخفى عند فصل الكابل — يتولاه PCScene)
+  const cableGroup = new THREE.Group();
+  cableGroup.name = 'monitor-cable';
+  const pts = cablePoints([0, 0, 0], [
+    [PERIPH.monitorPos[0] - 0.9, 0.95, PERIPH.monitorPos[2] - 0.2],
+    [PERIPH.monitorPos[0] - 2.2, 0.92, PERIPH.monitorPos[2] - 1.6],
+    [2.6, 0.9, 3.2],
+    [1.4, 0.9, 2.4],
+  ]);
+  cableGroup.add(makeCable(pts, 0.03, 0x14181e));
+  g.add(cableGroup);
+
+  // دوران شاشة بسيط حول Y مستبعد — لكن نضيف اهتزاز LED إلى spinners ليومض؟ لا — spinners للمراوح فقط.
+  void spinners;
+
+  return g;
+}
+
+/** أحرف لوحة المفاتيح — صفوف علوية ثم سفلية + مفاتيح خاصة */
+const KEY_ROWS: string[][] = [
+  ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+  ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+  ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+  ['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
+];
+
+function buildKeyboard(): THREE.Group {
+  scope('keyboard');
+  const g = new THREE.Group();
+  g.name = 'periph-keyboard';
+  g.userData['peripheral'] = 'keyboard';
+
+  // الجسم بميل خفيف (الخلفية أعلى)
+  const base = box(4.7, 0.16, 1.75, mat(0x1c222a, 0.35, 0.55), 0, 0.08, 0, true, true);
+  base.rotation.x = -0.06;
+  g.add(base);
+
+  const keyGeo = new THREE.BoxGeometry(0.36, 0.09, 0.36);
+  const keyMat = mat(0x39434e, 0.3, 0.5);
+  const wideGeo = new THREE.BoxGeometry(0.9, 0.09, 0.36);
+  const pitch = 0.42;
+  const rowsZ = [0.62, 0.2, -0.22, -0.64];
+
+  KEY_ROWS.forEach((row, r) => {
+    const startX = -((row.length - 1) * pitch) / 2 - (r >= 2 ? 0.21 : 0);
+    row.forEach((ch, i) => {
+      const key = new THREE.Mesh(keyGeo, keyMat);
+      key.position.set(startX + i * pitch, 0.19, rowsZ[r]);
+      key.rotation.x = -0.06;
+      key.userData['peripheral'] = 'keyboard';
+      key.userData['key'] = ch;
+      g.add(key);
+    });
+  });
+
+  // صف سفلي: مسافة + مسح + إدخال + تنظيف
+  const specials: Array<{ label: string; wide: boolean; x: number }> = [
+    { label: 'SPACE', wide: true, x: -0.75 },
+    { label: 'BACK', wide: false, x: 0.55 },
+    { label: 'ENTER', wide: false, x: 0.97 },
+    { label: 'CLR', wide: false, x: 1.39 },
+  ];
+  for (const sp of specials) {
+    const key = new THREE.Mesh(sp.wide ? wideGeo : keyGeo, mat(0x2a323c, 0.3, 0.5));
+    key.position.set(sp.x, 0.19, -1.06);
+    key.rotation.x = -0.06;
+    key.userData['peripheral'] = 'keyboard';
+    key.userData['key'] = sp.label;
+    g.add(key);
+  }
+  return g;
+}
+
+function buildMouse(): THREE.Group {
+  scope('mouse');
+  const g = new THREE.Group();
+  g.name = 'periph-mouse';
+  g.userData['peripheral'] = 'mouse';
+
+  // جسم بيضاوي
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 12), mat(0x1c222a, 0.35, 0.55));
+  body.scale.set(1, 0.55, 1.45);
+  body.position.y = 0.16;
+  body.castShadow = castEnabled;
+  g.add(body);
+  // زرا يسار/يمين (قابلان للنقر)
+  for (const side of [-1, 1]) {
+    const btn = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.1, 0.5), mat(0x232a33, 0.35, 0.5));
+    btn.position.set(side * 0.15, 0.27, -0.28);
+    btn.userData['peripheral'] = 'mouse';
+    btn.userData['btn'] = side < 0 ? 'left' : 'right';
+    g.add(btn);
+  }
+  // عجلة
+  const wheel = cyl(0.05, 0.1, mat(0x39434e, 0.4, 0.45), 'x', 0, 0.3, -0.28, false);
+  g.add(wheel);
+  return g;
+}
+
+// ============================================================
+// أسهم اتجاه تدفق الهواء (تُظهر/تُخفى عبر setAirflow)
+// ============================================================
+
+function makeArrow(len: number, matArrow: THREE.Material): THREE.Group {
+  const g = new THREE.Group();
+  const shaft = cyl(0.045, len - 0.16, matArrow, 'z', 0, 0, 0, false);
+  g.add(shaft);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.18, 10), matArrow);
+  head.rotation.x = -Math.PI / 2; // رأس نحو -Z
+  head.position.z = -(len - 0.16) / 2 - 0.09;
+  g.add(head);
+  return g;
+}
+
+function buildAirflow(): THREE.Group {
+  scope('airflow');
+  const g = new THREE.Group();
+  g.name = 'airflow-arrows';
+  g.visible = false;
+  const matArrow = mat(0x22d3ee, 0.2, 0.5, { emissive: 0x22d3ee, emissiveIntensity: 0.55, transparent: true, opacity: 0.85 });
+
+  // دخول من الأمام (+Z → داخل الهيكل): سهمان عند مستوى المراوح الأمامية
+  for (const y of [1.5, 2.9]) {
+    const a = makeArrow(1.1, matArrow);
+    a.position.set(1.05, y, 5.15);
+    g.add(a);
+  }
+  // خروج من الخلف (نحو -Z خارج الهيكل)
+  for (const y of [2.2, 3.9]) {
+    const a = makeArrow(1.0, matArrow);
+    a.position.set(1.05, y, 0.05);
+    g.add(a);
+  }
+  // سهم داخل مروحة المعالج: من الأمام نحو المبرد
+  const cpu = makeArrow(0.8, matArrow);
+  cpu.position.set(1.05, 3.45, 1.85);
+  cpu.rotation.y = Math.PI / 2; // يتجه نحو -X (داخل نحو المبرد)
+  g.add(cpu);
+  // خروج مزود الطاقة لأسفل-خلف
+  const psu = makeArrow(0.7, matArrow);
+  psu.rotation.x = Math.PI / 2; // رأس نحو +Y؟ لا: نريد نزولًا → اقلبه
+  psu.rotation.x = -Math.PI / 2; // رأس نحو -Y (داخل نحو الأسفل عند PSU)
+  psu.position.set(1.05, 0.85, 0.72);
+  g.add(psu);
+  return g;
+}
+
+// ============================================================
 // التجميع النهائي
 // ============================================================
 
@@ -1240,11 +1502,18 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   const gpu = buildGpu(flags, spinners);
   const psu = buildPsu(flags);
   const ssd = buildSsd();
+  const hdd = buildHdd();
   const fans = buildFans(flags, spinners);
   const atx24 = buildAtx24();
   const eps = buildEps();
   const gpuPower = buildGpuPower();
+  const sataData = buildSataData();
+  const sataPower = buildSataPower();
   const trayTable = buildTrayTable();
+  const monitor = buildMonitor(spinners);
+  const keyboard = buildKeyboard();
+  const mouse = buildMouse();
+  const airflow = buildAirflow();
 
   // مواضع التثبيت الابتدائية (المدير يعيد تموضعها عند الفك/التفجير)
   const place = (grp: THREE.Group, id: ComponentId): void => {
@@ -1257,20 +1526,38 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   place(gpu, 'gpu');
   place(psu, 'psu');
   place(ssd, 'ssd');
+  place(hdd, 'hdd');
   place(fans, 'fans');
   place(atx24, 'atx24');
   place(eps, 'eps');
   place(gpuPower, 'gpuPower');
+  place(sataData, 'sataData');
+  place(sataPower, 'sataPower');
 
   // مجموعة placeholder للمكوّن 'case' (الهيكل نفسه لا يُحرك أبدًا — فارغة للأمان)
   const caseAnchor = new THREE.Group();
   caseAnchor.name = 'case-anchor';
   place(caseAnchor, 'case');
 
+  // ===== الطرفيات على المكتب =====
+  monitor.position.set(...PERIPH.monitorPos);
+  monitor.rotation.y = PERIPH.monitorRotY;
+  keyboard.position.set(...PERIPH.keyboardPos);
+  keyboard.rotation.y = PERIPH.keyboardRotY;
+  mouse.position.set(...PERIPH.mousePos);
+  mouse.rotation.y = PERIPH.mouseRotY;
+
+  // حصيرة مكتب تحت الطرفيات (تأطير بصري لطيف)
+  const deskMat = box(PERIPH.matSize[0], 0.012, PERIPH.matSize[1], mat(0x182029, 0.2, 0.85), PERIPH.matCenter[0], PERIPH.matCenter[1], PERIPH.matCenter[2], false);
+  deskMat.receiveShadow = castEnabled;
+
   const root = new THREE.Group();
   root.name = 'pc-parts-root';
   root.add(caseShell, sidePanel, trayTable, caseAnchor);
-  root.add(motherboard, cpu, cooler, ram, gpu, psu, ssd, fans, atx24, eps, gpuPower);
+  root.add(motherboard, cpu, cooler, ram, gpu, psu, ssd, hdd, fans, atx24, eps, gpuPower, sataData, sataPower);
+  root.add(monitor, keyboard, mouse);
+  root.add(airflow);
+  root.add(deskMat);
 
   const dynamic: Record<ComponentId, THREE.Group> = {
     case: caseAnchor,
@@ -1281,11 +1568,14 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
     gpu,
     psu,
     ssd,
+    hdd,
     fans,
     atx24,
     eps,
     gpuPower,
+    sataData,
+    sataPower,
   };
 
-  return { root, dynamic, caseShell, sidePanel, flags, spinners };
+  return { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, keyboard, mouse, airflow };
 }

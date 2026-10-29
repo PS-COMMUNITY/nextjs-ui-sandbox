@@ -397,6 +397,36 @@ export function m2LabelTexture(): THREE.CanvasTexture | null {
   return t;
 }
 
+/** ملصق القرص الميكانيكي 3.5 بوصة */
+export function hddLabelTexture(): THREE.CanvasTexture | null {
+  const key = 'hdd-label';
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  const made = canvas2d(256, 160);
+  if (!made) {
+    cache.set(key, null);
+    return null;
+  }
+  const [c, ctx] = made;
+  // خلفية قرص معدنية فاتحة مع مساحة ملصق
+  ctx.fillStyle = '#b7bcc3';
+  ctx.fillRect(0, 0, 256, 160);
+  ctx.fillStyle = '#1e242c';
+  ctx.fillRect(10, 10, 236, 140);
+  ctx.fillStyle = '#e8eaed';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 30px sans-serif';
+  ctx.fillText('1TB HDD', 128, 52);
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#9aa3ad';
+  ctx.fillText('3.5"  7200 RPM', 128, 86);
+  ctx.font = '16px sans-serif';
+  ctx.fillText('SATA 6Gb/s  •  TRAINING UNIT', 128, 116);
+  const t = finish(c);
+  cache.set(key, t);
+  return t;
+}
+
 /** شعار واجهة أمامية عام — "PC LAB" */
 export function frontBadgeTexture(): THREE.CanvasTexture | null {
   const key = 'front-badge';

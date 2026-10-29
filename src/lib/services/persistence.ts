@@ -10,11 +10,13 @@
 
 import { APP_VERSION } from '../types';
 import type { SessionEvent, SimulationState } from '../types';
+import type { TechSession } from '../simulation/technicianEngine';
 
 /** شكل البيانات المحفوظة في التخزين المحلي. */
 export interface PersistShape {
   version: string;
   simulation: SimulationState;
+  tech: TechSession | null;
   logs: SessionEvent[];
   quizScores: Record<string, { score: number; at: number }>;
   missionsDone: string[];
@@ -90,7 +92,19 @@ export function loadAll(): PersistShape | null {
     if (data.settings.quality !== 'low' && data.settings.quality !== 'medium' && data.settings.quality !== 'high') return null;
     if (typeof data.savedAt !== 'number' || !Number.isFinite(data.savedAt)) return null;
 
-    return data as PersistShape;
+    // tech اختياري (توافقًا مع نسخ قديمة من نفس الإصدار) — يُدمج في المتجر كـ null
+    const merged: PersistShape = {
+      version: data.version,
+      simulation: data.simulation,
+      tech: (data as { tech?: TechSession | null }).tech ?? null,
+      logs: data.logs,
+      quizScores: data.quizScores,
+      missionsDone: data.missionsDone,
+      lessonsRead: data.lessonsRead,
+      settings: data.settings,
+      savedAt: data.savedAt,
+    };
+    return merged;
   } catch {
     return null;
   }

@@ -96,3 +96,37 @@
 ## قرار SPA داخل مسار واحد
 
 رغم App Router في Next.js 16، التطبيق **صفحة واحدة**: `src/app/page.tsx` يعرض `AppShell`، والتنقل بين الشاشات العشر عبر `store.screen` (union نوع `ScreenId`) مع عرض شرطي `{screen === 'lab' && <LabScreen />}`. المبرر: حالة المحاكاة والمشهد ثلاثي الأبعاد حية ومشتركة بين كل الشاشات — أي تنقل URL حقيقي يقتل مثيل WebGL ويفقد السياق، بينما التبديل الداخلي يحفظ المشهد ويجعل كل الشاشات (كتالوج/تقارير/تشخيص) تقرأ نفس `SimulationState` لحظيًا.
+
+---
+
+## الجلسة الرابعة (v3.0.0) — الطبقات المضافة وفق التوجيه الرئيسي
+
+```
+src/lib/
+├── types.ts                  ← 15 ComponentId (+hdd/sataData/sataPower)، PartStatus بخمس حالات،
+│                                AssemblyState الثمانية + assemblyStateOf()، PeripheralState، MonitorScreen
+├── data/
+│   ├── catalog.ts            ← +3 سجلات (HDD 3.5"، كابل SATA بيانات، كابل SATA طاقة)
+│   └── faults.ts             ★ محرك الأعطال: 14 عطلًا (بطاقة طلب/فرضية/أدلة/apply/fix/isFixed/preCode/preScreen)
+├── simulation/
+│   ├── machineFlags.ts       ← بوابة تشغيل واقعية: القطع الناقصة لا تمنع الزر (تظهر في POST)؛ الفصل الجزئي يمنع
+│   ├── assemblyEngine.ts     ← +انتقالات الثماني: applyDetach/Extract/Prepare/Damage/Repair + isCable
+│   ├── postEngine.ts         ← +قواعد: psuDead، ramIncompatible، fans، (ssd|HDD+كابلي SATA) كأقراص إقلاع بديلة
+│   ├── monitorEngine.ts      ★ حالات الشاشة الثماني (منطق نقّي — المصدر الوحيد لرسّام الشاشة)
+│   ├── technicianEngine.ts   ★ جلسة الفني: مراحل تسع + بوابات نقية + أدوات + فرضيات (14 حقيقية + 3 مشتتات)
+│   └── faultTests.ts         ★ 14×5 فحص آلي (نقاء/POST/شاشة/isFixed/مصير سليم) — يُعرض في شاشة التشخيص
+├── scene/
+│   ├── layout.ts             ← MOUNTS/TRAY/EXPLODE للثلاثة الجدد + PERIPH (موضع الطرفيات) + MONITOR_CAMERA
+│   ├── partsFactory.ts       ← +buildHdd/buildSataData/buildSataPower/buildMonitor/buildKeyboard/buildMouse/buildAirflow
+│   ├── screenTexture.ts      ★ رسّام CanvasTexture للحالات الثماني (بما فيها دفتر ملاحظات عربي RTL)
+│   └── PCScene.ts            ← التقاط الطرفيات (peripheral/userData)، دوران مشروط بالطاقة، توهج التلف،
+│                                طفو «بانتظار التركيب»، فصل جزئي = إزاحة 22% من متجه التفجير، focusMonitor
+├── store/labStore.ts         ← +bootStartedAt/notepad/airflowVisible/tech + أفعال آلة الثماني وجلسة الفني
+└── services/persistence.ts   ← +tech في PersistShape (مع توافق خلفي اختياري)
+```
+
+**المصدر الوحيد للحقيقة**: `SimulationState` في المتجر — المشهد 3D والتشخيص ولوحة بوابة جلسة الفني يقرؤونها كلها؛ `assemblyStateOf` يشتق الحالة الثمانية المعروضة ولا تُخزّن أبدًا.
+
+**قاعدة الكابلات**: الكابلات الخمسة (atx24/eps/gpuPower/sataData/sataPower) تُفصل وتوصَل بحركة واحدة، ومساراتها أنابيب CatmullRom من نقاط عالمية محددة — لا كابل يطفو في الفراغ، وكابل إشارة الشاشة يختفي كليًا عند فصله.
+
+**قرار PSU**: فك PSU متاح كقطعة (بالبراغي والاعتماديات) لكن فتح جسم PSU غير موجود إطلاقًا في أي مسار — والعطل F12 يُحل بالاستبدال من المخزن التعليمي فقط.

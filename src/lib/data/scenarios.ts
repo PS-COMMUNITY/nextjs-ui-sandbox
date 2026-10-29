@@ -14,10 +14,11 @@ export interface ScenarioDef {
   apply: (s: SimulationState) => SimulationState;
 }
 
-/** نسخة سطحية ثنائية المستوى كافية لبنية SimulationState (flags + parts). */
+/** نسخة سطحية ثنائية المستوى كافية لبنية SimulationState (flags + parts + peripherals). */
 const copyState = (s: SimulationState): SimulationState => ({
   flags: { ...s.flags },
   parts: { ...s.parts },
+  peripherals: { ...s.peripherals },
 });
 
 export const SCENARIOS: ScenarioDef[] = [

@@ -18,6 +18,7 @@ import {
   ListChecks,
   Save,
   ShieldCheck,
+  Stethoscope,
   TriangleAlert,
 } from 'lucide-react';
 
@@ -82,13 +83,14 @@ export default function HomeScreen() {
           </div>
           <CardDescription className="max-w-3xl space-y-2 pt-2 text-sm leading-relaxed md:text-base">
             <p>
-              منصة تعليمية تفاعلية لطلاب تخصص صيانة الحاسوب: استكشف القطع الداخلية، طبّق بروتوكول
-              السلامة خطوة بخطوة، وتمرّن على الفك والتركيب والتشخيص داخل مختبر ثلاثي الأبعاد آمن
-              الخطأ.
+              منصة تعليمية تفاعلية لطلاب تخصص صيانة الحاسوب: 15 مكوّنًا ثلاثي الأبعاد قابلًا للفك
+              والتركيب بآلة حالات كاملة، شاشة عرض افترائية بحالاتها الثماني (لا إشارة، رسائل POST،
+              إعدادات UEFI، نظام مبسّط تكتب فيه بلوحة المفاتيح ثلاثية الأبعاد)، وجلسة فني ذو مراحل
+              تسع من بطاقة الطلب حتى تقرير التسليم.
             </p>
             <p>
-              كل السيناريوهات مُحاكاة تعليميًا على منصة مرجعية موحّدة، والهدف ترسيخ التسلسل الصحيح
-              قبل التعامل مع أي جهاز حقيقي.
+              14 عطلًا تعليميًا مبنيًا على محرك أعطال مُختبَر آليًا (14/14)، وثلاثة مصائر تشغيل
+              حقيقية: فشل POST، أو POST ناجح بلا جهاز إقلاع، أو إقلاع سليم إلى النظام.
             </p>
             <p className="font-medium text-amber-700 dark:text-amber-400">
               المختبر مكمل للتدريب العملي الحقيقي في ورشة المعلم — وليس بديلًا عنه.
@@ -99,6 +101,10 @@ export default function HomeScreen() {
           <Button size="lg" onClick={() => setScreen('lab')}>
             ادخل المختبر ثلاثي الأبعاد
             <ArrowLeft className="size-4" />
+          </Button>
+          <Button size="lg" variant="outline" onClick={() => setScreen('tech')}>
+            <Stethoscope className="size-4 text-sky-600 dark:text-sky-400" />
+            ابدأ جلسة فني (المراحل التسع)
           </Button>
           <Button size="lg" variant="outline" onClick={() => startMission('m-safety')}>
             <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-400" />
@@ -209,12 +215,28 @@ export default function HomeScreen() {
               <BookOpen className="size-4 text-sky-500" />
               اختصارات التعلم
             </CardTitle>
-            <CardDescription>انتقل مباشرة إلى أقسام التدريب الأربعة.</CardDescription>
+            <CardDescription>انتقل مباشرة إلى أقسام التدريب الخمسة.</CardDescription>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-2">
             <Button variant="outline" className="justify-start" onClick={() => setScreen('lab')}>
               <Boxes className="size-4 text-sky-500" />
               المختبر
+            </Button>
+            <Button
+              variant="outline"
+              className="justify-start"
+              onClick={() => setScreen('tech')}
+            >
+              <Stethoscope className="size-4 text-sky-500" />
+              جلسة الفني
+            </Button>
+            <Button
+              variant="outline"
+              className="justify-start"
+              onClick={() => setScreen('diagnostics')}
+            >
+              <Activity className="size-4 text-sky-500" />
+              الأعطل والاختبارات
             </Button>
             <Button
               variant="outline"

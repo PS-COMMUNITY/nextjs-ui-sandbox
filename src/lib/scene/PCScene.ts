@@ -17,9 +17,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
-import { COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MOUNTS, TRAY } from './layout';
-import type { FlagVisuals, PCSceneCallbacks, PartVisuals, SceneQuality } from './visualTypes';
-import { COMPONENT_IDS } from '../types';
+import { createScreenPainter, type ScreenPainter } from './screenTexture';
+import { computeMonitorView } from '../simulation/monitorEngine';
+import { COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY } from './layout';
+import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
+import { COMPONENT_IDS, isInstalled } from '../types';
 import type { ComponentId, MachineFlag, SimulationState } from '../types';
 
 // ======================================================================
@@ -46,6 +48,14 @@ const TONE_EXPOSURE = 1.12;     // تعريض النغمة السينمائية
 const LED_INTENSITY = 1.2;      // شدة توهج لمبة الطاقة
 const CLICK_MAX_DIST_SQ = 36;   // (6px)² — أقصى مسافة بين down/up تُعد نقرة
 const HOVER_THROTTLE_MS = 100;  // أقصى معدل لفحص التحويم
+const MONITOR_REDRAW_MS = 400;  // معدل إعادة رسم نسيج الشاشة الافتراضية
+const DAMAGED_HEX = 0xef4444;   // لون توهج القطعة التالفة تدريبيًا
+
+/** نتيجة التقاط النقرة: قطعة PC أو طرفية خارجية */
+type PickedInfo =
+  | { type: 'part'; id: ComponentId }
+  | { type: 'periph'; kind: PeripheralKind; detail?: string }
+  | null;
 
 // ======================================================================
 // الأنواع الداخلية
@@ -184,6 +194,18 @@ export class PCScene {
   private lastState: SimulationState | null = null;
   private camTween: CamTween | null = null;
 
+  // ---- الشاشة الافتراضية والطرفيات ----
+  private painter: ScreenPainter | null = null;
+  private bootStartedAt: number | null = null;
+  private notepad = '';
+  private spinning = false;
+  private lastMonitorDrawAt = 0;
+  private monitorCableGroup: THREE.Object3D | null = null;
+
+  // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
+  private damagedOriginals = new Map<THREE.Mesh, SavedEmissive>();
+  private damagedIds = new Set<ComponentId>();
+
   // ---- خرائط استعادة القيم الأصلية ----
   private emissiveOriginals = new Map<THREE.Mesh, SavedEmissive>();
   private shellOriginals = new Map<THREE.Material, SavedMaterial>();
@@ -273,6 +295,22 @@ export class PCScene {
       this.initDynamicState(visuals);
       this.initFlagRecords(visuals);
 
+      // (الجلسة 4) الشاشة الافتراضية: نسيج ديناميكي + مرجع كابل الإشارة
+      this.painter = createScreenPainter();
+      if (this.painter) {
+        const screenMesh = visuals.monitor.getObjectByName('monitor-screen');
+        if (screenMesh instanceof THREE.Mesh) {
+          const smat = screenMesh.material;
+          if (!Array.isArray(smat) && 'map' in smat) {
+            (smat as THREE.MeshBasicMaterial).map = this.painter.texture;
+            (smat as THREE.MeshBasicMaterial).color.set(0xffffff);
+            (smat as THREE.MeshBasicMaterial).needsUpdate = true;
+          }
+        }
+        this.drawMonitor(true);
+      }
+      this.monitorCableGroup = visuals.monitor.getObjectByName('monitor-cable') ?? null;
+
       // (7)(15) مستمعو المؤشر + مراقب الحجم
       renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
       renderer.domElement.addEventListener('pointerup', this.onPointerUp);
@@ -337,9 +375,41 @@ export class PCScene {
   syncState(s: SimulationState): void {
     if (this.blocked) return;
     // نسخة دفاعية حتى لا تؤثر طفرات المتصل على أهدافنا
-    this.lastState = { flags: { ...s.flags }, parts: { ...s.parts } };
+    this.lastState = {
+      flags: { ...s.flags },
+      parts: { ...s.parts },
+      peripherals: { ...s.peripherals },
+    };
     this.recomputeTargets();
     this.applyFlags(s.flags, true);
+    this.updateRuntimeVisuals(s);
+    this.drawMonitor(true);
+  }
+
+  /** ساعة التمهيد: يضبطها المتجر لحظة ضغط زر التشغيل/الإطفاء */
+  setBootClock(startedAt: number | null): void {
+    if (this.blocked) return;
+    this.bootStartedAt = startedAt;
+    this.drawMonitor(true);
+  }
+
+  /** نص دفتر الملاحظات الافتراضي (نقرات لوحة المفاتيح ثلاثية الأبعاد) */
+  setNotepad(text: string): void {
+    if (this.blocked) return;
+    this.notepad = text;
+    this.drawMonitor(true);
+  }
+
+  /** إظهار/إخفاء أسهم تدفق الهواء */
+  setAirflow(on: boolean): void {
+    if (this.blocked) return;
+    this.visuals.airflow.visible = on;
+  }
+
+  /** توجيه الكاميرا نحو الشاشة الافتراضية */
+  focusMonitor(): void {
+    if (this.blocked) return;
+    this.startCamTween(new THREE.Vector3(...MONITOR_CAMERA.pos), new THREE.Vector3(...MONITOR_CAMERA.target), 0.7);
   }
 
   /** (8) إبراز مكوّن بتعديل emissive — إبراز واحد نشط في كل مرة */
@@ -427,6 +497,9 @@ export class PCScene {
     dom?.remove();
     this.emissiveOriginals.clear();
     this.shellOriginals.clear();
+    this.damagedOriginals.clear();
+    this.painter?.dispose();
+    this.painter = null;
   }
 
   // ====================================================================
@@ -449,9 +522,11 @@ export class PCScene {
     const dt = Math.min(this.clock.getDelta(), 0.05); // حماية من قفزات التبويبات الخاملة
     const k = 1 - Math.exp(-LERP_RATE * dt);
 
-    // دوران شفرات المراوح حول محورها المحفوظ
-    for (const spinner of this.spinners) {
-      spinner.obj.rotateOnAxis(spinner.axis, SPIN_SPEED * dt);
+    // دوران شفرات المراوح حول محورها المحفوظ — فقط والجهاز يعمل فعلاً
+    if (this.spinning) {
+      for (const spinner of this.spinners) {
+        spinner.obj.rotateOnAxis(spinner.axis, SPIN_SPEED * dt);
+      }
     }
 
     // اقتراب القطع نحو أهدافها (الموضع lerp والدوران slerp) — عدا الهيكل الثابت
@@ -460,6 +535,16 @@ export class PCScene {
       const part = this.parts[id];
       part.group.position.lerp(part.targetPos, k);
       part.group.quaternion.slerp(part.targetQuat, k);
+    }
+
+    // تطفو القطعة الملتقطة (awaiting) فوق الصينية بلطف — إشارة بصرية لجاهزية التركيب
+    const elapsed = this.clock.getElapsedTime();
+    for (const id of COMPONENT_IDS) {
+      if (id === 'case') continue;
+      if (this.lastState && this.lastState.parts[id] === 'awaiting') {
+        const part = this.parts[id];
+        part.group.position.y = part.trayPos.y + 0.16 + Math.sin(elapsed * 3) * 0.04;
+      }
     }
 
     // تنعيم دوران الغطاء الجانبي نحو الهدف
@@ -477,6 +562,12 @@ export class PCScene {
     }
 
     this.controls.update();
+
+    // إعادة رسم نسيج الشاشة الافتراضية بمعدل مقيد
+    if (this.painter && nowMs() - this.lastMonitorDrawAt >= MONITOR_REDRAW_MS) {
+      this.drawMonitor(false);
+    }
+
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -491,9 +582,24 @@ export class PCScene {
     for (const id of COMPONENT_IDS) {
       if (id === 'case') continue;
       const part = this.parts[id];
-      if (parts && parts[id] === 'removed') {
+      const status: string | undefined = parts ? parts[id] : undefined;
+      if (status === 'removed' || status === 'damaged') {
         part.targetPos.copy(part.trayPos);
         part.targetRot.copy(part.trayRot);
+        if (status === 'damaged') {
+          // القطعة التالفة تستلقي مائلة على الصينية
+          part.targetRot.z += 0.35;
+        }
+      } else if (status === 'awaiting') {
+        // ملتقطة من الصينية — ترتفع قليلاً (وتطفو في حلقة الرسم)
+        part.targetPos.copy(part.trayPos);
+        part.targetPos.y += 0.16;
+        part.targetRot.copy(part.trayRot);
+      } else if (status === 'separated') {
+        // فصل جزئي: ما زالت في موضعها مع إزاحة صغيرة نحو اتجاه الفك
+        part.targetPos.copy(part.basePos);
+        part.targetPos.addScaledVector(part.explodeVec, SEPARATE_FACTOR);
+        part.targetRot.set(0, 0, 0);
       } else {
         part.targetPos.copy(part.basePos);
         if (this.exploded) part.targetPos.add(part.explodeVec);
@@ -562,13 +668,14 @@ export class PCScene {
       plug.obj.position.x = plug.baseX - (flags[plug.flag] ? PLUG_PULL : 0);
     }
 
-    // لمبة الطاقة — مادة خاصة بها (cached)
+    // لمبة الطاقة — مادة خاصة بها (cached) — تنطفئ مع مزود ميت
     const led = this.visuals.flags.powerLed;
     if (led) {
       const mat = led.material;
       if (!Array.isArray(mat) && 'emissive' in mat) {
         const std = mat as THREE.MeshStandardMaterial;
-        std.emissive.set(flags.powerOn ? COLORS.green : 0x000000);
+        const alive = flags.powerOn && !(this.lastState?.peripherals.psuDead ?? false);
+        std.emissive.set(alive ? COLORS.green : 0x000000);
         std.emissiveIntensity = LED_INTENSITY;
       }
     }
@@ -628,8 +735,70 @@ export class PCScene {
   }
 
   // ====================================================================
-  // الخاصة — الكاميرا
+  // الخاصة — الشاشة الافتراضية والقطع التالفة
   // ====================================================================
+
+  /** رسم نسيج الشاشة الافتراضية من محرك الشاشة (المصدر الوحيد للحقيقة) */
+  private drawMonitor(force: boolean): void {
+    if (!this.painter || this.blocked) return;
+    if (!force && nowMs() - this.lastMonitorDrawAt < MONITOR_REDRAW_MS) return;
+    this.lastMonitorDrawAt = nowMs();
+    const sim = this.lastState;
+    const elapsed = this.bootStartedAt !== null ? Math.max(0, Date.now() - this.bootStartedAt) : 0;
+    if (!sim) {
+      this.painter.draw(
+        { screen: 'noSignal', bootProgress: 0, postLinesAr: [], bootDevicesAr: [], canType: false },
+        this.notepad,
+        Date.now(),
+      );
+      return;
+    }
+    const view = computeMonitorView(sim, elapsed);
+    this.painter.draw(view, this.notepad, Date.now());
+  }
+
+  /** تحديثات بصرية لحظية: دوران المراوح/كابل الشاشة/توهج القطع التالفة */
+  private updateRuntimeVisuals(s: SimulationState): void {
+    // المراوح تدور فقط مع كهرباء موصولة وجهاز يعمل ومزود حي
+    this.spinning = s.flags.powerOn && s.flags.acConnected && !s.peripherals.psuDead;
+
+    // كابل إشارة الشاشة يختفي عند فصله (المواصفة: الكابلات لا تطفو في الفراغ)
+    if (this.monitorCableGroup) {
+      this.monitorCableGroup.visible = s.peripherals.monitorCableConnected;
+    }
+
+    // توهج أحمر ثابت للقطع التالفة تدريبيًا
+    for (const id of COMPONENT_IDS) {
+      const isDamaged = s.parts[id] === 'damaged';
+      const wasDamaged = this.damagedIds.has(id);
+      if (isDamaged && !wasDamaged) {
+        this.parts[id].group.traverse((obj) => {
+          if (!(obj instanceof THREE.Mesh)) return;
+          const mat = obj.material;
+          if (Array.isArray(mat) || !('emissive' in mat)) return;
+          const std = mat as THREE.MeshStandardMaterial;
+          if (!this.damagedOriginals.has(obj)) {
+            this.damagedOriginals.set(obj, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
+          }
+          std.emissive.setHex(DAMAGED_HEX);
+          std.emissiveIntensity = 0.45;
+        });
+        this.damagedIds.add(id);
+      } else if (!isDamaged && wasDamaged) {
+        this.parts[id].group.traverse((obj) => {
+          const saved = this.damagedOriginals.get(obj as THREE.Mesh);
+          if (!saved) return;
+          const mesh = obj as THREE.Mesh;
+          const mat = mesh.material;
+          if (Array.isArray(mat) || !('emissive' in mat)) return;
+          (mat as THREE.MeshStandardMaterial).emissive.setHex(saved.hex);
+          (mat as THREE.MeshStandardMaterial).emissiveIntensity = saved.intensity;
+          this.damagedOriginals.delete(mesh);
+        });
+        this.damagedIds.delete(id);
+      }
+    }
+  }
 
   private startCamTween(toPos: THREE.Vector3, toTarget: THREE.Vector3, dur: number): void {
     this.camTween = {
@@ -646,8 +815,8 @@ export class PCScene {
   // الخاصة — الاختيار بالأشعة
   // ====================================================================
 
-  /** إيجاد المكوّن عند نقطة شاشة: أول إصابة مرئية غير شفافة صعودًا حتى userData.componentId */
-  private pickAt(clientX: number, clientY: number): ComponentId | null {
+  /** إيجاد الهدف عند نقطة شاشة: أول إصابة مرئية غير شفافة — قطعة PC أو طرفية */
+  private pickAt(clientX: number, clientY: number): PickedInfo {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const w = rect.width > 0 ? rect.width : 1;
     const h = rect.height > 0 ? rect.height : 1;
@@ -659,9 +828,20 @@ export class PCScene {
       if (this.isSeeThrough(hit.object)) continue;    // الزجاج/الشفاف لا يحجب الاختيار
       let cur: THREE.Object3D | null = hit.object;
       while (cur) {
+        // الطرفيات أولًا (مفاتيح لوحة المفاتيح تحمل تفاصيلها بنفسها)
+        const per: unknown = cur.userData['peripheral'];
+        if (typeof per === 'string') {
+          const kind = per as PeripheralKind;
+          const detail = typeof cur.userData['key'] === 'string'
+            ? (cur.userData['key'] as string)
+            : typeof cur.userData['btn'] === 'string'
+              ? (cur.userData['btn'] as string)
+              : undefined;
+          return { type: 'periph', kind, detail };
+        }
         const cid: unknown = cur.userData['componentId'];
         if (typeof cid === 'string' && (COMPONENT_IDS as readonly string[]).includes(cid)) {
-          return cid as ComponentId;
+          return { type: 'part', id: cid as ComponentId };
         }
         cur = cur.parent;
       }
@@ -838,7 +1018,12 @@ export class PCScene {
     const dx = event.clientX - this.downX;
     const dy = event.clientY - this.downY;
     if (dx * dx + dy * dy >= CLICK_MAX_DIST_SQ) return; // سحب لا نقرة
-    this.callbacks.onSelect(this.pickAt(event.clientX, event.clientY));
+    const picked = this.pickAt(event.clientX, event.clientY);
+    if (picked && picked.type === 'periph') {
+      this.callbacks.onPeripheral?.(picked.kind, picked.detail);
+      return;
+    }
+    this.callbacks.onSelect(picked ? picked.id : null);
   };
 
   /** (7) تغيير المؤشر فوق مكوّن — بفحص مُقيَّد زمنيًا (100ms) */
@@ -849,4 +1034,9 @@ export class PCScene {
     this.lastHoverAt = now;
     this.renderer.domElement.style.cursor = this.pickAt(event.clientX, event.clientY) ? 'pointer' : '';
   };
+}
+
+/** طابع زمني بسيط (تجنب الاعتماد على performance في كل موضع) */
+function nowMs(): number {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }

@@ -16,6 +16,7 @@ import {
   Settings as SettingsIcon,
   ClipboardList,
   Blocks,
+  Stethoscope,
   Loader2,
 } from 'lucide-react';
 import { useLabStore, type ScreenId } from '@/lib/store/labStore';
@@ -25,6 +26,7 @@ import { cn } from '@/lib/utils';
 
 import HomeScreen from '@/components/screens/HomeScreen';
 import LabScreen from '@/components/lab/LabScreen';
+import TechnicianScreen from '@/components/lab/TechnicianScreen';
 import CatalogScreen from '@/components/screens/CatalogScreen';
 import TrainingScreen from '@/components/lab/TrainingScreen';
 import BuilderScreen from '@/components/screens/BuilderScreen';
@@ -37,6 +39,7 @@ import SettingsScreen from '@/components/screens/SettingsScreen';
 const NAV: { id: ScreenId; labelAr: string; icon: typeof HomeIcon }[] = [
   { id: 'home', labelAr: 'الرئيسية', icon: HomeIcon },
   { id: 'lab', labelAr: 'المختبر 3D', icon: Boxes },
+  { id: 'tech', labelAr: 'جلسة الفني', icon: Stethoscope },
   { id: 'catalog', labelAr: 'كتالوج القطع', icon: LibraryBig },
   { id: 'training', labelAr: 'التدريب الموجه', icon: GraduationCap },
   { id: 'builder', labelAr: 'التجميعة والتوافق', icon: Blocks },
@@ -141,6 +144,7 @@ export default function AppShell() {
       <main className="flex-1 mx-auto w-full max-w-[1600px] px-3 sm:px-4 py-4 sm:py-6">
         {screen === 'home' && <HomeScreen />}
         {screen === 'lab' && <LabScreen />}
+        {screen === 'tech' && <TechnicianScreen />}
         {screen === 'catalog' && <CatalogScreen />}
         {screen === 'training' && <TrainingScreen />}
         {screen === 'builder' && <BuilderScreen />}

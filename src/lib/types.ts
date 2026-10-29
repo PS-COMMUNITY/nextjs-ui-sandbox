@@ -4,7 +4,7 @@
  * معرّفات المكوّنات ثابتة (stable ids) ولا يجوز تغييرها لاحقًا.
  */
 
-// ============ معرّفات المكوّنات الاثني عشر ============
+// ============ معرّفات المكوّنات (15 مكوّنًا) ============
 export type ComponentId =
   | 'case'
   | 'motherboard'
@@ -14,15 +14,22 @@ export type ComponentId =
   | 'gpu'
   | 'psu'
   | 'ssd'
+  | 'hdd'
   | 'fans'
   | 'atx24'
   | 'eps'
-  | 'gpuPower';
+  | 'gpuPower'
+  | 'sataData'
+  | 'sataPower';
 
 export const COMPONENT_IDS: ComponentId[] = [
   'case', 'motherboard', 'cpu', 'cooler', 'ram', 'gpu',
-  'psu', 'ssd', 'fans', 'atx24', 'eps', 'gpuPower',
+  'psu', 'ssd', 'hdd', 'fans', 'atx24', 'eps', 'gpuPower',
+  'sataData', 'sataPower',
 ];
+
+/** الكابلات تُفصل/توصَل بحركة واحدة (بلا فصل جزئي/براغٍ) */
+export const CABLE_IDS: ComponentId[] = ['atx24', 'eps', 'gpuPower', 'sataData', 'sataPower'];
 
 // ============ أعلام حالة الجهاز (Machine Flags) ============
 export type MachineFlag =
@@ -47,11 +54,90 @@ export const MACHINE_FLAGS: MachineFlag[] = [
 ];
 
 // ============ حالة المحاكاة الكاملة ============
-export type PartStatus = 'installed' | 'removed';
+/**
+ * حالة القطعة الفعلية (المصدر الوحيد للحقيقة):
+ *  - installed  : مثبتة في موضعها (أو مؤمّنة بالكامل — انظر AssemblyState)
+ *  - separated  : فصل جزئي — ما زالت في مكانها لكن البراغي/المزالج مفتوحة (PARTIALLY_SEPARATED)
+ *  - removed    : مفصولة كليًا ومستقرة في صينية القطع (TEMP_STORAGE)
+ *  - awaiting   : ملتقطة من الصينية وبانتظار التركيب (AWAITING_INSTALL)
+ *  - damaged    : تلف تدريبي مقصود (TRAINING_DAMAGE) — تُستبدل من المخزن التعليمي
+ * لحظة الفصل الكلي (FULLY_SEPARATED) انتقال حركي أثناء الاستخراج، ولحظة الرفض
+ * (INSTALL_REJECTED) حدث مؤجل يُسجّل في المتجر — انظر assemblyStateOf.
+ */
+export type PartStatus = 'installed' | 'separated' | 'removed' | 'awaiting' | 'damaged';
+
+export const INSTALLED: PartStatus = 'installed';
+export function isInstalled(p: PartStatus): boolean {
+  return p === 'installed';
+}
+
+// ============ آلة الحالات الثمانية (المواصفة المرجعية) ============
+export type AssemblyState =
+  | 'INSTALLED_SECURED'
+  | 'PARTIALLY_SEPARATED'
+  | 'FULLY_SEPARATED'
+  | 'TEMP_STORAGE'
+  | 'AWAITING_INSTALL'
+  | 'INSTALLED_CORRECTLY'
+  | 'INSTALL_REJECTED'
+  | 'TRAINING_DAMAGE';
+
+export const ASSEMBLY_STATE_INFO: Record<AssemblyState, { labelAr: string; colorAr: string }> = {
+  INSTALLED_SECURED: { labelAr: 'مثبتة — بحاجة إغلاق مزالج/براغٍ', colorAr: 'amber' },
+  PARTIALLY_SEPARATED: { labelAr: 'فصل جزئي — ما زالت في مكانها', colorAr: 'amber' },
+  FULLY_SEPARATED: { labelAr: 'مفصولة كليًا (لحظة الاستخراج)', colorAr: 'amber' },
+  TEMP_STORAGE: { labelAr: 'في صينية القطع', colorAr: 'slate' },
+  AWAITING_INSTALL: { labelAr: 'بانتظار التركيب', colorAr: 'cyan' },
+  INSTALLED_CORRECTLY: { labelAr: 'مثبتة بإحكام كامل', colorAr: 'emerald' },
+  INSTALL_REJECTED: { labelAr: 'رُفض التركيب — راجع الشروط', colorAr: 'rose' },
+  TRAINING_DAMAGE: { labelAr: 'تلف تدريبي — استبدلها من المخزن', colorAr: 'rose' },
+};
+
+/** أعلام ما بعد التركيب (المزالج/البراغي) لكل قطعة — تُغلق لإكمال التثبيت */
+export const SECURE_FLAGS: Partial<Record<ComponentId, MachineFlag[]>> = {
+  gpu: ['pcieLatchOpen', 'gpuScrewsOut'],
+  ram: ['ramClipsOpen'],
+  cpu: ['cpuLeverOpen'],
+  ssd: ['m2ScrewOut'],
+  hdd: [],
+  fans: ['fanScrewsOut'],
+  psu: ['psuScrewsOut'],
+  motherboard: ['moboScrewsOut'],
+};
+
+/** الحالة الثمانية المشتقة — تُحسب من الحالة الفعلية (لا تُخزّن أبدًا) */
+export function assemblyStateOf(part: PartStatus, secureFlagsOpen: boolean): AssemblyState {
+  switch (part) {
+    case 'installed':
+      return secureFlagsOpen ? 'INSTALLED_SECURED' : 'INSTALLED_CORRECTLY';
+    case 'separated':
+      return 'PARTIALLY_SEPARATED';
+    case 'removed':
+      return 'TEMP_STORAGE';
+    case 'awaiting':
+      return 'AWAITING_INSTALL';
+    case 'damaged':
+      return 'TRAINING_DAMAGE';
+  }
+}
+
+// ============ الطرفيات وأعطال النظام الإضافية ============
+/** حالة الطرفيات الخارجية (الشاشة) وأعطال تُفعّل عبر السيناريوهات */
+export interface PeripheralState {
+  monitorOn: boolean;              // زر تشغيل الشاشة نفسها
+  monitorCableConnected: boolean;  // كابل إشارة العرض من البطاقة إلى الشاشة
+  psuDead: boolean;                // عطل مزود الطاقة (سيناريو تعليمي)
+  ramIncompatible: boolean;        // ذاكرة غير متوافقة مع اللوحة (سيناريو تعليمي)
+}
+
+export function initialPeripheralState(): PeripheralState {
+  return { monitorOn: true, monitorCableConnected: true, psuDead: false, ramIncompatible: false };
+}
 
 export interface SimulationState {
   flags: Record<MachineFlag, boolean>;
   parts: Record<ComponentId, PartStatus>;
+  peripherals: PeripheralState;
 }
 
 export function initialSimulationState(): SimulationState {
@@ -59,7 +145,18 @@ export function initialSimulationState(): SimulationState {
   for (const f of MACHINE_FLAGS) flags[f] = false;
   const parts = {} as Record<ComponentId, PartStatus>;
   for (const id of COMPONENT_IDS) parts[id] = 'installed';
-  return { flags, parts };
+  return { flags, parts, peripherals: initialPeripheralState() };
+}
+
+/** دمج دفاعي: حالة محفوظة قديمة/ناقصة + قيم افتراضية للحقول الجديدة */
+export function normalizeSimulationState(raw: Partial<SimulationState> | undefined | null): SimulationState {
+  const base = initialSimulationState();
+  if (!raw || typeof raw !== 'object') return base;
+  return {
+    flags: { ...base.flags, ...(typeof raw.flags === 'object' && raw.flags ? raw.flags : {}) },
+    parts: { ...base.parts, ...(typeof raw.parts === 'object' && raw.parts ? raw.parts : {}) },
+    peripherals: { ...base.peripherals, ...(typeof raw.peripherals === 'object' && raw.peripherals ? raw.peripherals : {}) },
+  };
 }
 
 // ============ نتائج الفحص والقوائم ============
@@ -209,6 +306,17 @@ export interface QuizQuestion {
   topic: string;
 }
 
+// ============ الشاشة الخارجية (8 حالات مرئية) ============
+export type MonitorScreen =
+  | 'off'        // الشاشة مطفأة (زرها)
+  | 'noSignal'   // تعمل بلا إشارة — كابل/بطاقة/جهاز مطفأ
+  | 'booting'    // شعار بدء التشغيل
+  | 'post'       // رسائل POST (أو فشلها)
+  | 'bios'       // إعدادات UEFI — لا جهاز إقلاع
+  | 'warning'    // تحذير بعد POST ناجح
+  | 'success'    // نجاح قبل الدخول للنظام
+  | 'os';        // نظام افتراضي مبسّط
+
 // ============ سجل الجلسة والتقارير ============
 export interface SessionEvent {
   ts: number;          // epoch ms
@@ -231,5 +339,5 @@ export interface ReportSummary {
   simulatedValuesNoticeAr: string;
 }
 
-export const APP_VERSION = '2.0.0';
-export const CATALOG_VERSION = '2025-01-rev1';
+export const APP_VERSION = '3.0.0';
+export const CATALOG_VERSION = '2025-01-rev2';

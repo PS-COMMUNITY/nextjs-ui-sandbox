@@ -103,6 +103,7 @@ export default function ReportsScreen() {
       const backup: PersistShape = {
         version: APP_VERSION,
         simulation: sim,
+        tech: useLabStore.getState().tech,
         logs,
         quizScores,
         missionsDone,

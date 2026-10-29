@@ -42,6 +42,8 @@ import { Separator } from '@/components/ui/separator';
 
 import type { DiagnosisCode } from '@/lib/types';
 import { SCENARIOS } from '@/lib/data/scenarios';
+import { FAULTS, codeLabelAr } from '@/lib/data/faults';
+import { runFaultSelfTests, summarizeFaultTests } from '@/lib/simulation/faultTests';
 import { runPost, SIM_NOTE_AR } from '@/lib/simulation/postEngine';
 import { useLabStore } from '@/lib/store/labStore';
 
@@ -94,6 +96,16 @@ export default function DiagnosticsScreen() {
   const applyScenarioToMachine = (scenarioId: string, titleAr: string) => {
     runScenario(scenarioId);
     toast.info(`طُبِّق سيناريو «${titleAr}» — اذهب إلى المختبر أو اضغط «تشغيل فحص POST» أدناه لرؤية الأثر.`);
+  };
+
+  // الاختبارات الآلية لمحرك الأعطال — تُنفّذ مرة عند الطلب (منطق نقّي في المتصفح)
+  const faultTests = useMemo(() => {
+    const results = runFaultSelfTests();
+    return { results, summary: summarizeFaultTests(results) };
+  }, []);
+  const runFaultOnMachine = (faultId: string, titleAr: string) => {
+    useLabStore.getState().runFault(faultId);
+    toast.info(`طُبِّق العطل ${faultId} «${titleAr}» — شغّل فحص POST أو اذهب للمختبر لرؤية أثره على الشاشة.`);
   };
 
   return (
@@ -153,6 +165,74 @@ export default function DiagnosticsScreen() {
           </Button>
           أو اضغط «تشغيل فحص POST» أدناه — يُسجَّل تطبيق السيناريو في سجل الجلسة.
         </p>
+      </section>
+
+      {/* ===== أ2) أعطل تعليمية مسمّاة (محرك الأعطال) ===== */}
+      <section className="space-y-3" aria-label="أعطل تعليمية مسمّاة">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">أعطل تعليمية مسمّاة (محرك الأعطال)</h2>
+          <Badge variant="outline" className="text-muted-foreground">
+            <span dir="ltr" className="font-mono">{FAULTS.length}</span>
+            عطلًا
+          </Badge>
+          <Badge
+            variant="outline"
+            className={faultTests.summary.allOk
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'}
+          >
+            {faultTests.summary.allOk ? <CheckCircle2 className="size-3" /> : <XCircle className="size-3" />}
+            اختبارات آلية: <span dir="ltr" className="font-mono">{faultTests.summary.passed}/{faultTests.summary.total}</span>
+          </Badge>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {FAULTS.map((f) => {
+            const test = faultTests.results.find((r) => r.faultId === f.id);
+            return (
+              <Card key={f.id} className="gap-2 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span dir="ltr" className="font-mono text-[10px] text-muted-foreground">{f.id}</span>
+                  <Badge variant="outline" className="text-[10px]">{f.difficulty}</Badge>
+                  {test && (
+                    <span className={test.ok ? 'text-emerald-500' : 'text-rose-500'} title={test.checksAr.join('\n')}>
+                      {test.ok ? <CheckCircle2 className="size-3.5" /> : <XCircle className="size-3.5" />}
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm font-bold leading-tight">{f.titleAr}</p>
+                <p className="text-[11px] leading-snug text-muted-foreground">{f.complaintAr}</p>
+                <Badge variant="outline" className="text-[10px] max-w-full">
+                  POST قبل الإصلاح: <span className="truncate">{codeLabelAr(f.preCode)}</span>
+                </Badge>
+                <Button size="sm" className="w-full gap-1.5" onClick={() => runFaultOnMachine(f.id, f.titleAr)}>
+                  <Play className="size-3.5" />
+                  ركّب العطل على الجهاز
+                </Button>
+              </Card>
+            );
+          })}
+        </div>
+        <details className="rounded-lg border p-3">
+          <summary className="cursor-pointer text-sm font-semibold">
+            تفاصيل الاختبارات الآلية لمنطق الأعطال (نقاء/نتيجة POST/إصلاح/شاشة)
+          </summary>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {faultTests.results.map((r) => (
+              <div key={r.faultId} className="rounded-md border p-2.5">
+                <p className="text-xs font-bold flex items-center gap-1.5">
+                  <span dir="ltr" className="font-mono text-[10px] text-muted-foreground">{r.faultId}</span>
+                  {r.titleAr}
+                  <span className={r.ok ? 'text-emerald-500 ms-auto' : 'text-rose-500 ms-auto'}>{r.ok ? 'PASS' : 'FAIL'}</span>
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {r.checksAr.map((c, i) => (
+                    <li key={i} className="text-[11px] text-muted-foreground font-mono" dir="rtl">{c}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </details>
       </section>
 
       {/* ===== ب) فحص POST للجهاز الحالي ===== */}

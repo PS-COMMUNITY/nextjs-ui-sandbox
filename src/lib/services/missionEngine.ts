@@ -1,7 +1,10 @@
 /**
  * محرك المهام الموجهة — يتحقق آليًا من خطوات المهام مقابل حالة المحاكاة.
+ * دلالة موسّعة: «part-removed» = ليست مثبتة بأي حال (في الصينية/بانتظار/تالفة) —
+ * و«part-installed» = مثبتة فعلًا في موضعها.
  */
 import type { Mission, MissionStep, SimulationState, VerifySpec } from '@/lib/types';
+import { isInstalled } from '@/lib/types';
 import { LESSONS } from '@/lib/data/lessons';
 
 export function isVerifyDone(v: VerifySpec, s: SimulationState, lastDiagnosis: string | null): boolean {
@@ -11,9 +14,9 @@ export function isVerifyDone(v: VerifySpec, s: SimulationState, lastDiagnosis: s
     case 'flag-off':
       return s.flags[v.target] === false;
     case 'part-removed':
-      return s.parts[v.target] === 'removed';
+      return !isInstalled(s.parts[v.target]);
     case 'part-installed':
-      return s.parts[v.target] === 'installed';
+      return isInstalled(s.parts[v.target]);
     case 'post-result':
       return lastDiagnosis === v.target;
   }
