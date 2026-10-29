@@ -496,7 +496,7 @@ export default function LabScreen() {
           <div
             ref={containerRef}
             dir="ltr"
-            className="relative h-[52vh] min-h-[380px] lg:h-[calc(100vh-300px)] lg:min-h-[480px] w-full overflow-hidden rounded-xl border bg-[#0b0f14]"
+            className="relative h-[52vh] min-h-[380px] lg:h-[calc(100vh-300px)] lg:min-h-[480px] w-full overflow-hidden rounded-xl border bg-[#0d1218]"
             role="application"
             aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، واضغط على قطعة لتحديدها"
           />

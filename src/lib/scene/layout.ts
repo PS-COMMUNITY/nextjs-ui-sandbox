@@ -93,24 +93,25 @@ export const EXPLODE_VECTORS: Record<ComponentId, Vec3> = {
 };
 
 export const DEFAULT_CAMERA = {
-  pos: [-6.2, 4.2, 7.2] as Vec3,
-  target: [-0.7, 1.7, 2.1] as Vec3,
+  // زاوية ثلاثية الأرباع من جهة الزجاج: تُظهر وجه اللوحة الأم والداخل بوضوح والجهاز متمركزًا
+  pos: [-6.2, 4.5, 8.0] as Vec3,
+  target: [0.4, 2.05, 2.35] as Vec3,
 };
 
-/** ألوان المشهد الموحدة */
+/** ألوان المشهد الموحدة — فاتحة كفاية لتبقى القطع مقروءة داخل هيكل داكن */
 export const COLORS = {
-  bg: 0x0b0f14,
-  metalDark: 0x14181f,
-  metalMid: 0x2a3038,
-  pcb: 0x12251c,
-  pcbDark: 0x0d1b14,
+  bg: 0x0d1218,
+  metalDark: 0x232a33,
+  metalMid: 0x3a4450,
+  pcb: 0x1a5c40,
+  pcbDark: 0x14503a,
   glass: 0x11151b,
   accent: 0x22d3ee,      // سماوي — هوية الموسوعة (معلومات)
   accentSoft: 0x0e7490,
-  plastic: 0x1f242c,
+  plastic: 0x2a323c,
   copper: 0xb87333,
   aluminum: 0x9aa3ad,
-  black: 0x0a0d11,
+  black: 0x12161c,
   white: 0xe8eaed,
   green: 0x22c55e,
   red: 0xef4444,

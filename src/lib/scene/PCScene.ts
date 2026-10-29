@@ -15,6 +15,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
 import { COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MOUNTS, TRAY } from './layout';
 import type { FlagVisuals, PCSceneCallbacks, PartVisuals, SceneQuality } from './visualTypes';
@@ -38,8 +39,10 @@ const SCREW_SPIN = 0.6;         // دوران طفيف للبرغي المفكو
 const PLUG_PULL = 0.12;         // سحب القابس على -X عند الفصل
 const SPIN_SPEED = 2.2;         // سرعة دوران شفرات المراوح (rad/s)
 const LERP_RATE = 8;            // معدل الاقتراب الأسي للمواضع في حلقة الرسم
-const HIGHLIGHT_HEX = 0x4d7c0f; // لون إبراز المكوّن المحدد
-const HIGHLIGHT_INTENSITY = 0.35;
+const HIGHLIGHT_HEX = 0x84cc16; // لون إبراز المكوّن المحدد (أخضر ليموني واضح)
+const HIGHLIGHT_INTENSITY = 0.55;
+const ENV_INTENSITY = 0.55;     // شدة الإضاءة البيئية (IBL) — توازن مع الأضواء المباشرة
+const TONE_EXPOSURE = 1.12;     // تعريض النغمة السينمائية
 const LED_INTENSITY = 1.2;      // شدة توهج لمبة الطاقة
 const CLICK_MAX_DIST_SQ = 36;   // (6px)² — أقصى مسافة بين down/up تُعد نقرة
 const HOVER_THROTTLE_MS = 100;  // أقصى معدل لفحص التحويم
@@ -214,11 +217,13 @@ export class PCScene {
       const w = Math.max(1, this.container.clientWidth);
       const h = Math.max(1, this.container.clientHeight);
 
-      // (2) المُصيِّر
+      // (2) المُصيِّر — نغمة سينمائية ACES لدرجات لون واقعية
       const renderer = new THREE.WebGLRenderer({ antialias: true });
       renderer.setClearColor(COLORS.bg);
       renderer.shadowMap.enabled = this.quality !== 'low';
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = TONE_EXPOSURE;
       renderer.setSize(w, h, false);
       renderer.domElement.style.width = '100%';
       renderer.domElement.style.height = '100%';
@@ -229,6 +234,11 @@ export class PCScene {
 
       // (3) المشهد والكاميرا والتحكم المداري
       this.scene = new THREE.Scene();
+      // خريطة بيئية (IBL) عبر PMREM — تجعل المعادن تعكس مثل الواقع بدل أن تبدو سوداء
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      this.scene.environmentIntensity = ENV_INTENSITY;
+      pmrem.dispose();
       this.camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
       this.camera.position.set(...DEFAULT_CAMERA.pos);
       this.controls = new OrbitControls(this.camera, renderer.domElement);

@@ -87,7 +87,7 @@ function makeScrew(r: number, length: number, axis: Axis = 'y'): THREE.Mesh {
 /** كابل أنبوبي على منحنى CatmullRom (نقاط محلية داخل مجموعة القطعة) */
 function makeCable(points: THREE.Vector3[], radius: number): THREE.Mesh {
   const curve = new THREE.CatmullRomCurve3(points);
-  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, radius, 8, false), mat(0x101418, 0.3, 0.6));
+  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, radius, 8, false), mat(0x181d24, 0.3, 0.6));
   if (castEnabled) m.castShadow = true;
   return m;
 }
@@ -171,12 +171,12 @@ export function setComponentId(g: THREE.Object3D, id: ComponentId): void {
 
 export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): void {
   scene.background = new THREE.Color(COLORS.bg);
-  scene.fog = new THREE.Fog(COLORS.bg, 14, 30);
+  scene.fog = new THREE.Fog(COLORS.bg, 18, 42);
 
   // أرضية دائرية داكنة تستقبل الظلال
   const ground = new THREE.Mesh(
     new THREE.CircleGeometry(22, 24),
-    new THREE.MeshStandardMaterial({ color: 0x0e1319, metalness: 0, roughness: 0.95, flatShading: false }),
+    new THREE.MeshStandardMaterial({ color: 0x141a22, metalness: 0, roughness: 0.92, flatShading: false }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = 0;
@@ -184,22 +184,22 @@ export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): voi
   scene.add(ground);
 
   // شبكة أرضية خفيفة
-  const grid = new THREE.GridHelper(30, 30, 0x242b34, 0x161b22);
+  const grid = new THREE.GridHelper(30, 30, 0x2a3340, 0x1a212b);
   grid.position.y = 0.01;
   const gridMat: THREE.Material | THREE.Material[] = grid.material;
   const gridMats = Array.isArray(gridMat) ? gridMat : [gridMat];
   for (const gm of gridMats) {
     gm.transparent = true;
-    gm.opacity = 0.35;
+    gm.opacity = 0.4;
   }
   scene.add(grid);
 
-  // إضاءة محيطية أساسية + ضوء نصف كروي لملء الفراغات
-  scene.add(new THREE.AmbientLight(0xffffff, 1.35));
-  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1a1d24, 0.7));
+  // إضاءة مباشرة مخفّضة — الخريطة البيئية (scene.environment) تتكفل بالملء العام
+  scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x20242c, 0.5));
 
   // شمس دافئة مع ظلال (حسب الجودة)
-  const dir = new THREE.DirectionalLight(0xfff2e0, 2.4);
+  const dir = new THREE.DirectionalLight(0xfff2e0, 2.0);
   dir.position.set(-6, 8, 6);
   if (quality !== 'low') {
     dir.castShadow = true;
@@ -217,12 +217,12 @@ export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): voi
   }
   scene.add(dir);
 
-  // ضوء تعبئة خفيف خلفي (بلا ظلال؛ decay=0 ليبقى «خفيفًا» بمقدار 0.8 فعليًا)
-  const fill = new THREE.PointLight(0xffffff, 0.8, 0, 0);
+  // ضوء تعبئة خفيف خلفي (بلا ظلال؛ decay=0 ليبقى «خفيفًا» بمقدار 0.5 فعليًا)
+  const fill = new THREE.PointLight(0xffffff, 0.5, 0, 0);
   fill.position.set(3, 3, -2);
   scene.add(fill);
   // ضوء أمامي موجّه من جهة الزجاج لإبراز وجه اللوحة الأم
-  const front = new THREE.PointLight(0xfff4e0, 1.4, 0, 0);
+  const front = new THREE.PointLight(0xfff4e0, 1.0, 0, 0);
   front.position.set(-5, 3.5, 3);
   scene.add(front);
 }
@@ -242,13 +242,17 @@ function buildCaseShell(flags: FlagVisuals): THREE.Group {
   const hY = CASE.maxY - CASE.minY;       // 4.5
   const dZ = CASE.maxZ - CASE.minZ;       // 4.6
   const wallMat = mat(COLORS.metalDark, 0.45, 0.55);
+  const trayWallMat = mat(0x2c343e, 0.5, 0.5); // جدار صينية اللوحة الأم — أفتح قليلًا لتمييزه
 
   // الجدران (سماكة 0.05) — الجدار الأيمن عند x≈2.1 يستقبل اللوحة الأم
-  g.add(box(0.05, hY, dZ, wallMat, CASE.maxX - 0.025, cy, cz, true, true)); // يمين
+  g.add(box(0.05, hY, dZ, trayWallMat, CASE.maxX - 0.025, cy, cz, true, true)); // يمين
   g.add(box(wX, 0.05, dZ, wallMat, cx, CASE.maxY - 0.025, cz, true, true)); // سقف
   g.add(box(wX, 0.05, dZ, wallMat, cx, CASE.minY + 0.025, cz, true, true)); // أرضية
   g.add(box(wX, hY, 0.05, wallMat, cx, cy, CASE.minZ + 0.025, true, true)); // خلف
-  g.add(box(wX, hY, 0.05, mat(0x1a1e24, 0.35, 0.6), cx, cy, CASE.maxZ - 0.025, true, true)); // أمام
+  g.add(box(wX, hY, 0.05, mat(0x262d36, 0.35, 0.6), cx, cy, CASE.maxZ - 0.025, true, true)); // أمام
+
+  // حافة مشطوفة على مخطط الصينية (شريط معدني فاتح يفصل الصينية عن قصورة الكابلات)
+  g.add(box(0.02, hY * 0.92, 0.02, mat(0x414c58, 0.6, 0.4), CASE.maxX - 0.18, cy, CASE.maxZ - 0.62, false));
 
   // قصورة I/O الخلفية (مستطيل داكن بارز قليلًا خارج اللوحة الخلفية)
   g.add(box(0.55, 1.1, 0.03, mat(COLORS.black, 0.3, 0.6), 1.35, 3.35, CASE.minZ - 0.005, false));
@@ -334,6 +338,26 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
 
   // 1) جسم PCB (السماكة على X، الأبعاد من BOARD)
   g.add(box(BOARD.thickness, BOARD.yMax - BOARD.yMin, BOARD.zMax - BOARD.zMin, mat(COLORS.pcb, 0.35, 0.6), 0, 0, 0, true, true));
+
+  // 1ب) تفاصيل SMD: رقائق صغيرة + مكثفات VRM تملأ الوجه الأمامي (مواقع خارج كل القطع الأخرى)
+  const chipMat = mat(0x11171e, 0.25, 0.5);
+  const capMat = mat(0x3a4a58, 0.55, 0.4);
+  const chipSpots: Array<readonly [number, number]> = [
+    [1.0, -0.8], [1.0, -0.65], [1.0, -0.5], [1.04, -0.35],          // صف VRM فوق المقبس
+    [0.45, 0.5], [0.55, 0.68], [0.4, 0.82], [0.7, 0.55], [0.85, 0.75], // يمين فتحات RAM
+    [-0.3, 0.82], [-0.42, 0.88],                                     // تحت فتحات RAM
+    [-1.38, -0.62], [-1.38, -0.34],                                  // أسفل فتحات PCIe
+  ];
+  for (const [sy, sz] of chipSpots) {
+    g.add(box(0.045, 0.09, 0.15, chipMat, onFace(0.045), sy, sz, false));
+  }
+  const capGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.09, 10);
+  for (const cz of [-0.98, -0.84, -0.7, -0.56]) {
+    const c = new THREE.Mesh(capGeo, capMat);
+    c.rotation.z = Math.PI / 2;
+    c.position.set(onFace(0.09), 0.86, cz);
+    g.add(c);
+  }
 
   // 2) مقبس المعالج: إطار + لوح معدني داخلي (عالمي y=3.45, z=0.95)
   g.add(box(0.06, 0.42, 0.42, mat(COLORS.aluminum, 0.8, 0.45), onFace(0.06), 0.7, -0.62, true));
@@ -502,11 +526,16 @@ function buildRam(): THREE.Group {
   const stickMat = mat(COLORS.metalMid, 0.7, 0.45);
   const notchMat = mat(COLORS.black, 0.2, 0.6);
   const labelMat = mat(COLORS.accentSoft, 0.3, 0.5);
+  // شريط إضاءة RGB علوي — مادة واحدة مشتركة بتوهج سماوي خافت
+  const glowMat = new THREE.MeshStandardMaterial({
+    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.85, roughness: 0.35, metalness: 0.1, flatShading: false,
+  });
   for (const z of [-0.1, 0.1]) { // محليًا: عالمي 1.30 و 1.50
     const stick = new THREE.Group();
     stick.add(box(0.4, 1.3, 0.06, stickMat, 0, 0, 0, true));        // الجسم: بروز 0.4 نحو -X
     stick.add(box(0.41, 0.06, 0.065, notchMat, 0, -0.45, 0, false)); // شق اتجاه داكن غير متمركز
     stick.add(box(0.41, 0.2, 0.065, labelMat, 0, 0.48, 0, false));   // ملصق علوي بلون accent
+    stick.add(box(0.41, 0.045, 0.068, glowMat, 0, 0.665, 0, false)); // شريط إضاءة علوي متوهج
     stick.position.set(0, 0, z);
     g.add(stick);
   }
@@ -525,8 +554,13 @@ function buildGpu(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group {
   // PCB أفقي (السماكة على Y) عند مستوى الفتحة (عالمي y≈2.0)
   g.add(box(1.07, 0.04, 2.35, mat(COLORS.pcb, 0.35, 0.6), 0, -0.03, 0, true, true));
   // غطاء shroud أسفل الـPCB
-  const shroudMat = mat(0x171b21, 0.4, 0.55);
+  const shroudMat = mat(0x232b34, 0.4, 0.55);
   g.add(box(1.05, 0.42, 2.3, shroudMat, 0, -0.26, 0, true));
+  // شريط إضاءة سماوي على وجه الغطاء المواجه للزجاج (-X)
+  const gpuGlow = new THREE.MeshStandardMaterial({
+    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.55, roughness: 0.35, metalness: 0.1, flatShading: false,
+  });
+  g.add(box(0.02, 0.07, 2.05, gpuGlow, -0.535, -0.26, 0.05, false));
   // backplate رفيع فوق الـPCB
   g.add(box(1.07, 0.02, 2.35, mat(COLORS.metalMid, 0.7, 0.4), 0, 0.03, 0, true));
 
@@ -571,11 +605,11 @@ function buildPsu(flags: FlagVisuals): THREE.Group {
   const g = new THREE.Group();
   g.name = 'part-psu';
 
-  g.add(box(1.45, 0.85, 1.45, mat(COLORS.metalMid, 0.55, 0.5), 0, 0, 0, true, true));
+  g.add(box(1.45, 0.85, 1.45, mat(0x48525e, 0.6, 0.45), 0, 0, 0, true, true));
 
   // وجه شبكي خلفي (شرائط رفيعة على الوجه -Z)
   const grilleGeo = new THREE.BoxGeometry(1.15, 0.035, 0.03);
-  const grilleMat = mat(COLORS.metalDark, 0.5, 0.5);
+  const grilleMat = mat(0x272f38, 0.5, 0.5);
   for (let i = 0; i < 6; i++) {
     const strip = new THREE.Mesh(grilleGeo, grilleMat);
     strip.position.set(0, -0.3 + i * 0.12, -0.745);
@@ -583,7 +617,7 @@ function buildPsu(flags: FlagVisuals): THREE.Group {
   }
 
   // ملصق على الوجه -X + شريط accent
-  const label = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.55), mat(0x2f3640, 0.2, 0.7));
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.55), mat(0x3d4653, 0.2, 0.7));
   label.rotation.y = -Math.PI / 2;
   label.position.set(-0.728, 0.02, 0.05);
   g.add(label);
@@ -763,7 +797,7 @@ function buildTrayTable(): THREE.Group {
   const cz = (TRAY.minZ + TRAY.maxZ) / 2; // 2.4
 
   // السطح (أعلى = TRAY.tableTopY = 0.9)
-  g.add(box(TRAY.maxX - TRAY.minX, 0.08, TRAY.maxZ - TRAY.minZ, mat(COLORS.metalDark, 0.4, 0.65), cx, 0.86, cz, true, true));
+  g.add(box(TRAY.maxX - TRAY.minX, 0.08, TRAY.maxZ - TRAY.minZ, mat(0x2b333d, 0.4, 0.6), cx, 0.86, cz, true, true));
 
   // 4 أرجل أسطوانية
   const legGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.82, 12);
@@ -791,7 +825,7 @@ function buildTrayTable(): THREE.Group {
     { id: 'atx24', size: [0.4, 0.6] },
     { id: 'eps', size: [0.35, 0.5] },
   ];
-  const markerMat = mat(0x1a2029, 0.2, 0.8);
+  const markerMat = mat(0x24303a, 0.2, 0.8);
   for (const mk of markers) {
     const p = TRAY.slots[mk.id];
     const px = Math.min(Math.max(p[0], TRAY.minX + mk.size[0] / 2 + 0.02), TRAY.maxX - mk.size[0] / 2 - 0.02);
