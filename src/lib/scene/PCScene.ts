@@ -16,10 +16,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
 import { createScreenPainter, type ScreenPainter } from './screenTexture';
 import { computeMonitorView } from '../simulation/monitorEngine';
-import { COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY } from './layout';
+import { BOARD, CASE, COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
+import type { ViewPresetId } from './layout';
 import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
 import { COMPONENT_IDS, isInstalled } from '../types';
 import type { ComponentId, MachineFlag, SimulationState } from '../types';
@@ -47,6 +49,7 @@ const ENV_INTENSITY = 0.55;     // شدة الإضاءة البيئية (IBL) �
 const TONE_EXPOSURE = 1.12;     // تعريض النغمة السينمائية
 const LED_INTENSITY = 1.2;      // شدة توهج لمبة الطاقة
 const CLICK_MAX_DIST_SQ = 36;   // (6px)² — أقصى مسافة بين down/up تُعد نقرة
+const DRAG_START_DIST_SQ = 64;  // (8px)² — أقل حركة لتحويل الضغط إلى سحب قطعة
 const HOVER_THROTTLE_MS = 100;  // أقصى معدل لفحص التحويم
 const MONITOR_REDRAW_MS = 400;  // معدل إعادة رسم نسيج الشاشة الافتراضية
 const DAMAGED_HEX = 0xef4444;   // لون توهج القطعة التالفة تدريبيًا
@@ -56,6 +59,12 @@ type PickedInfo =
   | { type: 'part'; id: ComponentId }
   | { type: 'periph'; kind: PeripheralKind; detail?: string }
   | null;
+
+/** منطقة إفلات قطعة مسحوبة */
+export type DropZone = 'tray' | 'case' | null;
+
+/** الحالات التي يجوز فيها سحب القطعة بالماوس (وضع الفك/التركيب — توجيه v3 أ.2) */
+const DRAGGABLE: ReadonlySet<string> = new Set(['separated', 'removed', 'awaiting']);
 
 // ======================================================================
 // الأنواع الداخلية
@@ -224,6 +233,14 @@ export class PCScene {
   private pointerDownActive = false;
   private lastHoverAt = 0;
 
+  // ---- سحب القطع بالماوس الحقيقي (وضع الفك/التركيب — توجيه v3 أ.2) ----
+  private dragEnabled = false;
+  private pendingDrag: { id: ComponentId; startX: number; startY: number } | null = null;
+  private dragId: ComponentId | null = null;
+  private dragPlane = new THREE.Plane();
+  private dragOffset = new THREE.Vector3();
+  private dragGrabbed = false;
+
   constructor(init: { container: HTMLDivElement; quality: SceneQuality; callbacks: PCSceneCallbacks }) {
     this.container = init.container;
     this.quality = init.quality;
@@ -311,6 +328,9 @@ export class PCScene {
       }
       this.monitorCableGroup = visuals.monitor.getObjectByName('monitor-cable') ?? null;
 
+      // أصل حقيقي CC0 (Poly Haven): مسح لوحة دوائر كأساس PCB واقعي + مفك تدريبي
+      this.loadRealAssets(visuals);
+
       // (7)(15) مستمعو المؤشر + مراقب الحجم
       renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
       renderer.domElement.addEventListener('pointerup', this.onPointerUp);
@@ -393,7 +413,7 @@ export class PCScene {
     this.drawMonitor(true);
   }
 
-  /** نص دفتر الملاحظات الافتراضي (نقرات لوحة المفاتيح ثلاثية الأبعاد) */
+  /** نص دفتر الملاحظات الافتراضي — يُكتب الآن من حقل إدخال حقيقي في الواجهة (توجيه v3 أ.2) */
   setNotepad(text: string): void {
     if (this.blocked) return;
     this.notepad = text;
@@ -410,6 +430,29 @@ export class PCScene {
   focusMonitor(): void {
     if (this.blocked) return;
     this.startCamTween(new THREE.Vector3(...MONITOR_CAMERA.pos), new THREE.Vector3(...MONITOR_CAMERA.target), 0.7);
+  }
+
+  /** منظير جاهز: أمامي/جانبي/علوي (أزرار المشهد + اختصارات 1/2/3) */
+  setViewPreset(id: ViewPresetId): void {
+    if (this.blocked) return;
+    const preset = VIEW_PRESETS[id];
+    this.startCamTween(new THREE.Vector3(...preset.pos), new THREE.Vector3(...preset.target), 0.6);
+  }
+
+  /** تكبير/إبعاد خطوتين نحو الهدف (أزرار — بديل العجلة للمس/إمكانية الوصول) */
+  zoomStep(sign: 1 | -1): void {
+    if (this.blocked) return;
+    const dir = this._v1.copy(this.camera.position).sub(this.controls.target);
+    const dist = THREE.MathUtils.clamp(dir.length() * (sign > 0 ? 0.78 : 1.28), this.controls.minDistance, this.controls.maxDistance);
+    dir.setLength(dist).add(this.controls.target);
+    this.startCamTween(dir, this.controls.target.clone(), 0.3);
+  }
+
+  /** تفعيل سحب القطع بالماوس (وضع الفك/التركيب) — توجيه v3 أ.2/§5 */
+  setDragEnabled(on: boolean): void {
+    if (this.blocked) return;
+    this.dragEnabled = on;
+    if (!on) this.cancelDrag();
   }
 
   /** (8) إبراز مكوّن بتعديل emissive — إبراز واحد نشط في كل مرة */
@@ -541,7 +584,7 @@ export class PCScene {
     const elapsed = this.clock.getElapsedTime();
     for (const id of COMPONENT_IDS) {
       if (id === 'case') continue;
-      if (this.lastState && this.lastState.parts[id] === 'awaiting') {
+      if (this.lastState && this.lastState.parts[id] === 'awaiting' && this.dragId !== id) {
         const part = this.parts[id];
         part.group.position.y = part.trayPos.y + 0.16 + Math.sin(elapsed * 3) * 0.04;
       }
@@ -738,6 +781,88 @@ export class PCScene {
   // الخاصة — الشاشة الافتراضية والقطع التالفة
   // ====================================================================
 
+  /**
+   * تحميل الأصول الحقيقية المرخصة CC0 (توجيه v3 §3) — فشلها لا يعطل المشهد:
+   *  1) مسح لوحة دوائر (Poly Haven — circuit_board): يستبدل وجه PCB الإجرائي للوحة الأم
+   *     بمسح ضوئي واقعي بخامات PBR كاملة (Diffuse/Normal/ARM).
+   *  2) مفك مسطّح (Poly Haven — screwdriver): أداة تدريب ثانوية على طاولة صينية القطع.
+   */
+  private loadRealAssets(visuals: PartVisuals): void {
+    const loader = new GLTFLoader();
+    const root = visuals.root;
+
+    // 1) أساس PCB الحقيقي — يستبدل وجه اللوحة الأمامي فقط، ويبقى الباقي إجرائيًا تفاعليًا
+    loader.load(
+      '/models/circuit-board/circuit_board_1k.gltf',
+      (gltf) => {
+        if (this.disposed || this.failed) return;
+        const pcb = visuals.dynamic.motherboard.getObjectByName('mobo-pcb');
+        if (!pcb) return;
+        const scan = gltf.scene;
+        scan.traverse((obj) => {
+          if (!(obj instanceof THREE.Mesh)) return;
+          obj.castShadow = false;
+          obj.receiveShadow = true;
+          // توحيد الخامات: منع أي emissive قد يأتي من الأصل (يبقى الإبراز صادقًا)
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            if ('emissiveIntensity' in m) (m as THREE.MeshStandardMaterial).emissiveIntensity = 0;
+          }
+        });
+        // bbox الأصل (م): 0.404×0.078×0.398 — رأسيًا مُدار بحيث مكوّناته نحو -X (وجه المشاهد)
+        const bbox = new THREE.Box3().setFromObject(scan);
+        const size = bbox.getSize(new THREE.Vector3());
+        const targetH = BOARD.yMax - BOARD.yMin;      // 3.0
+        const targetD = BOARD.zMax - BOARD.zMin;      // 2.44
+        scan.rotation.z = Math.PI / 2;                // +Y المحلي → -X عالمي
+        scan.scale.set(
+          BOARD.thickness / Math.max(size.y, 1e-6),   // سماكة اللوحة
+          targetH / Math.max(size.x, 1e-6),           // ارتفاع اللوحة
+          targetD / Math.max(size.z, 1e-6),           // عمق اللوحة
+        );
+        // إعادة قياس bbox بعد الدوران ثم تمركز اللوحة على مستوى المجموعة
+        scan.updateMatrixWorld(true);
+        const bbox2 = new THREE.Box3().setFromObject(scan);
+        const center2 = bbox2.getCenter(new THREE.Vector3());
+        scan.position.sub(center2);
+        scan.position.x += BOARD.thickness * 0.18;    // بارز قليلًا نحو الوجه
+        scan.name = 'mobo-real-pcb';
+        pcb.add(scan);
+        // إخفاء الوجه الإجرائي الأخضر (يُبقى الجسم مرجعًا للسماكة والظهر)
+        if (pcb instanceof THREE.Mesh && !Array.isArray(pcb.material)) {
+          pcb.material = pcb.material.clone();
+          (pcb.material as THREE.MeshStandardMaterial).color.set(0x0f2a1f);
+        }
+      },
+      undefined,
+      () => {
+        // فشل تحميل الأصل → يبقى PCB الإجرائي كما هو (مشهد كامل بلا انقطاع)
+        console.warn('[PCScene] تعذر تحميل مسح اللوحة الحقيقي — استُخدم PCB الإجرائي');
+      },
+    );
+
+    // 2) مفك تدريبي على طاولة الصينية (جزء بصري ثانوي — بلا تفاعل)
+    loader.load(
+      '/models/screwdriver/screwdriver_1k.gltf',
+      (gltf) => {
+        if (this.disposed || this.failed) return;
+        const tool = gltf.scene;
+        const bbox = new THREE.Box3().setFromObject(tool);
+        const size = bbox.getSize(new THREE.Vector3());
+        const s = 1.6 / Math.max(size.y, 1e-6); // طول مستهدف ≈ 16سم
+        tool.scale.setScalar(s);
+        tool.updateMatrixWorld(true);
+        const b2 = new THREE.Box3().setFromObject(tool);
+        tool.position.set(-3.1, 0.912 - b2.min.y, 3.55);
+        tool.rotation.y = 0.5;
+        tool.name = 'desk-screwdriver';
+        root.add(tool);
+      },
+      undefined,
+      () => console.warn('[PCScene] تعذر تحميل المفك التدريبي'),
+    );
+  }
+
   /** رسم نسيج الشاشة الافتراضية من محرك الشاشة (المصدر الوحيد للحقيقة) */
   private drawMonitor(force: boolean): void {
     if (!this.painter || this.blocked) return;
@@ -828,16 +953,10 @@ export class PCScene {
       if (this.isSeeThrough(hit.object)) continue;    // الزجاج/الشفاف لا يحجب الاختيار
       let cur: THREE.Object3D | null = hit.object;
       while (cur) {
-        // الطرفيات أولًا (مفاتيح لوحة المفاتيح تحمل تفاصيلها بنفسها)
+        // الطرفيات (زر الشاشة / زر طاقة الشاشة) — لا كيبورد ولا ماوس (توجيه v3 أ.1)
         const per: unknown = cur.userData['peripheral'];
         if (typeof per === 'string') {
-          const kind = per as PeripheralKind;
-          const detail = typeof cur.userData['key'] === 'string'
-            ? (cur.userData['key'] as string)
-            : typeof cur.userData['btn'] === 'string'
-              ? (cur.userData['btn'] as string)
-              : undefined;
-          return { type: 'periph', kind, detail };
+          return { type: 'periph', kind: per as PeripheralKind };
         }
         const cid: unknown = cur.userData['componentId'];
         if (typeof cid === 'string' && (COMPONENT_IDS as readonly string[]).includes(cid)) {
@@ -845,7 +964,7 @@ export class PCScene {
         }
         cur = cur.parent;
       }
-      return null; // أول إصابة مرئية بلا معرّف → تعامل كفراغ
+      return null; // أول إصابة مرئية بلا معرّف → تعامل كفراغ (الأدوات الثانوية غير قابلة للنقر)
     }
     return null;
   }
@@ -1009,11 +1128,25 @@ export class PCScene {
     this.pointerDownActive = true;
     this.downX = event.clientX;
     this.downY = event.clientY;
+    // بدء سحب محتمل: فقط بالزر الأيسر وعند تفعيل وضع الفك/التركيب
+    if (this.dragEnabled && event.button === 0) {
+      const picked = this.pickAt(event.clientX, event.clientY);
+      if (picked && picked.type === 'part' && DRAGGABLE.has(this.lastState?.parts[picked.id] ?? '')) {
+        this.pendingDrag = { id: picked.id, startX: event.clientX, startY: event.clientY };
+      }
+    }
   };
 
-  /** (7) نقرة فقط إذا كانت المسافة بين down/up أقل من 6px */
+  /** (7) نقرة فقط إذا كانت المسافة بين down/up أقل من 6px — والسحب الفعلي يُعالج قبلها */
   private readonly onPointerUp = (event: PointerEvent): void => {
-    if (this.blocked || !this.pointerDownActive) return;
+    if (this.blocked) return;
+    if (this.dragId) {
+      this.finishDrag(event.clientX, event.clientY);
+      this.pointerDownActive = false;
+      return;
+    }
+    this.pendingDrag = null;
+    if (!this.pointerDownActive) return;
     this.pointerDownActive = false;
     const dx = event.clientX - this.downX;
     const dy = event.clientY - this.downY;
@@ -1026,14 +1159,105 @@ export class PCScene {
     this.callbacks.onSelect(picked ? picked.id : null);
   };
 
-  /** (7) تغيير المؤشر فوق مكوّن — بفحص مُقيَّد زمنيًا (100ms) */
+  /** (7) تحويم/سحب — بفحص مُقيَّد زمنيًا للتحويم (100ms) */
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (this.blocked) return;
+    if (this.dragId) {
+      this.updateDrag(event.clientX, event.clientY);
+      return;
+    }
+    if (this.pendingDrag) {
+      const dx = event.clientX - this.pendingDrag.startX;
+      const dy = event.clientY - this.pendingDrag.startY;
+      if (dx * dx + dy * dy >= DRAG_START_DIST_SQ) {
+        this.beginDrag(this.pendingDrag.id, event.clientX, event.clientY);
+        this.updateDrag(event.clientX, event.clientY);
+      }
+      return;
+    }
     const now = performance.now();
     if (now - this.lastHoverAt < HOVER_THROTTLE_MS) return;
     this.lastHoverAt = now;
     this.renderer.domElement.style.cursor = this.pickAt(event.clientX, event.clientY) ? 'pointer' : '';
   };
+
+  /** دبل-كليك: إعادة الكاميرا إلى الوضع الافتراضي (موثقة في الإعدادات) */
+  private readonly onDoubleClick = (): void => {
+    if (this.blocked) return;
+    this.resetCamera();
+  };
+
+  // ====================================================================
+  // الخاصة — سحب القطع (فك/تركيب بالماوس الحقيقي)
+  // ====================================================================
+
+  /** بدء سحب فعلي: تعطيل المداري + سطح أفقي عند ارتفاع القطعة */
+  private beginDrag(id: ComponentId, clientX: number, clientY: number): void {
+    const part = this.parts[id];
+    if (!part) return;
+    this.pendingDrag = null;
+    this.dragId = id;
+    this.controls.enabled = false;
+    this.dragPlane.set(new THREE.Vector3(0, 1, 0), -part.group.position.y);
+    // إزاحة الإمساك: فرق نقطة النقر عن مركز القطعة على السطح نفسه
+    const hit = this.rayPlaneHit(clientX, clientY);
+    if (hit) this.dragOffset.copy(part.group.position).sub(hit);
+    this.renderer.domElement.style.cursor = 'grabbing';
+  }
+
+  /** تحديث موضع القطعة أثناء السحب (بصريًا فقط — الحالة المنطقية لا تتغير هنا) */
+  private updateDrag(clientX: number, clientY: number): void {
+    const id = this.dragId;
+    if (!id) return;
+    const hit = this.rayPlaneHit(clientX, clientY);
+    if (!hit) return;
+    const part = this.parts[id];
+    part.group.position.set(hit.x + this.dragOffset.x, part.group.position.y, hit.z + this.dragOffset.z);
+    // الهدف يتبع اليد — يمنع حلقة الرسم من محاربة السحب
+    part.targetPos.copy(part.group.position);
+  }
+
+  /** إنهاء السحب: تحديد منطقة الإفلات ثم إبلاغ المنطق (التحقق أولًا ثم الحركة — توجيه v3 §6) */
+  private finishDrag(clientX: number, clientY: number): void {
+    const id = this.dragId;
+    this.dragId = null;
+    this.controls.enabled = true;
+    this.renderer.domElement.style.cursor = '';
+    if (!id) return;
+    const hit = this.rayPlaneHit(clientX, clientY);
+    let zone: DropZone = null;
+    if (hit) {
+      const inTray = hit.x >= TRAY.minX && hit.x <= TRAY.maxX && hit.z >= TRAY.minZ && hit.z <= TRAY.maxZ;
+      const inCase = hit.x >= CASE.minX && hit.x <= CASE.maxX && hit.z >= CASE.minZ && hit.z <= CASE.maxZ;
+      zone = inTray ? 'tray' : inCase ? 'case' : null;
+    }
+    // المرور عبر منطق المتجر: إن رُفض الإجراء تعاد القطعة لموضع راحتها عبر syncState
+    this.callbacks.onPartDrop?.(id, zone);
+  }
+
+  /** إلغاء أي سحب جارٍ (Esc / إيقاف الوضع) */
+  private cancelDrag(): void {
+    if (this.dragId) {
+      const part = this.parts[this.dragId];
+      this.recomputeTargets(); // يعيد الهدف الصحيح من آخر حالة
+      if (part) part.group.position.copy(part.targetPos);
+    }
+    this.dragId = null;
+    this.pendingDrag = null;
+    if (this.controls) this.controls.enabled = true;
+    if (this.renderer) this.renderer.domElement.style.cursor = '';
+  }
+
+  /** تقاطع شعاع المؤشر مع سطح السحب الحالي */
+  private rayPlaneHit(clientX: number, clientY: number): THREE.Vector3 | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const w = rect.width > 0 ? rect.width : 1;
+    const h = rect.height > 0 ? rect.height : 1;
+    this._ndc.set(((clientX - rect.left) / w) * 2 - 1, -((clientY - rect.top) / h) * 2 + 1);
+    this.raycaster.setFromCamera(this._ndc, this.camera);
+    const hit = this._v2;
+    return this.raycaster.ray.intersectPlane(this.dragPlane, hit) ? hit : null;
+  }
 }
 
 /** طابع زمني بسيط (تجنب الاعتماد على performance في كل موضع) */

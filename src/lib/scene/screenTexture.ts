@@ -3,7 +3,7 @@
  *
  * يرسم الحالات الثماني للمواصفة (§5): إطفاء / لا إشارة / شعار بدء / رسائل POST /
  * إعدادات UEFI / تحذير / نجاح / نظام افتراضي مبسّط مع دفتر ملاحظات تستهدفه
- * نقرات لوحة المفاتيح ثلاثية الأبعاد.
+ * إدخال نص حقيقي من حقل الواجهة (توجيه v3 أ.2).
  *
  * الرسم يحدث فقط عند الطلب (dirty) — لا إنشاء كائنات داخل حلقة الرسم عدا النصوص.
  */
@@ -290,7 +290,7 @@ export function createScreenPainter(): ScreenPainter | null {
           ctx.fillRect(nx, ny, nw, 40);
           ctx.fillStyle = '#e8eaed';
           ctx.font = 'bold 18px monospace';
-          ctx.fillText('notepad.txt — اكتب بلوحة المفاتيح', nx + 14, ny + 27);
+          ctx.fillText('notepad.txt — الكتابة من لوحة مفاتيحك', nx + 14, ny + 27);
           // زر إغلاق زخرفي
           ctx.fillStyle = '#e35d5d';
           ctx.fillRect(nx + nw - 30, ny + 10, 20, 20);
@@ -299,7 +299,7 @@ export function createScreenPainter(): ScreenPainter | null {
           ctx.textAlign = 'right';
           ctx.fillStyle = '#c9d6e4';
           ctx.font = '22px sans-serif';
-          const body = notepad.length > 0 ? notepad : 'انقر مفاتيح لوحة المفاتيح ثلاثية الأبعاد لطباعة نص هنا…';
+          const body = notepad.length > 0 ? notepad : 'اكتب في حقل «دفتر النظام» أسفل المشهد ليظهر النص هنا…';
           wrapText(ctx, body, nx + nw - 18, ny + 78, nw - 40, 34);
           if (blink) {
             ctx.fillStyle = CYAN;

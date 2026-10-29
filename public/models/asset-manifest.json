@@ -1,0 +1,91 @@
+{
+  "manifestVersion": "1.0",
+  "appVersion": "2.1.0",
+  "reviewDirective": "PC_Repair_3D_Master_Prompt_v3_AR.md",
+  "accessedAt": "2025-11",
+  "runtimePolicy": "local-only",
+  "note": "كل الأصول تُخدم محليًا من public/ — لا روابط خارجية وقت تشغيل التطبيق. أصلان حقيقيان منزّلان (CC0)، والبقية إجرائية مفصلة بمعرفات ثابتة.",
+  "assets": [
+    {
+      "id": "polyhaven.circuit_board",
+      "name": "Circuit Board (scanned)",
+      "category": "motherboard-pcb",
+      "usage": "أساس PCB واقعي للوحة الأم — يستبدل الوجه الإجرائي عند نجاح التحميل، والبقية (مقبس/فتحات/براغٍ) إجرائية تفاعلية فوقه",
+      "sourceUrl": "https://polyhaven.com/a/circuit_board",
+      "sourceApi": "https://api.polyhaven.com/info/circuit_board",
+      "designer": "Benny Weimer",
+      "license": "CC0-1.0",
+      "licenseVerifiedFrom": "https://polyhaven.com/license",
+      "files": [
+        "public/models/circuit-board/circuit_board_1k.gltf",
+        "public/models/circuit-board/circuit_board.bin",
+        "public/models/circuit-board/textures/circuit_board_diff_1k.jpg",
+        "public/models/circuit-board/textures/circuit_board_nor_gl_1k.jpg",
+        "public/models/circuit-board/textures/circuit_board_arm_1k.jpg"
+      ],
+      "format": "glTF (embedded scene + external bin/textures)",
+      "texturesResolution": "1K",
+      "approxSizeKB": 2210,
+      "meshCount": 1,
+      "materialsCount": 2,
+      "boundingBoxMeters": { "x": 0.404, "y": 0.078, "z": 0.398 },
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "src/lib/scene/PCScene.ts → loadRealAssets()",
+        "anchorMeshName": "mobo-pcb",
+        "transform": "rotZ=+90° (مكوّنات المسح نحو -X وجه المشاهد) — قياس غير منتظم ليملأ BOARD (3.0×2.44 وحدة) — بارز 0.0108 نحو الوجه",
+        "failureBehavior": "يبقى PCB الإجرائي — لا انقطاع"
+      },
+      "cleanupNotes": "تصفير emissive من خامات الأصل حفاظًا على صحة الإبراز؛ castShadow=false للسماكة المقلوبة"
+    },
+    {
+      "id": "polyhaven.screwdriver",
+      "name": "Screwdriver (scanned)",
+      "category": "training-tool",
+      "usage": "أداة تدريب ثانوية على طاولة صينية القطع (فئة §3.1-13) — غير تفاعلية، لا تحجب الجهاز",
+      "sourceUrl": "https://polyhaven.com/a/screwdriver",
+      "sourceApi": "https://api.polyhaven.com/info/screwdriver",
+      "designer": "PierreB3D",
+      "license": "CC0-1.0",
+      "licenseVerifiedFrom": "https://polyhaven.com/license",
+      "files": [
+        "public/models/screwdriver/screwdriver_1k.gltf",
+        "public/models/screwdriver/screwdriver.bin",
+        "public/models/screwdriver/textures/screwdriver_diff_1k.jpg",
+        "public/models/screwdriver/textures/screwdriver_nor_gl_1k.jpg",
+        "public/models/screwdriver/textures/screwdriver_arm_1k.jpg"
+      ],
+      "format": "glTF (embedded scene + external bin/textures)",
+      "texturesResolution": "1K",
+      "approxSizeKB": 1420,
+      "meshCount": 1,
+      "materialsCount": 1,
+      "boundingBoxMeters": { "x": 0.028, "y": 0.209, "z": 0.026 },
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "src/lib/scene/PCScene.ts → loadRealAssets()",
+        "transform": "قياس لطول ≈1.6 وحدة (16سم) — وضع (-3.1, 0.912, 3.55) دوران Y=0.5 على طاولة الصينية",
+        "failureBehavior": "يُتجاهل بصمت"
+      }
+    },
+    {
+      "id": "procedural.pc-parts",
+      "name": "Procedural PC Parts (14 مكوّنًا تفاعليًا + هيكل + غطاء + بيئة)",
+      "category": "case|motherboard-features|cpu|cooler|ram|gpu|psu|ssd|hdd|fans|atx24|eps|gpuPower|sataData|sataPower|monitor|environment",
+      "usage": "كل القطع القابلة للفك/التركيب والتفاعل التعليمي",
+      "sourceUrl": null,
+      "designer": "PC Repair 3D Studio (كود المشروع)",
+      "license": "project-own",
+      "files": ["src/lib/scene/partsFactory.ts", "src/lib/scene/PCScene.ts", "src/lib/scene/textures.ts"],
+      "format": "Three.js procedural geometry",
+      "note": "مسار معتمد في البرومبت الرئيسي §4 عند غياب نماذج مرخصة مناسبة — توثيق بحث البدائل ورفضها في docs/ASSET_CANDIDATES.md. معرفات ثابتة (setComponentId) تسمح باستبدال أي قطعة بنموذج GLB لاحقًا دون كسر المنطق."
+    }
+  ],
+  "rejectedSourcesSummary": [
+    { "source": "Sketchfab (CC downloadable)", "reason": "تنزيل أي أصل يتطلب تسجيل دخول — مرفوض إلزاميًا وفق v3 §3.2" },
+    { "source": "TurboSquid / CGTrader / Fab", "reason": "أصول مدفوعة أو رخص غير قابلة للتحقق بلا شراء" },
+    { "source": "Smithsonian Open Access 3D", "reason": "بحث API يتطلب مفتاحًا؛ الأجهزة المتاحة أجهزة كاملة قديمة بمساحات ضخمة لا تناسب التفكيك الجزئي ولا GTX 750 Ti" },
+    { "source": "GitHub search (glb cc0 computer)", "reason": "لا مستودعات مطابقة موثوقة الترخيص لقطع PC" },
+    { "source": "KhronosGroup glTF-Sample-Assets", "reason": "نماذج اختبار glTF عامة — لا قطع حاسوب" }
+  ]
+}

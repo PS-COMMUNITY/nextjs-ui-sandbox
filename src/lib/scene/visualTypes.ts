@@ -1,5 +1,8 @@
 /**
  * الأنواع البصرية المشتركة بين مصنع المجسمات (partsFactory) ومدير المشهد (PCScene).
+ *
+ * ملاحظة توجيه v3 (أ.1/أ.2): لا يوجد أي مجسم ثلاثي الأبعاد للوحة مفاتيح أو فأرة
+ * في المشهد إطلاقًا — جهازا الإدخال الحقيقيان للمستخدم هما أدوات التحكم بالتطبيق.
  */
 import type * as THREE from 'three';
 import type { ComponentId } from '../types';
@@ -7,7 +10,7 @@ import type { ComponentId } from '../types';
 export type SceneQuality = 'low' | 'medium' | 'high';
 
 /** الطرفيات التفاعلية خارج الهيكل (ليست قطع PC — نقرة تُحوّل لفعل في المتجر) */
-export type PeripheralKind = 'monitor' | 'monitor-power' | 'keyboard' | 'mouse';
+export type PeripheralKind = 'monitor' | 'monitor-power';
 
 /** مراجع المجسمات الفرعية التي تتحكم بها أعلام المحاكاة (MachineFlag) */
 export interface FlagVisuals {
@@ -32,17 +35,17 @@ export interface PartVisuals {
   sidePanel: THREE.Group;                      // الغطاء الجانبي المفصلي
   flags: FlagVisuals;
   spinners: THREE.Object3D[];                  // مجسمات تدور (شفرات مراوح)
-  // ===== الطرفيات والاضافات (الجلسة 4 — المواصفة §5) =====
+  // ===== الطرفيات والإضافات =====
   monitor: THREE.Group;                        // الشاشة (قاعدة/عمود/إطار) — سطع العرض يُعثر عليه باسم 'monitor-screen'
-  keyboard: THREE.Group;                       // لوحة المفاتيح (مفاتيح قابلة للنقر)
-  mouse: THREE.Group;                          // الفأرة (أزرار يمين/يسار)
   airflow: THREE.Group;                        // أسهم اتجاه تدفق الهواء (تُظهر/تخفى)
 }
 
 export interface PCSceneCallbacks {
   onSelect: (id: ComponentId | null) => void;
-  /** نقرة على طرفية خارجية: زر شاشة / مفتاح لوحة مفاتيح / فأرة */
+  /** نقرة على طرفية خارجية: زر شاشة / زر طاقة الشاشة */
   onPeripheral?: (kind: PeripheralKind, detail?: string) => void;
+  /** إفلات قطعة مسحوبة بالماوس: تمرر للمنطق التعليمي للتحقق قبل قبول الحركة */
+  onPartDrop?: (id: ComponentId, zone: 'tray' | 'case' | null) => void;
   onReady?: () => void;
   onError?: (messageAr: string) => void;
 }

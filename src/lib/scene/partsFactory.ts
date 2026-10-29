@@ -469,8 +469,10 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   const pcbFront = mat(0xffffff, 0.35, 0.58, { map: pcbTexture('#14503a', '#2e8f63') });
 
   // 1) جسم PCB — الوجه الأمامي (-X) بخامة مسارات مطبوعة
+  // (اسم ثابت mobo-pcb ليستبدله PCScene بمسح لوحة حقيقي CC0 عند نجاح التحميل)
   const pcbMats = [pcbPlain, pcbFront, pcbPlain, pcbPlain, pcbPlain, pcbPlain];
   const pcbBody = new THREE.Mesh(new THREE.BoxGeometry(BOARD.thickness, BOARD.yMax - BOARD.yMin, BOARD.zMax - BOARD.zMin), pcbMats);
+  pcbBody.name = 'mobo-pcb';
   if (castEnabled) pcbBody.castShadow = true;
   pcbBody.receiveShadow = true;
   g.add(pcbBody);
@@ -1347,87 +1349,6 @@ function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
   return g;
 }
 
-/** أحرف لوحة المفاتيح — صفوف علوية ثم سفلية + مفاتيح خاصة */
-const KEY_ROWS: string[][] = [
-  ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
-  ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
-  ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
-  ['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
-];
-
-function buildKeyboard(): THREE.Group {
-  scope('keyboard');
-  const g = new THREE.Group();
-  g.name = 'periph-keyboard';
-  g.userData['peripheral'] = 'keyboard';
-
-  // الجسم بميل خفيف (الخلفية أعلى)
-  const base = box(4.7, 0.16, 1.75, mat(0x1c222a, 0.35, 0.55), 0, 0.08, 0, true, true);
-  base.rotation.x = -0.06;
-  g.add(base);
-
-  const keyGeo = new THREE.BoxGeometry(0.36, 0.09, 0.36);
-  const keyMat = mat(0x39434e, 0.3, 0.5);
-  const wideGeo = new THREE.BoxGeometry(0.9, 0.09, 0.36);
-  const pitch = 0.42;
-  const rowsZ = [0.62, 0.2, -0.22, -0.64];
-
-  KEY_ROWS.forEach((row, r) => {
-    const startX = -((row.length - 1) * pitch) / 2 - (r >= 2 ? 0.21 : 0);
-    row.forEach((ch, i) => {
-      const key = new THREE.Mesh(keyGeo, keyMat);
-      key.position.set(startX + i * pitch, 0.19, rowsZ[r]);
-      key.rotation.x = -0.06;
-      key.userData['peripheral'] = 'keyboard';
-      key.userData['key'] = ch;
-      g.add(key);
-    });
-  });
-
-  // صف سفلي: مسافة + مسح + إدخال + تنظيف
-  const specials: Array<{ label: string; wide: boolean; x: number }> = [
-    { label: 'SPACE', wide: true, x: -0.75 },
-    { label: 'BACK', wide: false, x: 0.55 },
-    { label: 'ENTER', wide: false, x: 0.97 },
-    { label: 'CLR', wide: false, x: 1.39 },
-  ];
-  for (const sp of specials) {
-    const key = new THREE.Mesh(sp.wide ? wideGeo : keyGeo, mat(0x2a323c, 0.3, 0.5));
-    key.position.set(sp.x, 0.19, -1.06);
-    key.rotation.x = -0.06;
-    key.userData['peripheral'] = 'keyboard';
-    key.userData['key'] = sp.label;
-    g.add(key);
-  }
-  return g;
-}
-
-function buildMouse(): THREE.Group {
-  scope('mouse');
-  const g = new THREE.Group();
-  g.name = 'periph-mouse';
-  g.userData['peripheral'] = 'mouse';
-
-  // جسم بيضاوي
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 12), mat(0x1c222a, 0.35, 0.55));
-  body.scale.set(1, 0.55, 1.45);
-  body.position.y = 0.16;
-  body.castShadow = castEnabled;
-  g.add(body);
-  // زرا يسار/يمين (قابلان للنقر)
-  for (const side of [-1, 1]) {
-    const btn = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.1, 0.5), mat(0x232a33, 0.35, 0.5));
-    btn.position.set(side * 0.15, 0.27, -0.28);
-    btn.userData['peripheral'] = 'mouse';
-    btn.userData['btn'] = side < 0 ? 'left' : 'right';
-    g.add(btn);
-  }
-  // عجلة
-  const wheel = cyl(0.05, 0.1, mat(0x39434e, 0.4, 0.45), 'x', 0, 0.3, -0.28, false);
-  g.add(wheel);
-  return g;
-}
-
 // ============================================================
 // أسهم اتجاه تدفق الهواء (تُظهر/تُخفى عبر setAirflow)
 // ============================================================
@@ -1511,8 +1432,6 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   const sataPower = buildSataPower();
   const trayTable = buildTrayTable();
   const monitor = buildMonitor(spinners);
-  const keyboard = buildKeyboard();
-  const mouse = buildMouse();
   const airflow = buildAirflow();
 
   // مواضع التثبيت الابتدائية (المدير يعيد تموضعها عند الفك/التفجير)
@@ -1542,12 +1461,8 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   // ===== الطرفيات على المكتب =====
   monitor.position.set(...PERIPH.monitorPos);
   monitor.rotation.y = PERIPH.monitorRotY;
-  keyboard.position.set(...PERIPH.keyboardPos);
-  keyboard.rotation.y = PERIPH.keyboardRotY;
-  mouse.position.set(...PERIPH.mousePos);
-  mouse.rotation.y = PERIPH.mouseRotY;
 
-  // حصيرة مكتب تحت الطرفيات (تأطير بصري لطيف)
+  // حصيرة مكتب تحت الشاشة (تأطير بصري لطيف — توجيه v3: بلا ديكور زائد)
   const deskMat = box(PERIPH.matSize[0], 0.012, PERIPH.matSize[1], mat(0x182029, 0.2, 0.85), PERIPH.matCenter[0], PERIPH.matCenter[1], PERIPH.matCenter[2], false);
   deskMat.receiveShadow = castEnabled;
 
@@ -1555,7 +1470,7 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   root.name = 'pc-parts-root';
   root.add(caseShell, sidePanel, trayTable, caseAnchor);
   root.add(motherboard, cpu, cooler, ram, gpu, psu, ssd, hdd, fans, atx24, eps, gpuPower, sataData, sataPower);
-  root.add(monitor, keyboard, mouse);
+  root.add(monitor); // لا كيبورد ولا ماوس — توجيه v3 أ.1
   root.add(airflow);
   root.add(deskMat);
 
@@ -1577,5 +1492,5 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
     sataPower,
   };
 
-  return { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, keyboard, mouse, airflow };
+  return { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, airflow };
 }

@@ -40,14 +40,16 @@ export interface MonitorView {
   canType: boolean;          // لوحة المفاتيح تقتبس إلى النظام الافتراضي
 }
 
-/** سطر POST افتراضي واحد يُكتب كل ~650 مللي ثانية خلال مرحلة الرسائل */
-const POST_SEQUENCE_AR = [
-  'Detecting CPU ... OK (LGA1700)',
-  'Memory Training (DDR5) ... OK',
-  'Initializing PCIe Devices ... OK',
-  'Detecting Storage Devices ...',
-  'Loading Boot Options ...',
-];
+/** تسلسل POST متكيف مع حالة الجهاز — لا يعرض نجاح فحص لقطعة مفقودة (دقة تعليمية v3 §17) */
+function buildPostSequence(sim: SimulationState): string[] {
+  return [
+    isInstalled(sim.parts.cpu) ? 'Detecting CPU ... OK (LGA1700)' : 'Detecting CPU ... NOT DETECTED',
+    isInstalled(sim.parts.ram) ? 'Memory Training (DDR5) ... OK' : 'Memory Training ... NO MEMORY MODULES',
+    'Initializing PCIe Devices ... OK',
+    'Detecting Storage Devices ...',
+    'Loading Boot Options ...',
+  ];
+}
 
 export function computeMonitorView(sim: SimulationState, bootElapsedMs: number): MonitorView {
   const { flags, parts, peripherals } = sim;
@@ -86,12 +88,13 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
 
   if (bootElapsedMs < BOOT_POST_MS) {
     // رسائل POST تتكشف سطرًا سطرًا (~650ms لكل سطر) — آخر سطر «يبحث عن أجهزة التخزين»
-    const shown = Math.min(POST_SEQUENCE_AR.length, Math.floor((bootElapsedMs - BOOT_LOGO_MS) / 650) + 1);
+    const seq = buildPostSequence(sim);
+    const shown = Math.min(seq.length, Math.floor((bootElapsedMs - BOOT_LOGO_MS) / 650) + 1);
     return {
       ...idle,
       screen: 'post',
       bootProgress: (bootElapsedMs - 0) / BOOT_POST_MS,
-      postLinesAr: POST_SEQUENCE_AR.slice(0, shown),
+      postLinesAr: seq.slice(0, shown),
     };
   }
 
@@ -115,7 +118,7 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
       ...idle,
       screen: 'post',
       bootProgress: 1,
-      postLinesAr: [...POST_SEQUENCE_AR, '!! POST FAILED — SYSTEM HALTED !!', ...finding.detailsAr.slice(0, 1)],
+      postLinesAr: [...buildPostSequence(sim), '!! POST FAILED — SYSTEM HALTED !!', ...finding.detailsAr.slice(0, 1)],
     };
   }
 
@@ -126,7 +129,7 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
         ...idle,
         screen: 'bios',
         bootProgress: 1,
-        postLinesAr: [...POST_SEQUENCE_AR, 'No bootable device found — entering UEFI Setup ...'],
+        postLinesAr: [...buildPostSequence(sim), 'No bootable device found — entering UEFI Setup ...'],
         bootDevicesAr,
       };
     }
@@ -135,7 +138,7 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
       ...idle,
       screen: 'warning',
       bootProgress: 1,
-      postLinesAr: [...POST_SEQUENCE_AR, 'POST OK with warning — ' + finding.titleAr],
+      postLinesAr: [...buildPostSequence(sim), 'POST OK with warning — ' + finding.titleAr],
     };
   }
 

@@ -75,7 +75,8 @@ interface LabStore {
   sim: SimulationState;
   // === الطرفيات والمشهد ===
   bootStartedAt: number | null;   // لحظة ضغط زر التشغيل (ساعة تمهيد الشاشة)
-  notepad: string;                // دفتر الملاحظات الافتراضي (نقرات الكيبورد 3D)
+  notepad: string;                // دفتر النظام الافتراضي — يُكتب من حقل إدخال حقيقي (توجيه v3 أ.2)
+  hintsVisible: boolean;          // تلميحات التحكم بالماوس/الكيبورد الحقيقيين (زر H)
   airflowVisible: boolean;        // أسهم تدفق الهواء
   // === واجهة ===
   screen: ScreenId;
@@ -118,8 +119,10 @@ interface LabStore {
   repairPart: (id: ComponentId) => void;   // damaged → removed (استبدال من المخزن)
   // الطرفيات
   toggleMonitor: () => void;
-  typeKey: (ch: string) => void;
+  setNotepad: (text: string) => void;  // إدخال حقيقي من حقل نصي في الواجهة
+  typeKey: (ch: string) => void;       // مدخل برمجي (لوحات مفاتيح على الشاشة إن أُضيفت مستقبلًا)
   clearNotepad: () => void;
+  setHintsVisible: (v: boolean) => void;
   setAirflow: (v: boolean) => void;
   // تشخيص وسيناريوهات وأعطال
   runDiagnosis: () => void;
@@ -183,6 +186,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   sim: initialSimulationState(),
   bootStartedAt: null,
   notepad: '',
+  hintsVisible: true,
   airflowVisible: false,
   screen: 'home',
   selected: null,
@@ -393,6 +397,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
     schedulePersist(get);
   },
 
+  setNotepad: (text) => set({ notepad: text.slice(-400) }),
+
   typeKey: (ch) => {
     const s = get();
     if (!s.notepad.length && ch.length === 1) {
@@ -409,6 +415,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
 
   clearNotepad: () => set({ notepad: '' }),
 
+  setHintsVisible: (v) => set({ hintsVisible: v }),
+
   setAirflow: (v) => set({ airflowVisible: v }),
 
   runDiagnosis: () => {
@@ -424,6 +432,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
     const sc = SCENARIOS.find((x) => x.id === scenarioId);
     if (!sc) return;
     const sim = applyScenario(s.sim, scenarioId);
+    // إطفاء الجهاز عند تطبيق أي سيناريو — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
+    sim.flags.powerOn = false;
     set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
     s.logEvent('scenario', `سيناريو: ${sc.titleAr}`, true, sc.faultAr);
     toast.success(`طُبّق سيناريو «${sc.titleAr}» — ${sc.faultAr}`);
@@ -435,6 +445,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
     const fault = FAULTS.find((f) => f.id === faultId);
     if (!fault) return;
     const sim = applyFault(s.sim, faultId);
+    // إطفاء الجهاز عند تطبيق أي عطل — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
+    sim.flags.powerOn = false;
     set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
     s.logEvent('scenario', `عطل تعليمي ${fault.id}: ${fault.titleAr}`, true, fault.faultAr);
     toast.success(`طُبّق العطل ${fault.id} — ${fault.titleAr}`);

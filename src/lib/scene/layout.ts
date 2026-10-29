@@ -113,7 +113,7 @@ export const DEFAULT_CAMERA = {
   target: [0.7, 2.05, 2.6] as Vec3,
 };
 
-// ============ الطرفيات على المكتب (الشاشة/لوحة المفاتيح/الفأرة) ============
+// ============ الشاشة على المكتب (لا كيبورد ولا ماوس — توجيه v3 أ.1) ============
 export const PERIPH = {
   /** موضع قاعدة الشاشة على المكتب + دورانها (تتجه نحو الجهاز/الكاميرا) */
   monitorPos: [5.1, 0.9, 6.3] as Vec3,
@@ -122,19 +122,23 @@ export const PERIPH = {
   screenCenterLocal: [0, 2.5, 0.1] as Vec3,
   screenW: 5.3,
   screenH: 3.05,
-  keyboardPos: [4.75, 0.9, 4.95] as Vec3,
-  keyboardRotY: -0.42,
-  mousePos: [6.9, 0.9, 5.0] as Vec3,
-  mouseRotY: -0.2,
-  /** حصيرة المكتب تحت الطرفيات */
-  matCenter: [5.6, 0.905, 5.7] as Vec3,
-  matSize: [5.6, 3.6] as [number, number],
+  /** حصيرة مكتب تحت الشاشة فقط */
+  matCenter: [5.1, 0.905, 6.1] as Vec3,
+  matSize: [5.2, 3.2] as [number, number],
 };
 
 /** موضع زاوية الكاميرا نحو الشاشة (توجيه سريع — بمحاذاة عمود سطح العرض) */
 export const MONITOR_CAMERA = {
   pos: [0.6, 3.5, 13.2] as Vec3,
   target: [5.0, 3.2, 6.4] as Vec3,
+};
+
+/** مناظير جاهزة (توجيه v3 2.1): أمامي/جانبي/علوي — تُستخدم بالأزرار و1/2/3 */
+export type ViewPresetId = 'front' | 'side' | 'top';
+export const VIEW_PRESETS: Record<ViewPresetId, { pos: Vec3; target: Vec3 }> = {
+  front: { pos: [1.05, 2.8, 11.8], target: [1.05, 2.2, 2.4] },
+  side: { pos: [-7.8, 3.4, 2.4], target: [1.5, 2.3, 2.3] },
+  top: { pos: [1.2, 11.8, 4.9], target: [1.1, 0.4, 2.4] },
 };
 
 /** ألوان المشهد الموحدة — فاتحة كفاية لتبقى القطع مقروءة داخل هيكل داكن */

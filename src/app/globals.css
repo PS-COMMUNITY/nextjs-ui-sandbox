@@ -51,7 +51,7 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.55 0.19 255);
+  --primary: oklch(0.58 0.12 210);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -62,15 +62,15 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.62 0.17 250);
-  --chart-1: oklch(0.55 0.19 255);
+  --ring: oklch(0.62 0.11 210);
+  --chart-1: oklch(0.58 0.12 210);
   --chart-2: oklch(0.72 0.13 200);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.113 205);
   --chart-5: oklch(0.646 0.222 41.116);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.55 0.19 255);
+  --sidebar-primary: oklch(0.58 0.12 210);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
@@ -79,38 +79,38 @@
 }
 
 .dark {
-  /* الهوية اللونية من الموسوعة: كحلي داكن + أزرق للتفاعل + سماوي للمعلومات */
-  --background: oklch(0.155 0.022 255);
+  /* هوية v3: Graphite/Navy داكن + Cyan/Teal تقني + Amber للتحذير */
+  --background: oklch(0.155 0.02 235);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.2 0.028 255);
+  --card: oklch(0.2 0.024 235);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.2 0.028 255);
+  --popover: oklch(0.2 0.024 235);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.62 0.17 255);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.269 0.032 255);
+  --primary: oklch(0.66 0.115 200);
+  --primary-foreground: oklch(0.13 0.02 235);
+  --secondary: oklch(0.269 0.03 235);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0.024 255);
-  --muted-foreground: oklch(0.715 0.015 250);
-  --accent: oklch(0.28 0.045 245);
+  --muted: oklch(0.269 0.022 235);
+  --muted-foreground: oklch(0.715 0.015 220);
+  --accent: oklch(0.28 0.04 225);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.7 0.13 220);
-  --chart-1: oklch(0.62 0.17 255);
-  --chart-2: oklch(0.76 0.13 210);
-  --chart-3: oklch(0.55 0.12 245);
-  --chart-4: oklch(0.83 0.11 205);
+  --ring: oklch(0.7 0.11 205);
+  --chart-1: oklch(0.66 0.115 200);
+  --chart-2: oklch(0.76 0.13 195);
+  --chart-3: oklch(0.55 0.1 230);
+  --chart-4: oklch(0.83 0.11 200);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.2 0.028 255);
+  --sidebar: oklch(0.18 0.022 235);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.62 0.17 255);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0.032 255);
+  --sidebar-primary: oklch(0.66 0.115 200);
+  --sidebar-primary-foreground: oklch(0.13 0.02 235);
+  --sidebar-accent: oklch(0.269 0.03 235);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.7 0.13 220);
+  --sidebar-ring: oklch(0.7 0.11 205);
 }
 
 @layer base {
@@ -127,14 +127,14 @@
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: oklch(0.45 0.05 250) transparent;
+    scrollbar-color: oklch(0.45 0.05 210) transparent;
   }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: oklch(0.45 0.05 250);
+    background: oklch(0.45 0.05 210);
     border-radius: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-track {
