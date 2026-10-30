@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import type { ComponentId } from '../types';
 import type { SceneQuality, FlagVisuals, PartVisuals } from './visualTypes';
-import { BOARD, CASE, COLORS, MOUNTS, PERIPH, TRAY } from './layout';
+import { BOARD, CASE, COLORS, DESK, MOUNTS, PERIPH, TRAY } from './layout';
 import {
   brushedTexture,
   fanGrillTexture,
@@ -257,61 +257,167 @@ export function setComponentId(g: THREE.Object3D, id: ComponentId): void {
 
 export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): void {
   scene.background = new THREE.Color(COLORS.bg);
-  scene.fog = new THREE.Fog(COLORS.bg, 18, 42);
+  scene.fog = new THREE.Fog(COLORS.bg, 20, 52);
 
-  // أرضية دائرية داكنة تستقبل الظلال
+  // أرضية المختبر — 75سم أسفل سطح مكتب الورشة (توجيه v4 أ.1)
   const ground = new THREE.Mesh(
-    new THREE.CircleGeometry(22, 24),
-    new THREE.MeshStandardMaterial({ color: 0x141a22, metalness: 0, roughness: 0.92, flatShading: false }),
+    new THREE.CircleGeometry(30, 28),
+    new THREE.MeshStandardMaterial({ color: 0x131820, metalness: 0, roughness: 0.94, flatShading: false }),
   );
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = 0;
+  ground.position.y = DESK.floorY;
   ground.receiveShadow = true;
   scene.add(ground);
 
   // شبكة أرضية خفيفة
-  const grid = new THREE.GridHelper(30, 30, 0x2a3340, 0x1a212b);
-  grid.position.y = 0.01;
+  const grid = new THREE.GridHelper(40, 40, 0x232c38, 0x171d26);
+  grid.position.y = DESK.floorY + 0.01;
   const gridMat: THREE.Material | THREE.Material[] = grid.material;
   const gridMats = Array.isArray(gridMat) ? gridMat : [gridMat];
   for (const gm of gridMats) {
     gm.transparent = true;
-    gm.opacity = 0.4;
+    gm.opacity = 0.35;
   }
   scene.add(grid);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.45));
-  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x20242c, 0.5));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1b2028, 0.6));
 
-  // شمس دافئة مع ظلال (حسب الجودة)
-  const dir = new THREE.DirectionalLight(0xfff2e0, 2.0);
-  dir.position.set(-6, 8, 6);
+  // شمس دافئة مع ظلال (حسب الجودة) — تغطي المكتب كاملًا
+  const dir = new THREE.DirectionalLight(0xfff2e0, 2.6);
+  dir.position.set(-7, 10, 8);
   if (quality !== 'low') {
     dir.castShadow = true;
     const size = quality === 'high' ? 2048 : 1024;
     dir.shadow.mapSize.set(size, size);
-    dir.shadow.camera.left = -6;
-    dir.shadow.camera.right = 6;
-    dir.shadow.camera.top = 6;
-    dir.shadow.camera.bottom = -6;
+    dir.shadow.camera.left = -12;
+    dir.shadow.camera.right = 12;
+    dir.shadow.camera.top = 12;
+    dir.shadow.camera.bottom = -12;
     dir.shadow.camera.near = 2;
-    dir.shadow.camera.far = 30;
+    dir.shadow.camera.far = 45;
     dir.shadow.camera.updateProjectionMatrix();
     dir.shadow.bias = -0.0004;
     dir.shadow.normalBias = 0.02;
   }
   scene.add(dir);
 
-  const fill = new THREE.PointLight(0xffffff, 0.5, 0, 0);
-  fill.position.set(3, 3, -2);
+  const fill = new THREE.PointLight(0xffffff, 0.6, 0, 0);
+  fill.position.set(4, 7, -2);
   scene.add(fill);
-  const front = new THREE.PointLight(0xfff4e0, 1.0, 0, 0);
-  front.position.set(-5, 3.5, 3);
+  const front = new THREE.PointLight(0xfff4e0, 1.6, 0, 0);
+  front.position.set(-5, 4.5, 6);
   scene.add(front);
+
+  // محطة العمل: مكتب + جدار ورشة + إضاءة سقفية + مشترك كهرباء
+  scene.add(buildWorkstation());
 }
 
 // ============================================================
-// الهيكل الثابت (caseShell) — جدران/واجهة/خلفية/قواعد
+// محطة عمل الورشة (توجيه v4 أ.1 — مكتب واحد يجمع الجهاز والشاشة والصينية)
+// ============================================================
+
+function buildWorkstation(): THREE.Group {
+  scope('desk');
+  const g = new THREE.Group();
+  g.name = 'workstation';
+
+  const w = DESK.maxX - DESK.minX; // 15
+  const d = DESK.maxZ - DESK.minZ; // 10.6
+  const cx = (DESK.minX + DESK.maxX) / 2;
+  const cz = (DESK.minZ + DESK.maxZ) / 2;
+
+  // --- سطح المكتب: لوح سميك بحافة ألمنيوم على الأطراف ---
+  const topMat = mat(0x4a525c, 0.25, 0.65, { map: brushedTexture('#525a64') });
+  const top = box(w, DESK.thickness, d, topMat, cx, DESK.topY - DESK.thickness / 2, cz, true, true);
+  top.name = 'desk-top';
+  g.add(top);
+  const trimMat = mat(0x565f6a, 0.7, 0.4);
+  // أربعة أشرطة حواف معدنية رفيعة (تفصل السطح عن الأطراف كطاولات الورش الحقيقية)
+  g.add(box(w, 0.06, 0.06, trimMat, cx, DESK.topY - 0.03, DESK.minZ + 0.03, false));
+  g.add(box(w, 0.06, 0.06, trimMat, cx, DESK.topY - 0.03, DESK.maxZ - 0.03, false));
+  g.add(box(0.06, 0.06, d, trimMat, DESK.minX + 0.03, DESK.topY - 0.03, cz, false));
+  g.add(box(0.06, 0.06, d, trimMat, DESK.maxX - 0.03, DESK.topY - 0.03, cz, false));
+
+  // --- أرجل فولاذية على شكل حرف L + عارضات عرضية + رف سفلي ---
+  const legMat = mat(COLORS.deskSteel, 0.6, 0.45, { map: brushedTexture('#2f3740') });
+  const legH = DESK.topY - DESK.thickness - DESK.floorY; // 7
+  const legCy = DESK.floorY + legH / 2;
+  for (const lx of [DESK.minX + DESK.legInset, DESK.maxX - DESK.legInset]) {
+    for (const lz of [DESK.minZ + DESK.legInset, DESK.maxZ - DESK.legInset]) {
+      g.add(box(0.24, legH, 0.24, legMat, lx, legCy, lz, true));
+      // قدم مطاطية سوداء
+      g.add(box(0.3, 0.08, 0.3, mat(0x0c0f14, 0.2, 0.7), lx, DESK.floorY + 0.04, lz, false));
+    }
+  }
+  // عارضتان طوليتان تربطان الأرجل + رف سفلي كامل
+  for (const lz of [DESK.minZ + DESK.legInset, DESK.maxZ - DESK.legInset]) {
+    g.add(box(w - DESK.legInset * 2, 0.14, 0.1, legMat, cx, DESK.floorY + 1.1, lz, false));
+  }
+  g.add(box(w - 1.4, 0.1, d - 1.4, mat(0x232a32, 0.5, 0.55), cx, DESK.floorY + 3.6, cz, true, true));
+
+  // --- جدار الورشة خلف المكتب + لوح تعليق أدوات + رفان ---
+  const wallMat = mat(COLORS.wall, 0.15, 0.85);
+  const wall = box(34, 26, 0.4, wallMat, cx, DESK.floorY + 13, DESK.minZ - 0.8, false, true);
+  wall.name = 'workshop-wall';
+  g.add(wall);
+  // إيزود السقف/الجدار: شريط داكن أفقياً + لوح تعليق خلف الجهاز
+  g.add(box(34, 0.5, 0.06, mat(0x11161d, 0.2, 0.8), cx, DESK.floorY + 6.4, DESK.minZ - 0.58, false));
+  const pegboard = box(6.4, 5.2, 0.06, mat(0x171d26, 0.3, 0.75, { map: ventMeshTexture('#1c242e', '#10161d') }), 1.05, DESK.floorY + 9.4, DESK.minZ - 0.56, false);
+  pegboard.name = 'pegboard';
+  g.add(pegboard);
+  // رفان معدنيان على الجدار مع علب صغيرة
+  for (const sy of [DESK.floorY + 10.6, DESK.floorY + 12.2]) {
+    g.add(box(5.2, 0.1, 1.2, legMat, -3.6, sy, DESK.minZ - 0.2, false));
+    g.add(box(5.2, 0.1, 1.2, legMat, 6.8, sy, DESK.minZ - 0.2, false));
+    for (let i = 0; i < 3; i++) {
+      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x2c3641 : 0x39434e, 0.2, 0.7), -4.8 + i * 1.2, sy + 0.45, DESK.minZ - 0.2, false));
+      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x39434e : 0x2c3641, 0.2, 0.7), 5.9 + i * 1.1, sy + 0.45, DESK.minZ - 0.2, false));
+    }
+  }
+
+  // --- مصابيح سقفية معلقة (زينة + إضاءة) ---
+  const barMat = mat(0x39424d, 0.5, 0.45);
+  const glowMat = new THREE.MeshStandardMaterial({ color: 0xf5f8ff, emissive: 0xeef4ff, emissiveIntensity: 0.9, roughness: 0.4, metalness: 0, flatShading: false });
+  for (const bx of [-2.4, 4.6]) {
+    const bz = bx < 0 ? 2.2 : 6.2; // توزيع المصباحين على عمق المكتب
+    g.add(cyl(0.02, 3.4, mat(0x1a2028, 0.4, 0.5), 'y', bx, DESK.floorY + 16.2, bz, false)); // سلك التعليق
+    g.add(box(0.5, 0.12, 4.4, barMat, bx, DESK.floorY + 14.4, bz, false));
+    g.add(box(0.42, 0.03, 4.2, glowMat, bx, DESK.floorY + 14.32, bz, false));
+    const lamp = new THREE.PointLight(0xf2f6ff, 1.5, 26, 1.4);
+    lamp.position.set(bx, DESK.floorY + 14.0, bz);
+    g.add(lamp);
+  }
+
+  // --- مشترك كهرباء على المكتب خلف الشاشة (تفصيل واقعي غير تفاعلي) ---
+  const strip = new THREE.Group();
+  strip.name = 'power-strip';
+  const sx = 6.4, sz = 7.5;
+  strip.add(box(1.9, 0.14, 0.42, mat(0x252c34, 0.35, 0.6), sx, 0.07, sz, true));
+  for (let i = 0; i < 4; i++) {
+    strip.add(box(0.26, 0.02, 0.24, mat(0x0d1116, 0.2, 0.7), sx - 0.66 + i * 0.44, 0.145, sz, false));
+  }
+  strip.add(box(0.14, 0.05, 0.1, mat(0x8c1d1d, 0.3, 0.5, { emissive: 0x8c1d1d, emissiveIntensity: 0.5 }), sx + 0.82, 0.16, sz, false)); // لمبة حمراء
+  // كابلا مخرجان: نحو الجدار خلف المكتب
+  strip.add(makeCable([
+    new THREE.Vector3(sx - 0.85, 0.09, sz),
+    new THREE.Vector3(sx - 1.4, 0.05, sz + 0.5),
+    new THREE.Vector3(sx - 1.7, 0.05, DESK.maxZ - 0.4),
+    new THREE.Vector3(sx - 1.75, 0.05, DESK.maxZ + 0.15),
+  ], 0.045));
+  g.add(strip);
+
+  return g;
+}
+
+// ============================================================
+// الهيكل الثابت (caseShell) — توجيه v4 (أولوية 2):
+//  - حوض فولاذي حقيقي مبثوق من مقطع C بسماكة جدران (ExtrudeGeometry)
+//    بدل خمسة صناديق ملسقة — الحواف والأركان لها سماكة وحدود واضحة.
+//  - جدار صينية اللوحة الأم مع مساند نحاسية (standoffs) وتجويفات تمرير كابلات.
+//  - واجهة أمامية صناعية: إطار بارز + محيط محفور + شبك سحب سداسي + لوح علوي مصقول.
+//  - خلفية بمنافذ توسعة وقصورة I/O وشبك عسلوي لمزود الطاقة.
+//  - قفص تخزين 3.5" بأرضية ومساند ومطاطات + أقدام مطاطية.
 // ============================================================
 
 function buildCaseShell(flags: FlagVisuals): THREE.Group {
@@ -325,33 +431,117 @@ function buildCaseShell(flags: FlagVisuals): THREE.Group {
   const wX = CASE.maxX - CASE.minX;       // 2.1
   const hY = CASE.maxY - CASE.minY;       // 4.5
   const dZ = CASE.maxZ - CASE.minZ;       // 4.6
+  const T = 0.09;                         // سماكة جدار الحوض
 
-  // جدران بخامة معدن مصقول (فرشات)
-  const wallMat = mat(COLORS.metalDark, 0.5, 0.5, { map: brushedTexture('#2a323c') });
-  const trayWallMat = mat(0x2c343e, 0.5, 0.48, { map: brushedTexture('#333c46') });
+  // ===== 1) حوض الهيكل: مقطع C (خلف + سقف + أرضية) مبثوق على طول X =====
+  // المقطع في مستوى (u=Z of case, v=Y of case)، البثق على عمق wX ثم يدور إلى محور X.
+  const shellShape = new THREE.Shape();
+  shellShape.moveTo(0, 0);
+  shellShape.lineTo(dZ, 0);
+  shellShape.lineTo(dZ, T);
+  shellShape.lineTo(T, T);
+  shellShape.lineTo(T, hY - T);
+  shellShape.lineTo(dZ, hY - T);
+  shellShape.lineTo(dZ, hY);
+  shellShape.lineTo(0, hY);
+  shellShape.closePath();
+  const shellGeo = new THREE.ExtrudeGeometry(shellShape, { depth: wX, bevelEnabled: false, curveSegments: 4 });
+  const shellMat = mat(COLORS.metalDark, 0.62, 0.46, { map: brushedTexture('#2b333d') });
+  const tub = new THREE.Mesh(shellGeo, shellMat);
+  tub.rotation.y = -Math.PI / 2; // عمق البثق (+Z الشكلي) → -X العالمي
+  tub.position.x = CASE.maxX;    // يمتد البثق من X=2.1 نحو X=0
+  tub.castShadow = castEnabled;
+  tub.receiveShadow = true;
+  tub.name = 'case-tub';
+  g.add(tub);
 
-  g.add(box(0.05, hY, dZ, trayWallMat, CASE.maxX - 0.025, cy, cz, true, true)); // يمين (صينية اللوحة)
-  g.add(box(wX, 0.05, dZ, wallMat, cx, CASE.maxY - 0.025, cz, true, true));     // سقف
-  g.add(box(wX, 0.05, dZ, wallMat, cx, CASE.minY + 0.025, cz, true, true));     // أرضية
-  g.add(box(wX, hY, 0.05, wallMat, cx, cy, CASE.minZ + 0.025, true, true));     // خلف
-  g.add(box(wX, hY, 0.05, mat(0x262d36, 0.35, 0.6), cx, cy, CASE.maxZ - 0.025, true, true)); // أمام
+  // ===== 2) جدار صينية اللوحة الأم (يمين) بمساند نحاسية وتجويفات كابلات =====
+  const trayWallMat = mat(0x2c343e, 0.55, 0.48, { map: brushedTexture('#333c46') });
+  g.add(box(0.06, hY - 2 * T, dZ - T, trayWallMat, CASE.maxX - 0.03, cy, cz + T / 2, true, true));
+  // 6 مساند نحاسية تحت مسامير اللوحة
+  const standoffMat = mat(0xb08d3e, 0.85, 0.35);
+  const ys = [BOARD.yMin + 0.1, (BOARD.yMin + BOARD.yMax) / 2, BOARD.yMax - 0.1];
+  const zs = [BOARD.zMin + 0.1, BOARD.zMax - 0.1];
+  for (const wy of ys) {
+    for (const wz of zs) {
+      g.add(cyl(0.032, 0.1, standoffMat, 'x', BOARD.x + 0.02, wy, wz, false));
+      const s = makeScrew(0.035, 0.3, 'x');
+      s.position.set(BOARD.x + 0.05, wy, wz);
+      flags.moboScrews.push(s);
+      g.add(s);
+    }
+  }
+  // تجويفات تمرير الكابلات (grommets) بثلاثة مستويات
+  const grommetMat = mat(0x0d1116, 0.2, 0.7);
+  for (const gy of [1.5, 2.8, 4.0]) {
+    g.add(box(0.045, 0.6, 0.32, grommetMat, CASE.maxX - 0.045, gy, 3.7, false));
+    g.add(box(0.02, 0.66, 0.38, mat(0x39434e, 0.5, 0.5), CASE.maxX - 0.03, gy, 3.7, false));
+  }
 
-  // حافتا شطف عموديتان على حافة الصينية (أمام/خلف)
-  g.add(box(0.02, hY * 0.92, 0.02, mat(0x414c58, 0.6, 0.4), CASE.maxX - 0.18, cy, CASE.maxZ - 0.62, false));
-  g.add(box(0.02, hY * 0.92, 0.02, mat(0x414c58, 0.6, 0.4), CASE.maxX - 0.18, cy, CASE.minZ + 0.62, false));
-
-  // ===== الواجهة الأمامية =====
-  // لوح شبك تهوية سداسي يغطي منطقة السحب السفلية
+  // ===== 3) الواجهة الأمامية — تصميم صناعي بثلاث طبقات =====
+  const bezelBodyMat = mat(0x1c222a, 0.4, 0.55);
+  const bezelFrameMat = mat(0x2a323c, 0.55, 0.45, { map: brushedTexture('#333c46') });
+  // لوح خلفي يلامس حوض الهيكل
+  g.add(box(wX + 0.1, hY, 0.1, bezelBodyMat, cx, cy, CASE.maxZ + 0.05, true, true));
+  // إطار بارز يحيط بمحيط الشبك (4 أشرطة بسماكة ظاهرة)
+  const fx0 = 0.16, fx1 = wX - 0.16, fy0 = 0.3, fy1 = 3.05; // فتحة الشبك
+  const fw = fx1 - fx0, fh = fy1 - fy0;
+  const fz = CASE.maxZ + 0.13;
+  g.add(box(fw + 0.16, 0.09, 0.12, bezelFrameMat, cx, fy1 + 0.045, fz, false));
+  g.add(box(fw + 0.16, 0.09, 0.12, bezelFrameMat, cx, fy0 - 0.045, fz, false));
+  g.add(box(0.09, fh + 0.18, 0.12, bezelFrameMat, fx0 - 0.045, (fy0 + fy1) / 2, fz, false));
+  g.add(box(0.09, fh + 0.18, 0.12, bezelFrameMat, fx1 + 0.045, (fy0 + fy1) / 2, fz, false));
+  // شبك السحب السداسي داخل المحيط (غائر للداخل — عمق حقيقي)
   const ventPlateMat = mat(0x11151b, 0.35, 0.6, { map: ventMeshTexture('#1a2129', '#07090c') });
-  g.add(box(1.6, 2.5, 0.02, ventPlateMat, cx, 1.45, CASE.maxZ + 0.005, false));
-  // شريطا تجويف أفقيان فوق الشبك
-  g.add(box(1.6, 0.04, 0.03, mat(0x3a4450, 0.5, 0.5), cx, 2.85, CASE.maxZ + 0.005, false));
-  g.add(box(1.6, 0.04, 0.03, mat(0x3a4450, 0.5, 0.5), cx, 3.0, CASE.maxZ + 0.005, false));
-  // شعار عام على أعلى الواجهة (يواجه +Z تلقائيًا)
-  g.add(plane(0.72, 0.18, mat(0xffffff, 0.2, 0.5, { map: frontBadgeTexture(), transparent: true }), 'z', cx, 3.95, CASE.maxZ + 0.006));
+  g.add(box(fw, fh, 0.04, ventPlateMat, cx, (fy0 + fy1) / 2, CASE.maxZ + 0.09, false));
+  // لوح علوي مصقول بشعار عام وشريط LED سماوي
+  g.add(box(wX + 0.1, hY - fy1 - 0.06, 0.14, mat(0x262d36, 0.5, 0.5, { map: brushedTexture('#2e3640') }), cx, (fy1 + hY) / 2, CASE.maxZ + 0.07, true));
+  g.add(plane(0.8, 0.2, mat(0xffffff, 0.2, 0.5, { map: frontBadgeTexture(), transparent: true }), 'z', cx, 4.02, CASE.maxZ + 0.145));
+  g.add(box(1.5, 0.035, 0.02, mat(COLORS.accent, 0.3, 0.4, { emissive: COLORS.accent, emissiveIntensity: 0.7 }), cx, fy1 + 0.115, CASE.maxZ + 0.145, false));
+  // شريط سفلي صلب أسفل الشبك
+  g.add(box(wX + 0.1, fy0, 0.12, bezelBodyMat, cx, fy0 / 2, CASE.maxZ + 0.06, false));
 
-  // ===== منطقة التحكم العلوية الأمامية (على السقف) =====
-  // زر التشغيل + زر إعادة التشغيل
+  // ===== 4) الخلف: قصورة I/O + منافذ + 7 مقابس توسعة + شبك عسلوي =====
+  g.add(box(0.55, 1.1, 0.03, mat(COLORS.black, 0.3, 0.6), 1.35, 3.35, CASE.minZ - 0.005, false));
+  const portMat = mat(0x0d1116, 0.3, 0.6);
+  const ethMat = mat(0x1c242c, 0.4, 0.5, { map: null });
+  for (const py of [3.62, 3.5]) {
+    g.add(box(0.09, 0.07, 0.02, portMat, 1.18, py, CASE.minZ - 0.018, false));
+    g.add(box(0.09, 0.07, 0.02, portMat, 1.32, py, CASE.minZ - 0.018, false));
+  }
+  g.add(box(0.15, 0.12, 0.02, ethMat, 1.5, 3.56, CASE.minZ - 0.018, false));
+  g.add(box(0.16, 0.05, 0.02, portMat, 1.24, 3.3, CASE.minZ - 0.018, false));
+  // شبك عسلوي عمودي بجوار قصورة I/O + شبك ألمنيوم مزود الطاقة أسفل
+  g.add(box(0.42, 1.15, 0.02, ventPlateMat, 0.42, 3.35, CASE.minZ - 0.005, false));
+  g.add(box(1.2, 0.85, 0.02, ventPlateMat, 1.35, 0.48, CASE.minZ - 0.005, false));
+
+  const slotStripMat = mat(COLORS.metalMid, 0.6, 0.45, { map: brushedTexture('#424d59') });
+  for (let i = 0; i < 7; i++) {
+    g.add(box(0.72, 0.05, 0.03, slotStripMat, 1.35, 2.55 - i * 0.13, CASE.minZ - 0.005, false));
+    g.add(cyl(0.024, 0.02, mat(COLORS.aluminum, 0.8, 0.35), 'z', 1.66, 2.615 - i * 0.13, CASE.minZ - 0.012, false));
+  }
+
+  // ===== 5) قفص التخزين 3.5" (يبقى بالهيكل عند فك القرص) =====
+  const cageMat = mat(0x272f38, 0.55, 0.5, { map: brushedTexture('#2f3842') });
+  const hx = MOUNTS.hdd; // [1.05, 0.78, 3.55]
+  g.add(box(1.34, 0.04, 1.56, cageMat, hx[0], hx[1] - 0.15, hx[2], true, true)); // أرضية القفص
+  g.add(box(1.34, 0.55, 0.05, cageMat, hx[0], hx[1] + 0.12, hx[2] - 0.76, true)); // جدار خلفي
+  for (const px of [hx[0] - 0.62, hx[0] + 0.62]) {
+    g.add(box(0.05, 0.55, 1.56, cageMat, px, hx[1] + 0.12, hx[2], true));       // قضيبان جانبيان
+    // مطاطات تثبيت دائرية على الجانبين
+    for (const qz of [hx[2] - 0.55, hx[2] + 0.55]) {
+      g.add(cyl(0.045, 0.07, mat(0x15191f, 0.2, 0.75), 'x', px, hx[1], qz, false));
+    }
+  }
+  // 4 مسامير قفص أمامية
+  for (const px of [hx[0] - 0.55, hx[0] + 0.55]) {
+    for (const py of [hx[1] - 0.08, hx[1] + 0.08]) {
+      g.add(cyl(0.02, 0.02, mat(COLORS.aluminum, 0.8, 0.35), 'z', px, py, hx[2] + 0.77, false));
+    }
+  }
+
+  // ===== 6) السقف: فلتر غبار شبكي + منطقة التحكم العلوية (زر/LED/USB) =====
+  g.add(box(1.7, 0.012, 3.4, ventPlateMat, cx, CASE.maxY + 0.006, cz - 0.1, false));
   g.add(cyl(0.07, 0.06, mat(COLORS.metalMid, 0.5, 0.4), 'y', 0.5, CASE.maxY + 0.005, CASE.maxZ - 0.45, false));
   g.add(cyl(0.042, 0.045, mat(0x1a2027, 0.4, 0.5), 'y', 0.28, CASE.maxY + 0.003, CASE.maxZ - 0.45, false));
   g.add(cyl(0.02, 0.012, mat(0xd8dade, 0.2, 0.5), 'y', 0.28, CASE.maxY + 0.028, CASE.maxZ - 0.45, false));
@@ -362,8 +552,6 @@ function buildCaseShell(flags: FlagVisuals): THREE.Group {
   powerLed.position.set(0.78, CASE.maxY + 0.01, CASE.maxZ - 0.45);
   flags.powerLed = powerLed;
   g.add(powerLed);
-
-  // منفذا USB-A (تجويف داكن + لسان داخلي) + مقبسا صوت بحلقات ملونة خافتة
   const usbMat = mat(COLORS.black, 0.3, 0.55);
   const tongueMat = mat(0x3f4a55, 0.3, 0.5);
   for (const ux of [0.62, 0.86]) {
@@ -373,52 +561,14 @@ function buildCaseShell(flags: FlagVisuals): THREE.Group {
   g.add(cyl(0.028, 0.014, mat(0x2f6b4f, 0.4, 0.45), 'y', 1.08, CASE.maxY + 0.002, CASE.maxZ - 0.45, false));
   g.add(cyl(0.028, 0.014, mat(0x7a4040, 0.4, 0.45), 'y', 1.2, CASE.maxY + 0.002, CASE.maxZ - 0.45, false));
 
-  // ===== السقف: فلتر غبار شبكي =====
-  g.add(box(1.7, 0.012, 3.4, ventPlateMat, cx, CASE.maxY + 0.006, cz - 0.1, false));
-
-  // ===== الخلف: قصورة I/O + منافذ =====
-  g.add(box(0.55, 1.1, 0.03, mat(COLORS.black, 0.3, 0.6), 1.35, 3.35, CASE.minZ - 0.005, false));
-  // منافذ خلفية على قصورة I/O (USB + إيثرنت + صوت) — توهم بصري فقط
-  const portMat = mat(0x0d1116, 0.3, 0.6);
-  const ethMat = mat(0x1c242c, 0.4, 0.5, { map: null });
-  for (const py of [3.62, 3.5]) {
-    g.add(box(0.09, 0.07, 0.02, portMat, 1.18, py, CASE.minZ - 0.018, false));
-    g.add(box(0.09, 0.07, 0.02, portMat, 1.32, py, CASE.minZ - 0.018, false));
-  }
-  g.add(box(0.15, 0.12, 0.02, ethMat, 1.5, 3.56, CASE.minZ - 0.018, false));
-  g.add(box(0.16, 0.05, 0.02, portMat, 1.24, 3.3, CASE.minZ - 0.018, false)); // شريط صوت
-
-  // 7 مقابس توسعة أفقية مع برغي علوي لكل مقبس
-  const slotStripMat = mat(COLORS.metalMid, 0.6, 0.45, { map: brushedTexture('#424d59') });
-  for (let i = 0; i < 7; i++) {
-    g.add(box(0.72, 0.05, 0.03, slotStripMat, 1.35, 2.55 - i * 0.13, CASE.minZ - 0.005, false));
-    g.add(cyl(0.024, 0.02, mat(COLORS.aluminum, 0.8, 0.35), 'z', 1.66, 2.615 - i * 0.13, CASE.minZ - 0.012, false));
-  }
-
-  // ===== جدران الصينية: تجاويف تمرير الكابلات (grommets) =====
-  const grommetMat = mat(0x0d1116, 0.2, 0.7);
-  for (const gy of [1.5, 2.8, 4.0]) {
-    g.add(box(0.045, 0.6, 0.32, grommetMat, CASE.maxX - 0.045, gy, 3.7, false));
-    g.add(box(0.02, 0.66, 0.38, mat(0x39434e, 0.5, 0.5), CASE.maxX - 0.03, gy, 3.7, false));
-  }
-
   // فلتر غبار سفلي تحت منطقة مزود الطاقة
   g.add(box(1.5, 0.012, 1.35, ventPlateMat, 1.32, CASE.minY + 0.012, 0.72, false));
 
-  // قاعدتان سفليتان
-  const footMat = mat(COLORS.black, 0.3, 0.6);
-  g.add(box(wX, 0.06, 0.45, footMat, cx, 0.03, CASE.minZ + 0.45, true));
-  g.add(box(wX, 0.06, 0.45, footMat, cx, 0.03, CASE.maxZ - 0.45, true));
-
-  // 6 مسامير تثبيت اللوحة الأم — أبناء الهيكل (تبقى في الهيكل عند فك اللوحة)
-  const ys = [BOARD.yMin + 0.1, (BOARD.yMin + BOARD.yMax) / 2, BOARD.yMax - 0.1];
-  const zs = [BOARD.zMin + 0.1, BOARD.zMax - 0.1];
-  for (const wy of ys) {
-    for (const wz of zs) {
-      const s = makeScrew(0.035, 0.3, 'x');
-      s.position.set(BOARD.x + 0.05, wy, wz);
-      flags.moboScrews.push(s);
-      g.add(s);
+  // ===== 7) أقدام مطاطية أربعة (الجهاز يقف على المكتب) =====
+  const footMat = mat(0x0c0f14, 0.2, 0.75);
+  for (const fxp of [0.28, wX - 0.28]) {
+    for (const fzp of [0.5, dZ - 0.5]) {
+      g.add(box(0.42, 0.06, 0.5, footMat, fxp, CASE.minY + 0.03, fzp, false));
     }
   }
 
@@ -632,6 +782,33 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   fpPlug.name = 'flag-front-panel-plug';
   flags.frontPanelPlug = fpPlug;
   g.add(fpPlug);
+
+  // 13) توجيه v4: تجمع الصوت — رقاقة الكودك + مكثفات + عزل ذهبي (زاوية سفلية)
+  g.add(box(0.03, 0.14, 0.14, mat(0x11171e, 0.25, 0.5), onFace(0.03), -1.32, -0.55, false));
+  const capAudioGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.08, 10);
+  for (const az of [-0.78, -0.86, -0.94, -1.02]) {
+    const c = new THREE.Mesh(capAudioGeo, mat(0x3a4a58, 0.55, 0.4));
+    c.rotation.z = Math.PI / 2;
+    c.position.set(onFace(0.08), -1.28, az);
+    g.add(c);
+  }
+  g.add(box(0.02, 0.5, 0.015, gold, onFace(0.02) - 0.012, -1.28, -0.68, false)); // خط عزل الصوت
+
+  // 14) توجيه v4: فتحة PCIe x1 قصيرة تحت فتحتي x16
+  g.add(box(0.05, 0.05, 0.5, pcieMat, onFace(0.05), -1.38, 0.3, false));
+
+  // 15) توجيه v4: رأس USB 3.0 أزرق داخلي (يسار أعلى اللوحة)
+  g.add(box(0.09, 0.16, 0.26, mat(0x1d4ed8, 0.35, 0.5), onFace(0.09), 1.05, -0.42, false));
+  g.add(box(0.06, 0.1, 0.18, mat(0x0d1116, 0.25, 0.6), onFace(0.06) - 0.05, 1.05, -0.42, false));
+
+  // 16) توجيه v4: ملفات VRM (chokes) مربعة داكنة يسار المقبس
+  for (const chy of [0.32, 0.16, 0.0]) {
+    for (const chz of [-0.92, -0.78]) {
+      const choke = box(0.05, 0.13, 0.13, mat(0x181e26, 0.3, 0.55), onFace(0.05), chy, chz, false);
+      g.add(choke);
+      g.add(box(0.02, 0.05, 0.05, mat(0x39434e, 0.4, 0.5), onFace(0.02) - 0.04, chy, chz, false));
+    }
+  }
 
   setComponentId(g, 'motherboard');
   return g;
@@ -1123,7 +1300,9 @@ function buildGpuPower(): THREE.Group {
 }
 
 // ============================================================
-// صينية القطع (داخل root مباشرة — بلا componentId)
+// سجادة القطع المفكوكة (داخل root مباشرة — بلا componentId)
+// توجيه v4: سجادة مضادة للكهرباء الساكنة موضوعة على سطح مكتب الورشة
+// يسار الجهاز — كل قطعة تفك تستلقي عليها عند TRAY.slots.
 // ============================================================
 
 function buildTrayTable(): THREE.Group {
@@ -1133,27 +1312,14 @@ function buildTrayTable(): THREE.Group {
 
   const cx = (TRAY.minX + TRAY.maxX) / 2; // -3.35
   const cz = (TRAY.minZ + TRAY.maxZ) / 2; // 2.4
+  const top = TRAY.tableTopY;             // 0.06 — أعلى السجادة فوق سطح المكتب
 
-  // السطح (أعلى = TRAY.tableTopY = 0.9)
-  g.add(box(TRAY.maxX - TRAY.minX, 0.08, TRAY.maxZ - TRAY.minZ, mat(0x2b333d, 0.4, 0.6), cx, 0.86, cz, true, true));
-  // سجادة مضادة للكهرباء الساكنة بحدين فاتحين
-  g.add(box(1.9, 0.012, 3.4, mat(0x1c2830, 0.2, 0.8), cx + 0.1, 0.906, cz, false));
-  g.add(box(1.9, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx + 0.1, 0.913, cz - 1.685, false));
-  g.add(box(1.9, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx + 0.1, 0.913, cz + 1.685, false));
+  // السجادة المضادة للكهرباء الساكنة بحدين سماويين
+  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.012, TRAY.maxZ - TRAY.minZ + 0.3, mat(0x1c2830, 0.2, 0.8), cx, top - 0.006, cz, false, true));
+  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx, top + 0.002, cz - (TRAY.maxZ - TRAY.minZ) / 2 - 0.135, false));
+  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx, top + 0.002, cz + (TRAY.maxZ - TRAY.minZ) / 2 + 0.135, false));
 
-  // 4 أرجل أسطوانية
-  const legGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.82, 12);
-  const legMat = mat(COLORS.metalMid, 0.6, 0.45);
-  for (const lx of [TRAY.minX + 0.15, TRAY.maxX - 0.15]) {
-    for (const lz of [TRAY.minZ + 0.15, TRAY.maxZ - 0.15]) {
-      const leg = new THREE.Mesh(legGeo, legMat);
-      leg.position.set(lx, 0.41, lz);
-      if (castEnabled) leg.castShadow = true;
-      g.add(leg);
-    }
-  }
-
-  // خطوط خانات باهتة لكل مكوّن (عدا case) — تُثبَّت داخل حدود الطاولة
+  // خطوط خانات باهتة لكل مكوّن (عدا case) — داخل حدود السجادة
   const markers: Array<{ id: ComponentId; size: readonly [number, number] }> = [
     { id: 'ram', size: [0.55, 1.55] },
     { id: 'gpu', size: [1.15, 2.45] },
@@ -1175,37 +1341,26 @@ function buildTrayTable(): THREE.Group {
     const p = TRAY.slots[mk.id];
     const px = Math.min(Math.max(p[0], TRAY.minX + mk.size[0] / 2 + 0.02), TRAY.maxX - mk.size[0] / 2 - 0.02);
     const pz = Math.min(Math.max(p[2], TRAY.minZ + mk.size[1] / 2 + 0.02), TRAY.maxZ - mk.size[1] / 2 - 0.02);
-    g.add(box(mk.size[0], 0.012, mk.size[1], markerMat, px, 0.906, pz, false));
+    g.add(box(mk.size[0], 0.006, mk.size[1], markerMat, px, top + 0.003, pz, false));
   }
 
   // ===== عدة عمل (زينة تعليمية غير تفاعلية — الالتقاط يتوقف عندها كفراغ) =====
   // صينية مسامير صغيرة مع 6 مسامير متناثرة
   const trayBox = new THREE.Group();
   trayBox.name = 'deco-screw-tray';
-  const tbx = TRAY.maxX - 0.35, tbz = TRAY.minZ + 0.45;
-  trayBox.add(box(0.5, 0.05, 0.35, mat(0x39434e, 0.4, 0.55), tbx, 0.945, tbz, false));
-  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, 0.955, tbz - 0.175, false));
-  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, 0.955, tbz + 0.175, false));
-  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx - 0.25, 0.955, tbz, false));
-  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx + 0.25, 0.955, tbz, false));
+  const tbx = TRAY.maxX - 0.3, tbz = TRAY.minZ + 0.4;
+  trayBox.add(box(0.5, 0.05, 0.35, mat(0x39434e, 0.4, 0.55), tbx, top + 0.025, tbz, false));
+  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, top + 0.055, tbz - 0.175, false));
+  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, top + 0.055, tbz + 0.175, false));
+  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx - 0.25, top + 0.055, tbz, false));
+  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx + 0.25, top + 0.055, tbz, false));
   const decoScrewMat = mat(COLORS.aluminum, 0.85, 0.35);
   for (let i = 0; i < 6; i++) {
-    const sc = cyl(0.02, 0.035, decoScrewMat, 'y', tbx - 0.15 + (i % 3) * 0.15, 0.975, tbz - 0.08 + Math.floor(i / 3) * 0.16, false);
+    const sc = cyl(0.02, 0.035, decoScrewMat, 'y', tbx - 0.15 + (i % 3) * 0.15, top + 0.07, tbz - 0.08 + Math.floor(i / 3) * 0.16, false);
     sc.rotation.y = i * 0.7;
     trayBox.add(sc);
   }
   g.add(trayBox);
-
-  // مفك براغي مستلقي على حافة الطاولة (مقبض + ساق + سن)
-  const driver = new THREE.Group();
-  driver.name = 'deco-screwdriver';
-  const dx = TRAY.minX + 0.45, dz = TRAY.minZ + 0.5;
-  const handle = cyl(0.045, 0.34, mat(0x5a2323, 0.3, 0.55), 'z', dx, 0.95, dz, false);
-  driver.add(handle);
-  driver.add(cyl(0.012, 0.4, mat(COLORS.aluminum, 0.85, 0.35), 'z', dx, 0.95, dz + 0.36, false));
-  driver.add(box(0.02, 0.012, 0.05, mat(0x8a8f96, 0.8, 0.35), dx, 0.95, dz + 0.58, false));
-  driver.add(cyl(0.05, 0.02, mat(0x39434e, 0.4, 0.5), 'z', dx, 0.95, dz - 0.17, false));
-  g.add(driver);
 
   // سوار مضاد للكهرباء الساكنة (سوار دائري صغير)
   const esd = new THREE.Mesh(
@@ -1214,7 +1369,7 @@ function buildTrayTable(): THREE.Group {
   );
   esd.name = 'deco-esd-bracelet';
   esd.rotation.x = -Math.PI / 2;
-  esd.position.set(TRAY.minX + 1.1, 0.93, TRAY.maxZ - 0.5);
+  esd.position.set(TRAY.minX + 0.55, top + 0.02, TRAY.maxZ - 0.4);
   g.add(esd);
 
   return g;
@@ -1296,7 +1451,9 @@ function buildSataPower(): THREE.Group {
 }
 
 // ============================================================
-// الطرفيات: الشاشة + لوحة المفاتيح + الفأرة (الجلسة 4 — المواصفة §5)
+// الطرفيات: الشاشة (توجيه v4 — أولوية 1)
+// كيان مادي مستقل يقف على مكتب الورشة: قاعدة بيضاوية + حامل مائل + لوح بإطار
+// وذقن ولمبة وزر طاقة. لا كيبورد ولا ماوس — توجيه v3 أ.1.
 // ليست قطع PC — تُنقر عبر callbacks.onPeripheral
 // ============================================================
 
@@ -1305,18 +1462,55 @@ function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
   const g = new THREE.Group();
   g.name = 'periph-monitor';
   g.userData['peripheral'] = 'monitor';
+  void spinners;
 
-  // قاعدة + عمود
-  g.add(box(2.0, 0.1, 1.3, mat(COLORS.metalDark, 0.6, 0.45), 0, 0.05, 0, true, true));
-  g.add(box(0.34, 1.35, 0.22, mat(COLORS.metalDark, 0.6, 0.45), 0, 0.75, -0.18, true));
-  // الإطار
-  const bezelW = PERIPH.screenW + 0.22;
-  const bezelH = PERIPH.screenH + 0.2;
-  const bezel = box(bezelW, bezelH, 0.14, mat(0x14181e, 0.4, 0.5), 0, 0, 0, true, true);
-  bezel.position.set(PERIPH.screenCenterLocal[0], PERIPH.screenCenterLocal[1] + 0.05, PERIPH.screenCenterLocal[2] - 0.07);
+  const standMat = mat(0x2a323c, 0.6, 0.42, { map: brushedTexture('#39434e') });
+  const bezelMat = mat(0x14181e, 0.45, 0.5, { map: brushedTexture('#1b2027') });
+
+  // ===== 1) القاعدة: قرص بيضاوي مندرج يلامس سطح المكتب (Y=0 محليًا) =====
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(1.02, 1.18, 0.09, 30), standMat);
+  base.scale.z = 0.74;
+  base.position.set(0, 0.045, -0.1);
+  base.castShadow = castEnabled;
+  base.receiveShadow = true;
+  g.add(base);
+  // صرة اتصال القاعدة بالحامل
+  g.add(cyl(0.34, 0.07, standMat, 'y', 0, 0.11, -0.1, false));
+  // خط لمعة علوي على القاعدة
+  g.add(cyl(0.86, 0.012, mat(0x525c68, 0.7, 0.35), 'y', 0, 0.092, -0.1, false));
+
+  // ===== 2) الحامل: عمود مائل يرتفع من القاعدة إلى ظهر اللوح =====
+  // اللوح: مركزه screenCenterLocal=(0,2.55,0.1)، سماكته 0.14 → ظهره عند z=0.03.
+  // العمود يمتد من صرة القاعدة (y 0.14) حتى خلف اللوح (y ~1.6) باتصال هندسي صحيح.
+  const neck = new THREE.Group();
+  neck.position.set(0, 0.85, -0.12);
+  neck.rotation.x = -0.06; // ميلان خلفي خفيف كشاشات حقيقية
+  const neckBody = box(0.34, 1.5, 0.17, standMat, 0, 0, 0, true);
+  neck.add(neckBody);
+  // حز خلفي على العمود (إدارة الكابلات)
+  neck.add(box(0.1, 1.1, 0.05, mat(0x10151b, 0.3, 0.6), 0, 0.05, -0.1, false));
+  g.add(neck);
+  // لوح VESA خلف اللوح يغلق الفجوة بين العمود واللوح
+  g.add(box(0.95, 0.75, 0.04, standMat, 0, 1.42, -0.045, false));
+
+  // ===== 3) اللوح: إطار + ذقن سفلي + شاشة =====
+  const bezelW = PERIPH.screenW + 0.2;   // 5.5
+  const bezelH = PERIPH.screenH + 0.2;   // 3.25
+  const panelY = PERIPH.screenCenterLocal[1] + 0.05; // 2.6
+  const panelZ = PERIPH.screenCenterLocal[2] - 0.07; // 0.03
+  const bezel = box(bezelW, bezelH, 0.14, bezelMat, 0, panelY, panelZ, true, true);
+  bezel.name = 'monitor-panel';
   g.add(bezel);
-  // لمبة طاقة صغيرة على الحافة السفلية
-  const led = box(0.05, 0.05, 0.02, mat(COLORS.green, 0.2, 0.5, { emissive: 0x22c55e, emissiveIntensity: 0.9 }), -bezelW / 2 + 0.22, PERIPH.screenCenterLocal[1] + 0.05 - bezelH / 2 + 0.07, 0.08, false);
+  // إطار أمامي رفيع حول الشاشة (3 أشرطة — يترك سطح العرض مكشوفًا تمامًا)
+  const frameMat = mat(0x1b2129, 0.4, 0.55);
+  g.add(box(bezelW, 0.1, 0.02, frameMat, 0, panelY + bezelH / 2 - 0.05, panelZ + 0.075, false));
+  g.add(box(0.1, bezelH - 0.1, 0.02, frameMat, -bezelW / 2 + 0.05, panelY, panelZ + 0.075, false));
+  g.add(box(0.1, bezelH - 0.1, 0.02, frameMat, bezelW / 2 - 0.05, panelY, panelZ + 0.075, false));
+  // ذقن سفلي بشعار + لمبة طاقة — أسفل حافة الشاشة بلا تغطيتها
+  const chinY = panelY - bezelH / 2 + 0.07;
+  g.add(box(bezelW, 0.14, 0.02, mat(0x232b34, 0.4, 0.5), 0, chinY, panelZ + 0.075, false));
+  g.add(plane(0.62, 0.07, mat(0xffffff, 0.2, 0.5, { map: frontBadgeTexture(), transparent: true }), 'z', 0, chinY, panelZ + 0.087));
+  const led = box(0.05, 0.045, 0.02, mat(COLORS.green, 0.2, 0.5, { emissive: 0x22c55e, emissiveIntensity: 0.9 }), -bezelW / 2 + 0.28, chinY, panelZ + 0.086, false);
   g.add(led);
 
   // سطح العرض — مادة أساسية يستبدلها PCScene بنسيج الرسّام
@@ -1326,25 +1520,31 @@ function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
   screen.name = 'monitor-screen';
   g.add(screen);
 
-  // زر التشغيل (قابل للنقر) أسفل يمين الإطار
-  const btn = box(0.12, 0.12, 0.05, mat(0x2a323c, 0.5, 0.4), bezelW / 2 - 0.2, PERIPH.screenCenterLocal[1] + 0.05 - bezelH / 2 + 0.09, 0.075, false);
+  // زر التشغيل (قابل للنقر) أسفل يمين الذقن
+  const btn = box(0.12, 0.09, 0.05, mat(0x2a323c, 0.5, 0.4), bezelW / 2 - 0.26, chinY, panelZ + 0.08, false);
   btn.userData['peripheral'] = 'monitor-power';
   g.add(btn);
 
-  // كابل إشارة من الشاشة نحو البطاقة (يُخفى عند فصل الكابل — يتولاه PCScene)
+  // ===== 4) كابل الإشارة: من خلف الشاشة → سطح المكتب → خلف الجهاز → منفذ البطاقة =====
+  // مجموعة مستقلة عالميًا (يُلغى دوران الأب عليها) لضمان التوجيه الصحيح،
+  // ويُخفى/يُظهر من PCScene عبر مرجع 'monitor-cable' (المنطق بلا تغيير).
   const cableGroup = new THREE.Group();
   cableGroup.name = 'monitor-cable';
-  const pts = cablePoints([0, 0, 0], [
-    [PERIPH.monitorPos[0] - 0.9, 0.95, PERIPH.monitorPos[2] - 0.2],
-    [PERIPH.monitorPos[0] - 2.2, 0.92, PERIPH.monitorPos[2] - 1.6],
-    [2.6, 0.9, 3.2],
-    [1.4, 0.9, 2.4],
+  cableGroup.rotation.y = -PERIPH.monitorRotY; // إلغاء دوران المجموعة الأم — النقاط إحداثيات عالمية
+  const mp = PERIPH.monitorPos;
+  const pts = cablePoints(mp, [
+    [mp[0] - 0.1, 0.28, mp[2] - 0.1],   // دخول من أسفل ظهر الشاشة
+    [mp[0] + 0.5, 0.05, mp[2] + 1.1],   // هبوط يمين القاعدة على سطح المكتب
+    [mp[0] + 2.4, 0.05, mp[2] - 0.4],   // قوس يمين الشاشة نحو خلف المكتب
+    [7.6, 0.05, 1.0],                   // حافة المكتب اليمنى
+    [6.2, 0.05, -1.3],                  // خلف المكتب
+    [2.4, 0.05, -1.35],                 // امتداد خلف الجهاز (بعيد عن الواجهة)
+    [1.28, 0.4, -0.95],                 // بداية الصعود خلف الهيكل
+    [1.28, 1.4, -0.7],
+    [1.28, 1.98, 0.02],                 // منفذ DisplayPort على البطاقة
   ]);
-  cableGroup.add(makeCable(pts, 0.03, 0x14181e));
+  cableGroup.add(makeCable(pts, 0.028, 0x14181e));
   g.add(cableGroup);
-
-  // دوران شاشة بسيط حول Y مستبعد — لكن نضيف اهتزاز LED إلى spinners ليومض؟ لا — spinners للمراوح فقط.
-  void spinners;
 
   return g;
 }

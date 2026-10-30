@@ -1,10 +1,10 @@
 {
-  "manifestVersion": "1.0",
-  "appVersion": "2.1.0",
-  "reviewDirective": "PC_Repair_3D_Master_Prompt_v3_AR.md",
+  "manifestVersion": "2.0",
+  "appVersion": "4.0.0",
+  "reviewDirective": "أمر تصحيح إلزامي — Visual Redesign v4",
   "accessedAt": "2025-11",
   "runtimePolicy": "local-only",
-  "note": "كل الأصول تُخدم محليًا من public/ — لا روابط خارجية وقت تشغيل التطبيق. أصلان حقيقيان منزّلان (CC0)، والبقية إجرائية مفصلة بمعرفات ثابتة.",
+  "note": "كل الأصول تُخدم محليًا من public/ — لا روابط خارجية وقت تشغيل التطبيق. ستة أصول حقيقية منزّلة (CC0 من Poly Haven)، والبقية إجرائية مفصلة بمعرفات ثابتة.",
   "assets": [
     {
       "id": "polyhaven.circuit_board",
@@ -42,50 +42,130 @@
       "id": "polyhaven.screwdriver",
       "name": "Screwdriver (scanned)",
       "category": "training-tool",
-      "usage": "أداة تدريب ثانوية على طاولة صينية القطع (فئة §3.1-13) — غير تفاعلية، لا تحجب الجهاز",
+      "usage": "أداة تدريب ثانوية على سجادة القطع — غير تفاعلية، لا تحجب الجهاز",
       "sourceUrl": "https://polyhaven.com/a/screwdriver",
-      "sourceApi": "https://api.polyhaven.com/info/screwdriver",
       "designer": "PierreB3D",
       "license": "CC0-1.0",
-      "licenseVerifiedFrom": "https://polyhaven.com/license",
       "files": [
         "public/models/screwdriver/screwdriver_1k.gltf",
         "public/models/screwdriver/screwdriver.bin",
-        "public/models/screwdriver/textures/screwdriver_diff_1k.jpg",
-        "public/models/screwdriver/textures/screwdriver_nor_gl_1k.jpg",
-        "public/models/screwdriver/textures/screwdriver_arm_1k.jpg"
+        "public/models/screwdriver/textures/*"
       ],
-      "format": "glTF (embedded scene + external bin/textures)",
-      "texturesResolution": "1K",
+      "format": "glTF",
       "approxSizeKB": 1420,
-      "meshCount": 1,
-      "materialsCount": 1,
-      "boundingBoxMeters": { "x": 0.028, "y": 0.209, "z": 0.026 },
       "integration": {
         "loader": "GLTFLoader",
         "mountedBy": "src/lib/scene/PCScene.ts → loadRealAssets()",
-        "transform": "قياس لطول ≈1.6 وحدة (16سم) — وضع (-3.1, 0.912, 3.55) دوران Y=0.5 على طاولة الصينية",
+        "transform": "طول ≈1.6 وحدة (16سم) — على السجادة عند (-3.1, tableTopY, 3.55) دوران Y=0.5",
+        "failureBehavior": "يُتجاهل بصمت"
+      }
+    },
+    {
+      "id": "polyhaven.desk_lamp_arm_01",
+      "name": "Desk Lamp Arm 01",
+      "category": "workshop-prop",
+      "usage": "مصباح مكتب واقعي على الطرف الأيمن لمكتب الورشة + ضوء نقطي دافئ (PointLight) يوضع عند رأس المصباح المحسوب من bbox الأصل",
+      "sourceUrl": "https://polyhaven.com/a/desk_lamp_arm_01",
+      "designer": "Yann Kervran, Kuutti Siitonen",
+      "license": "CC0-1.0 (تحقق v4: api.polyhaven.com/info — حقول license لم تعد تُعاد من API؛ الإفادة الدائمة من polyhaven.com/license)",
+      "files": [
+        "public/models/desk_lamp_arm_01/desk_lamp_arm_01_1k.gltf",
+        "public/models/desk_lamp_arm_01/desk_lamp_arm_01.bin",
+        "public/models/desk_lamp_arm_01/textures/*"
+      ],
+      "format": "glTF",
+      "approxSizeKB": 2134,
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "src/lib/scene/PCScene.ts → loadRealAssets() → placeTool('desk-lamp', {light:true})",
+        "transform": "أطول بُعد ≈4.6 وحدة — موضع (7.4, 0, 3.1) دوران Y=-2.2 — بعمد بعيد عن جسم الجهاز كي لا يحجب التقاط القطع",
+        "failureBehavior": "يُتجاهل بصمت (بلا ضوء المصباح)"
+      }
+    },
+    {
+      "id": "polyhaven.metal_tool_chest",
+      "name": "Metal Tool Chest",
+      "category": "workshop-prop",
+      "usage": "صندوق عدة معدني تحت مكتب الورشة (على أرضية المختبر) — تفصيل بيئي غير تفاعلي",
+      "sourceUrl": "https://polyhaven.com/a/metal_tool_chest",
+      "designer": "Yann Kervran, John Hutcheson",
+      "license": "CC0-1.0 (تحقق v4 كما أعلاه)",
+      "files": [
+        "public/models/metal_tool_chest/metal_tool_chest_1k.gltf",
+        "public/models/metal_tool_chest/metal_tool_chest.bin",
+        "public/models/metal_tool_chest/textures/*"
+      ],
+      "format": "glTF",
+      "approxSizeKB": 876,
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "loadRealAssets() → placeTool('under-desk-tool-chest')",
+        "transform": "أطول بُعد ≈5.4 وحدة — موضع (5.4, floorY=-7.5, 5.2) دوران 0.15",
+        "failureBehavior": "يُتجاهل بصمت"
+      }
+    },
+    {
+      "id": "polyhaven.screwdrivers_02",
+      "name": "Screwdrivers 02 (set)",
+      "category": "training-tool",
+      "usage": "طقم مفكات حقيقي (3 مجسمات منفصلة) على الحافة اليسرى لسجادة القطع",
+      "sourceUrl": "https://polyhaven.com/a/screwdrivers_02",
+      "designer": "BKS",
+      "license": "CC0-1.0 (تحقق v4 كما أعلاه)",
+      "files": [
+        "public/models/screwdrivers_02/screwdrivers_02_1k.gltf",
+        "public/models/screwdrivers_02/screwdrivers_02.bin",
+        "public/models/screwdrivers_02/textures/*"
+      ],
+      "format": "glTF",
+      "approxSizeKB": 481,
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "loadRealAssets() → placeTool('tool-screwdriver-set')",
+        "transform": "أطول بُعد ≈2.2 وحدة — موضع (-4.0, tableTopY, 1.85) دوران 1.25",
+        "failureBehavior": "يُتجاهل بصمت"
+      }
+    },
+    {
+      "id": "polyhaven.pliers",
+      "name": "Pliers",
+      "category": "training-tool",
+      "usage": "كماشات حقيقية (فكان + دبوس — مجسمات منفصلة) على سجادة القطع قرب صينية البراغي",
+      "sourceUrl": "https://polyhaven.com/a/pliers",
+      "designer": "PierreB3D",
+      "license": "CC0-1.0 (تحقق v4 كما أعلاه)",
+      "files": [
+        "public/models/pliers/pliers_1k.gltf",
+        "public/models/pliers/pliers.bin",
+        "public/models/pliers/textures/*"
+      ],
+      "format": "glTF",
+      "approxSizeKB": 1863,
+      "integration": {
+        "loader": "GLTFLoader",
+        "mountedBy": "loadRealAssets() → placeTool('tool-pliers')",
+        "transform": "أطول بُعد ≈1.5 وحدة — موضع (-4.0, tableTopY, 2.75) دوران -0.5",
         "failureBehavior": "يُتجاهل بصمت"
       }
     },
     {
       "id": "procedural.pc-parts",
-      "name": "Procedural PC Parts (14 مكوّنًا تفاعليًا + هيكل + غطاء + بيئة)",
-      "category": "case|motherboard-features|cpu|cooler|ram|gpu|psu|ssd|hdd|fans|atx24|eps|gpuPower|sataData|sataPower|monitor|environment",
-      "usage": "كل القطع القابلة للفك/التركيب والتفاعل التعليمي",
+      "name": "Procedural PC Parts (14 مكوّنًا تفاعليًا + حوض مبثوق + واجهة صناعية + بيئة)",
+      "category": "case|motherboard-features|cpu|cooler|ram|gpu|psu|ssd|hdd|fans|atx24|eps|gpuPower|sataData|sataPower|monitor|workstation|environment",
+      "usage": "كل القطع القابلة للفك/التركيب والتفاعل التعليمي + محطة الورشة",
       "sourceUrl": null,
       "designer": "PC Repair 3D Studio (كود المشروع)",
       "license": "project-own",
-      "files": ["src/lib/scene/partsFactory.ts", "src/lib/scene/PCScene.ts", "src/lib/scene/textures.ts"],
+      "files": ["src/lib/scene/partsFactory.ts", "src/lib/scene/PCScene.ts", "src/lib/scene/layout.ts", "src/lib/scene/textures.ts"],
       "format": "Three.js procedural geometry",
-      "note": "مسار معتمد في البرومبت الرئيسي §4 عند غياب نماذج مرخصة مناسبة — توثيق بحث البدائل ورفضها في docs/ASSET_CANDIDATES.md. معرفات ثابتة (setComponentId) تسمح باستبدال أي قطعة بنموذج GLB لاحقًا دون كسر المنطق."
+      "note": "مسار معتمد عند غياب نماذج مرخصة مناسبة (موثق في docs/ASSET_CANDIDATES.md). تحديث v4: حوض الهيكل ExtrudeGeometry من مقطع C بسماكة 0.09 (لا صناديق ملسقة)، واجهة بثلاث طبقات (لوح خلفي + إطار بارز + شبك غائر + لوح علوي بشعار وLED)، قفص 3.5-inch بأرضية ومطاطات، مساند نحاسية للوحة، شبك عسلوي خلفي، أقدام مطاطية، مكتب ورشة 15×10.6 وحدة بأرجل فولاذية ورف سفلي وجدار بأرفف ولوح تعليق ومصابيح سقفية ومشترك كهرباء، وشاشة بقاعدة بيضاوية وحامل مائل وذقن بشعار ولمبة (التفصيل الموثق: docs/SCENE_LAYOUT.md). معرفات ثابتة (setComponentId) تسمح باستبدال أي قطعة بنموذج GLB لاحقًا دون كسر المنطق."
     }
   ],
   "rejectedSourcesSummary": [
-    { "source": "Sketchfab (CC downloadable)", "reason": "تنزيل أي أصل يتطلب تسجيل دخول — مرفوض إلزاميًا وفق v3 §3.2" },
+    { "source": "Sketchfab (CC downloadable)", "reason": "تنزيل أي أصل يتطلب تسجيل دخول — مرفوض إلزاميًا" },
     { "source": "TurboSquid / CGTrader / Fab", "reason": "أصول مدفوعة أو رخص غير قابلة للتحقق بلا شراء" },
-    { "source": "Smithsonian Open Access 3D", "reason": "بحث API يتطلب مفتاحًا؛ الأجهزة المتاحة أجهزة كاملة قديمة بمساحات ضخمة لا تناسب التفكيك الجزئي ولا GTX 750 Ti" },
-    { "source": "GitHub search (glb cc0 computer)", "reason": "لا مستودعات مطابقة موثوقة الترخيص لقطع PC" },
+    { "source": "Smithsonian Open Access 3D", "reason": "بحث API يتطلب مفتاحًا؛ الأجهزة المتاحة أجهزة كاملة قديمة بمساحات ضخمة لا تناسب التفكيك الجزئي" },
+    { "source": "Poly Haven (فحص v4 الكامل — 521 نموذجًا)", "reason": "فحص فعلي للقائمة الكاملة: لا يوجد صندوق PC أو لوحة أم أو GPU أو RAM أو PSU أو شاشة مكتبية — الأدوات والزينة المتاحة نُزّلت واستُخدمت (6 أصول)" },
     { "source": "KhronosGroup glTF-Sample-Assets", "reason": "نماذج اختبار glTF عامة — لا قطع حاسوب" }
   ]
 }

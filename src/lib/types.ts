@@ -339,5 +339,5 @@ export interface ReportSummary {
   simulatedValuesNoticeAr: string;
 }
 
-export const APP_VERSION = '3.1.0';
+export const APP_VERSION = '4.0.0';
 export const CATALOG_VERSION = '2025-01-rev2';

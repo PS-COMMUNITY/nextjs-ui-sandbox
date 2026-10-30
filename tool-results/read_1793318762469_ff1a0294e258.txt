@@ -1,0 +1,1267 @@
+     1→/**
+     2→ * PCScene — مدير المشهد ثلاثي الأبعاد (Three.js r186) لمحاكي صيانة الكمبيوتر.
+     3→ *
+     4→ * المسؤوليات:
+     5→ *  - إنشاء المُصيِّر/الكاميرا/التحكم المداري، واستدعاء مصنع المجسمات (partsFactory).
+     6→ *  - إدارة الحركة: التثبيت/الصينية/العرض التفجيري عبر أهداف تقترب عليها حلقة الرسم (lerp/slerp).
+     7→ *  - تطبيق أعلام المحاكاة (MachineFlag) على المجسمات الفرعية (غلاف، مزالج، براغٍ، قوابس، LED).
+     8→ *  - الاختيار بالأشعة، الإبراز، العزل، شفافية الهيكل (X-Ray)، تنعيم الكاميرا، وتنظيف الموارد.
+     9→ *
+    10→ * ملاحظات:
+    11→ *  - لا تُنشأ Vector3/Color جديدة داخل حلقة الرسم (مخازن مؤقتة مُعاد استخدامها).
+    12→ *  - كل الدوال العامة تنتهي مبكرًا إذا فشلت التهيئة (failed) أو بعد الإتلاف (disposed).
+    13→ *  - محاور دوران المزلاج/المزالج/الرافعة افتراضات موثقة داخل applyFlags (تعتمد على بناء المصنع).
+    14→ */
+    15→
+    16→import * as THREE from 'three';
+    17→import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+    18→import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+    19→import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+    20→import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
+    21→import { createScreenPainter, type ScreenPainter } from './screenTexture';
+    22→import { computeMonitorView } from '../simulation/monitorEngine';
+    23→import { BOARD, CASE, COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
+    24→import type { ViewPresetId } from './layout';
+    25→import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
+    26→import { COMPONENT_IDS, isInstalled } from '../types';
+    27→import type { ComponentId, MachineFlag, SimulationState } from '../types';
+    28→
+    29→// ======================================================================
+    30→// الثوابت
+    31→// ======================================================================
+    32→
+    33→/** رسالة الخطأ الموحدة (غياب WebGL أو فشل إنشاء المُصيِّر) */
+    34→const WEBGL_ERROR_AR =
+    35→  'متصفحك لا يدعم WebGL — لن يمكن عرض المشهد ثلاثي الأبعاد. استخدم متصفحًا حديثًا أو فعّل تسريع العتاد.';
+    36→
+    37→const PANEL_OPEN_ANGLE = -1.75; // فتح الغطاء الجانبي ≈100° حول المفصلة الخلفية
+    38→const LATCH_OPEN_ANGLE = -0.9;  // مزلاج PCIe — حول Y (افتراض محور موثق)
+    39→const CLIP_OPEN_ANGLE = 0.7;    // مزالج RAM — حول Z بإشارة متناوبة للطرفين
+    40→const LEVER_OPEN_ANGLE = -1.1;  // رافعة مقبس CPU — حول Y
+    41→const SCREW_LIFT = 0.06;        // إزاحة البرغي عند فكّه
+    42→const SCREW_SPIN = 0.6;         // دوران طفيف للبرغي المفكوك
+    43→const PLUG_PULL = 0.12;         // سحب القابس على -X عند الفصل
+    44→const SPIN_SPEED = 2.2;         // سرعة دوران شفرات المراوح (rad/s)
+    45→const LERP_RATE = 8;            // معدل الاقتراب الأسي للمواضع في حلقة الرسم
+    46→const HIGHLIGHT_HEX = 0x84cc16; // لون إبراز المكوّن المحدد (أخضر ليموني واضح)
+    47→const HIGHLIGHT_INTENSITY = 0.55;
+    48→const ENV_INTENSITY = 0.55;     // شدة الإضاءة البيئية (IBL) — توازن مع الأضواء المباشرة
+    49→const TONE_EXPOSURE = 1.12;     // تعريض النغمة السينمائية
+    50→const LED_INTENSITY = 1.2;      // شدة توهج لمبة الطاقة
+    51→const CLICK_MAX_DIST_SQ = 36;   // (6px)² — أقصى مسافة بين down/up تُعد نقرة
+    52→const DRAG_START_DIST_SQ = 64;  // (8px)² — أقل حركة لتحويل الضغط إلى سحب قطعة
+    53→const HOVER_THROTTLE_MS = 100;  // أقصى معدل لفحص التحويم
+    54→const MONITOR_REDRAW_MS = 400;  // معدل إعادة رسم نسيج الشاشة الافتراضية
+    55→const DAMAGED_HEX = 0xef4444;   // لون توهج القطعة التالفة تدريبيًا
+    56→
+    57→/** نتيجة التقاط النقرة: قطعة PC أو طرفية خارجية */
+    58→type PickedInfo =
+    59→  | { type: 'part'; id: ComponentId }
+    60→  | { type: 'periph'; kind: PeripheralKind; detail?: string }
+    61→  | null;
+    62→
+    63→/** منطقة إفلات قطعة مسحوبة */
+    64→export type DropZone = 'tray' | 'case' | null;
+    65→
+    66→/** الحالات التي يجوز فيها سحب القطعة بالماوس (وضع الفك/التركيب — توجيه v3 أ.2) */
+    67→const DRAGGABLE: ReadonlySet<string> = new Set(['separated', 'removed', 'awaiting']);
+    68→
+    69→// ======================================================================
+    70→// الأنواع الداخلية
+    71→// ======================================================================
+    72→
+    73→/** الحالة الحركية الداخلية لكل مكوّن */
+    74→interface DynamicPart {
+    75→  group: THREE.Group;
+    76→  basePos: THREE.Vector3;       // موضع التثبيت (من MOUNTS)
+    77→  baseRot: THREE.Euler;         // الدوران المرجعي عند التثبيت (صفر)
+    78→  trayPos: THREE.Vector3;       // موضع الراحة على صينية القطع
+    79→  trayRot: THREE.Euler;         // دوران الراحة على الصينية
+    80→  explodeVec: THREE.Vector3;    // اتجاه العرض التفجيري
+    81→  targetPos: THREE.Vector3;     // الهدف الحالي (تقترب عليه الحلقة)
+    82→  targetRot: THREE.Euler;       // الهدف الدوراني الحالي
+    83→  targetQuat: THREE.Quaternion; // نسخة Quaternion من targetRot (للـ slerp)
+    84→}
+    85→
+    86→/** برغي مع محور إزاحته وقيمه الأصلية */
+    87→interface ScrewRec {
+    88→  obj: THREE.Object3D;
+    89→  basePos: THREE.Vector3;
+    90→  baseRotZ: number;
+    91→  axis: 'x' | 'y';
+    92→  delta: number;
+    93→}
+    94→
+    95→/** مزلاج RAM مع اتجاه فتحه (متناوب بين الطرفين) */
+    96→interface ClipRec {
+    97→  obj: THREE.Object3D;
+    98→  baseRotZ: number;
+    99→  sign: 1 | -1;
+   100→}
+   101→
+   102→/** جسم يدور حول محور واحد (مزلاج PCIe / رافعة CPU) */
+   103→interface AxisRec {
+   104→  obj: THREE.Object3D;
+   105→  baseRot: number; // القيمة الأصلية للمحور Y
+   106→}
+   107→
+   108→/** قابس يُسحب على -X عند فصل موصّله */
+   109→interface PlugRec {
+   110→  flag: MachineFlag;
+   111→  obj: THREE.Object3D;
+   112→  baseX: number;
+   113→}
+   114→
+   115→/** دوّار (شفرات مروحة) مع محوره المحفوظ */
+   116→interface SpinnerRec {
+   117→  obj: THREE.Object3D;
+   118→  axis: THREE.Vector3; // متجه وحدة في الفضاء المحلي للدوّار
+   119→}
+   120→
+   121→/** تنعيم كاميرا جارٍ (يُستكمل في حلقة الرسم) */
+   122→interface CamTween {
+   123→  fromPos: THREE.Vector3;
+   124→  toPos: THREE.Vector3;
+   125→  fromTarget: THREE.Vector3;
+   126→  toTarget: THREE.Vector3;
+   127→  t: number;
+   128→  dur: number;
+   129→}
+   130→
+   131→/** قيم مادة الهيكل الأصلية قبل تطبيق الشفافية */
+   132→interface SavedMaterial {
+   133→  opacity: number;
+   134→  transparent: boolean;
+   135→  depthWrite: boolean;
+   136→}
+   137→
+   138→/** قيم emissive الأصلية قبل الإبراز */
+   139→interface SavedEmissive {
+   140→  hex: number;
+   141→  intensity: number;
+   142→}
+   143→
+   144→// ======================================================================
+   145→// (1) فحص توفر WebGL
+   146→// ======================================================================
+   147→
+   148→export function isWebGLAvailable(): boolean {
+   149→  try {
+   150→    const canvas = document.createElement('canvas');
+   151→    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'));
+   152→  } catch {
+   153→    return false;
+   154→  }
+   155→}
+   156→
+   157→/** تخلّص من مادة وكل خرائطها النسيجية (يُستخدم في dispose) */
+   158→function disposeMaterial(mat: THREE.Material): void {
+   159→  for (const value of Object.values(mat) as unknown[]) {
+   160→    if (value instanceof THREE.Texture) value.dispose();
+   161→  }
+   162→  mat.dispose();
+   163→}
+   164→
+   165→// ======================================================================
+   166→// (2..17) الصنف الرئيسي
+   167→// ======================================================================
+   168→
+   169→export class PCScene {
+   170→  // ---- حالة الصحة ----
+   171→  failed = false;
+   172→  disposed = false;
+   173→
+   174→  // ---- مراجع أساسية (تهيئة حتمية بعد نجاح البناء؛ الدوال العامة محمية بـ blocked) ----
+   175→  private quality: SceneQuality;
+   176→  private callbacks: PCSceneCallbacks;
+   177→  private container: HTMLDivElement;
+   178→  private renderer!: THREE.WebGLRenderer;
+   179→  private scene!: THREE.Scene;
+   180→  private camera!: THREE.PerspectiveCamera;
+   181→  private controls!: OrbitControls;
+   182→  private visuals!: PartVisuals;
+   183→  private dirLight: THREE.DirectionalLight | null = null;
+   184→  private resizeObserver: ResizeObserver | null = null;
+   185→
+   186→  // ---- حالة القطع ----
+   187→  private parts!: Record<ComponentId, DynamicPart>;
+   188→
+   189→  // ---- سجلات الأعلام (تُلتقط مرة عند البناء مع القيم الأصلية) ----
+   190→  private latchRec: AxisRec | null = null;
+   191→  private leverRec: AxisRec | null = null;
+   192→  private clipRecs: ClipRec[] = [];
+   193→  private screwMap = new Map<MachineFlag, ScrewRec[]>();
+   194→  private plugRecs: PlugRec[] = [];
+   195→  private spinners: SpinnerRec[] = [];
+   196→
+   197→  // ---- أهداف الحركة وحالة العرض ----
+   198→  private panelTarget = 0;
+   199→  private exploded = false;
+   200→  private xrayOn = false;
+   201→  private isolatedId: ComponentId | null = null;
+   202→  private highlightedId: ComponentId | null = null;
+   203→  private lastState: SimulationState | null = null;
+   204→  private camTween: CamTween | null = null;
+   205→
+   206→  // ---- الشاشة الافتراضية والطرفيات ----
+   207→  private painter: ScreenPainter | null = null;
+   208→  private bootStartedAt: number | null = null;
+   209→  private notepad = '';
+   210→  private spinning = false;
+   211→  private lastMonitorDrawAt = 0;
+   212→  private monitorCableGroup: THREE.Object3D | null = null;
+   213→
+   214→  // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
+   215→  private damagedOriginals = new Map<THREE.Mesh, SavedEmissive>();
+   216→  private damagedIds = new Set<ComponentId>();
+   217→
+   218→  // ---- خرائط استعادة القيم الأصلية ----
+   219→  private emissiveOriginals = new Map<THREE.Mesh, SavedEmissive>();
+   220→  private shellOriginals = new Map<THREE.Material, SavedMaterial>();
+   221→
+   222→  // ---- مخازن مؤقتة مُعاد استخدامها (منع الإنشاء داخل الحلقة) ----
+   223→  private readonly clock = new THREE.Clock();
+   224→  private readonly raycaster = new THREE.Raycaster();
+   225→  private readonly _ndc = new THREE.Vector2();
+   226→  private readonly _v1 = new THREE.Vector3();
+   227→  private readonly _v2 = new THREE.Vector3();
+   228→  private rafId = 0;
+   229→
+   230→  // ---- حالة المؤشر ----
+   231→  private downX = 0;
+   232→  private downY = 0;
+   233→  private pointerDownActive = false;
+   234→  private lastHoverAt = 0;
+   235→
+   236→  // ---- سحب القطع بالماوس الحقيقي (وضع الفك/التركيب — توجيه v3 أ.2) ----
+   237→  private dragEnabled = false;
+   238→  private pendingDrag: { id: ComponentId; startX: number; startY: number } | null = null;
+   239→  private dragId: ComponentId | null = null;
+   240→  private dragPlane = new THREE.Plane();
+   241→  private dragOffset = new THREE.Vector3();
+   242→  private dragGrabbed = false;
+   243→
+   244→  constructor(init: { container: HTMLDivElement; quality: SceneQuality; callbacks: PCSceneCallbacks }) {
+   245→    this.container = init.container;
+   246→    this.quality = init.quality;
+   247→    this.callbacks = init.callbacks;
+   248→
+   249→    // (1) فحص WebGL قبل أي شيء — عند الفشل نعلّم failed ونبلّغ دون بناء
+   250→    if (!isWebGLAvailable()) {
+   251→      this.fail(WEBGL_ERROR_AR);
+   252→      return;
+   253→    }
+   254→
+   255→    try {
+   256→      const w = Math.max(1, this.container.clientWidth);
+   257→      const h = Math.max(1, this.container.clientHeight);
+   258→
+   259→      // (2) المُصيِّر — نغمة سينمائية ACES لدرجات لون واقعية
+   260→      const renderer = new THREE.WebGLRenderer({ antialias: true });
+   261→      renderer.setClearColor(COLORS.bg);
+   262→      renderer.shadowMap.enabled = this.quality !== 'low';
+   263→      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+   264→      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+   265→      renderer.toneMappingExposure = TONE_EXPOSURE;
+   266→      renderer.setSize(w, h, false);
+   267→      renderer.domElement.style.width = '100%';
+   268→      renderer.domElement.style.height = '100%';
+   269→      renderer.domElement.style.display = 'block';
+   270→      this.renderer = renderer;
+   271→      // الحاوية position:relative يديرها الاستدعاء — اللوحة تملأها بالكامل
+   272→      this.container.appendChild(renderer.domElement);
+   273→
+   274→      // (3) المشهد والكاميرا والتحكم المداري
+   275→      this.scene = new THREE.Scene();
+   276→      // خريطة بيئية (IBL) عبر PMREM — تجعل المعادن تعكس مثل الواقع بدل أن تبدو سوداء
+   277→      const pmrem = new THREE.PMREMGenerator(renderer);
+   278→      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+   279→      this.scene.environmentIntensity = ENV_INTENSITY;
+   280→      pmrem.dispose();
+   281→      this.camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
+   282→      this.camera.position.set(...DEFAULT_CAMERA.pos);
+   283→      this.controls = new OrbitControls(this.camera, renderer.domElement);
+   284→      this.controls.target.set(...DEFAULT_CAMERA.target);
+   285→      this.controls.enableDamping = true;
+   286→      this.controls.dampingFactor = 0.08;
+   287→      this.controls.minDistance = 2.2;
+   288→      this.controls.maxDistance = 14;
+   289→      this.controls.maxPolarAngle = 1.45;
+   290→      this.controls.update();
+   291→      // تفاعل المستخدم يلغي أي تنعيم كاميرا جارٍ
+   292→      this.controls.addEventListener('start', () => {
+   293→        this.camTween = null;
+   294→      });
+   295→
+   296→      // (4) البيئة ثم القطع — بنداءات المصنع المتفق عليها
+   297→      buildEnvironment(this.scene, this.quality);
+   298→      const visuals = buildAllParts(this.quality);
+   299→      this.scene.add(visuals.root);
+   300→      this.visuals = visuals;
+   301→
+   302→      // ضوء اتجاهي (أضافه buildEnvironment) للتحكم به عند تبديل الظلال
+   303→      this.scene.traverse((obj) => {
+   304→        if (!this.dirLight && obj instanceof THREE.DirectionalLight) this.dirLight = obj;
+   305→      });
+   306→
+   307→      // تسجيل المعرفات دفاعيًا (المصنع يفعل ذلك عادةً — إعادة النداء غير ضارة)
+   308→      for (const id of COMPONENT_IDS) setComponentId(visuals.dynamic[id], id);
+   309→      setComponentId(visuals.caseShell, 'case');
+   310→      setComponentId(visuals.sidePanel, 'case');
+   311→
+   312→      this.initDynamicState(visuals);
+   313→      this.initFlagRecords(visuals);
+   314→
+   315→      // (الجلسة 4) الشاشة الافتراضية: نسيج ديناميكي + مرجع كابل الإشارة
+   316→      this.painter = createScreenPainter();
+   317→      if (this.painter) {
+   318→        const screenMesh = visuals.monitor.getObjectByName('monitor-screen');
+   319→        if (screenMesh instanceof THREE.Mesh) {
+   320→          const smat = screenMesh.material;
+   321→          if (!Array.isArray(smat) && 'map' in smat) {
+   322→            (smat as THREE.MeshBasicMaterial).map = this.painter.texture;
+   323→            (smat as THREE.MeshBasicMaterial).color.set(0xffffff);
+   324→            (smat as THREE.MeshBasicMaterial).needsUpdate = true;
+   325→          }
+   326→        }
+   327→        this.drawMonitor(true);
+   328→      }
+   329→      this.monitorCableGroup = visuals.monitor.getObjectByName('monitor-cable') ?? null;
+   330→
+   331→      // أصل حقيقي CC0 (Poly Haven): مسح لوحة دوائر كأساس PCB واقعي + مفك تدريبي
+   332→      this.loadRealAssets(visuals);
+   333→
+   334→      // (7)(15) مستمعو المؤشر + مراقب الحجم
+   335→      renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
+   336→      renderer.domElement.addEventListener('pointerup', this.onPointerUp);
+   337→      renderer.domElement.addEventListener('pointermove', this.onPointerMove);
+   338→      this.resizeObserver = new ResizeObserver(() => this.onResize());
+   339→      this.resizeObserver.observe(this.container);
+   340→
+   341→      // (13) ضبط كثافة البكسل حسب الجودة (الظلال مضبوطة أعلاه بنفس القيمة)
+   342→      this.setQuality(this.quality);
+   343→
+   344→      // (6) بدء حلقة الرسم
+   345→      this.rafId = requestAnimationFrame(this.tick);
+   346→      this.callbacks.onReady?.();
+   347→    } catch {
+   348→      // المعالجة نفسها: رسالة + failed=true
+   349→      this.fail(WEBGL_ERROR_AR);
+   350→    }
+   351→  }
+   352→
+   353→  // ====================================================================
+   354→  // الواجهة العامة
+   355→  // ====================================================================
+   356→
+   357→  /** (13) تبديل الجودة: كثافة البكسل + تشغيل/إيقاف الظلال */
+   358→  setQuality(q: SceneQuality): void {
+   359→    if (this.blocked) return;
+   360→    this.quality = q;
+   361→    this.renderer.setPixelRatio(this.pixelRatioFor(q));
+   362→    const wantShadows = q !== 'low';
+   363→    if (this.renderer.shadowMap.enabled !== wantShadows) {
+   364→      this.renderer.shadowMap.enabled = wantShadows;
+   365→      this.renderer.shadowMap.needsUpdate = true;
+   366→      if (this.dirLight) this.dirLight.castShadow = wantShadows;
+   367→    }
+   368→  }
+   369→
+   370→  /** (10) شفافية الهيكل والغطاء (X-Ray) مع استعادة الأصول عند الإيقاف */
+   371→  setXray(on: boolean): void {
+   372→    if (this.blocked) return;
+   373→    if (this.xrayOn === on) return;
+   374→    this.xrayOn = on;
+   375→    this.refreshShellMaterials();
+   376→  }
+   377→
+   378→  /** (5) فتح/إغلاق الغطاء الجانبي حول مفصلته الخلفية */
+   379→  setPanelOpen(on: boolean, animate?: boolean): void {
+   380→    if (this.blocked) return;
+   381→    this.panelTarget = on ? PANEL_OPEN_ANGLE : 0;
+   382→    if (this.lastState) this.lastState.flags.panelOpen = on;
+   383→    if (animate === false) this.visuals.sidePanel.rotation.y = this.panelTarget;
+   384→  }
+   385→
+   386→  /** (5) تشغيل/إيقاف العرض التفجيري — يعيد حساب الأهداف من آخر حالة متزامنة */
+   387→  setExploded(on: boolean, animate?: boolean): void {
+   388→    if (this.blocked) return;
+   389→    this.exploded = on;
+   390→    this.recomputeTargets();
+   391→    if (animate === false) this.snapToTargets();
+   392→  }
+   393→
+   394→  /** (5) مزامنة حالة المحاكاة: أهداف الحركة (تنعيم) + تطبيق الأعلام فورًا */
+   395→  syncState(s: SimulationState): void {
+   396→    if (this.blocked) return;
+   397→    // نسخة دفاعية حتى لا تؤثر طفرات المتصل على أهدافنا
+   398→    this.lastState = {
+   399→      flags: { ...s.flags },
+   400→      parts: { ...s.parts },
+   401→      peripherals: { ...s.peripherals },
+   402→    };
+   403→    this.recomputeTargets();
+   404→    this.applyFlags(s.flags, true);
+   405→    this.updateRuntimeVisuals(s);
+   406→    this.drawMonitor(true);
+   407→  }
+   408→
+   409→  /** ساعة التمهيد: يضبطها المتجر لحظة ضغط زر التشغيل/الإطفاء */
+   410→  setBootClock(startedAt: number | null): void {
+   411→    if (this.blocked) return;
+   412→    this.bootStartedAt = startedAt;
+   413→    this.drawMonitor(true);
+   414→  }
+   415→
+   416→  /** نص دفتر الملاحظات الافتراضي — يُكتب الآن من حقل إدخال حقيقي في الواجهة (توجيه v3 أ.2) */
+   417→  setNotepad(text: string): void {
+   418→    if (this.blocked) return;
+   419→    this.notepad = text;
+   420→    this.drawMonitor(true);
+   421→  }
+   422→
+   423→  /** إظهار/إخفاء أسهم تدفق الهواء */
+   424→  setAirflow(on: boolean): void {
+   425→    if (this.blocked) return;
+   426→    this.visuals.airflow.visible = on;
+   427→  }
+   428→
+   429→  /** توجيه الكاميرا نحو الشاشة الافتراضية */
+   430→  focusMonitor(): void {
+   431→    if (this.blocked) return;
+   432→    this.startCamTween(new THREE.Vector3(...MONITOR_CAMERA.pos), new THREE.Vector3(...MONITOR_CAMERA.target), 0.7);
+   433→  }
+   434→
+   435→  /** منظير جاهز: أمامي/جانبي/علوي (أزرار المشهد + اختصارات 1/2/3) */
+   436→  setViewPreset(id: ViewPresetId): void {
+   437→    if (this.blocked) return;
+   438→    const preset = VIEW_PRESETS[id];
+   439→    this.startCamTween(new THREE.Vector3(...preset.pos), new THREE.Vector3(...preset.target), 0.6);
+   440→  }
+   441→
+   442→  /** تكبير/إبعاد خطوتين نحو الهدف (أزرار — بديل العجلة للمس/إمكانية الوصول) */
+   443→  zoomStep(sign: 1 | -1): void {
+   444→    if (this.blocked) return;
+   445→    const dir = this._v1.copy(this.camera.position).sub(this.controls.target);
+   446→    const dist = THREE.MathUtils.clamp(dir.length() * (sign > 0 ? 0.78 : 1.28), this.controls.minDistance, this.controls.maxDistance);
+   447→    dir.setLength(dist).add(this.controls.target);
+   448→    this.startCamTween(dir, this.controls.target.clone(), 0.3);
+   449→  }
+   450→
+   451→  /** تفعيل سحب القطع بالماوس (وضع الفك/التركيب) — توجيه v3 أ.2/§5 */
+   452→  setDragEnabled(on: boolean): void {
+   453→    if (this.blocked) return;
+   454→    this.dragEnabled = on;
+   455→    if (!on) this.cancelDrag();
+   456→  }
+   457→
+   458→  /** (8) إبراز مكوّن بتعديل emissive — إبراز واحد نشط في كل مرة */
+   459→  highlight(id: ComponentId | null): void {
+   460→    if (this.blocked) return;
+   461→    if (this.highlightedId === id) return;
+   462→    const previous = this.highlightedId;
+   463→    this.highlightedId = id;
+   464→    if (previous !== null) this.restoreHighlight();
+   465→    if (id === null) return;
+   466→    this.parts[id].group.traverse((obj) => {
+   467→      if (!(obj instanceof THREE.Mesh)) return;
+   468→      const mat = obj.material;
+   469→      if (Array.isArray(mat) || !('emissive' in mat)) return;
+   470→      const std = mat as THREE.MeshStandardMaterial;
+   471→      // نلتقط الأصل مرة واحدة لكل جلسة إبراز، ونستعيده عند الإلغاء
+   472→      if (!this.emissiveOriginals.has(obj)) {
+   473→        this.emissiveOriginals.set(obj, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
+   474→      }
+   475→      std.emissive.setHex(HIGHLIGHT_HEX);
+   476→      std.emissiveIntensity = HIGHLIGHT_INTENSITY;
+   477→    });
+   478→  }
+   479→
+   480→  /** (9) عزل مكوّن: إظهاره وحده مع هيكل شبه شفاف — null يعيد الجميع */
+   481→  isolate(id: ComponentId | null): void {
+   482→    if (this.blocked) return;
+   483→    if (this.isolatedId === id) return;
+   484→    this.isolatedId = id;
+   485→    for (const cid of COMPONENT_IDS) this.parts[cid].group.visible = cid === id;
+   486→    // الهيكل يبقى ظاهرًا (شبه شفاف عند عزل مكوّن داخلي، معتمًا عند عزل الهيكل نفسه)
+   487→    this.visuals.caseShell.visible = true;
+   488→    this.visuals.sidePanel.visible = id === 'case' || id === null;
+   489→    this.refreshShellMaterials();
+   490→  }
+   491→
+   492→  /** (11) إعادة الكاميرا إلى الوضع الافتراضي خلال 0.6 ثانية */
+   493→  resetCamera(): void {
+   494→    if (this.blocked) return;
+   495→    const toPos = new THREE.Vector3(...DEFAULT_CAMERA.pos);
+   496→    const toTarget = new THREE.Vector3(...DEFAULT_CAMERA.target);
+   497→    this.startCamTween(toPos, toTarget, 0.6);
+   498→  }
+   499→
+   500→  /** (12) تقرّب الكاميرا نحو مكوّن: الهدف مركز المجموعة والمسافة 3.2 خلال 0.5 ثانية */
+   501→  focusComponent(id: ComponentId): void {
+   502→    if (this.blocked) return;
+   503→    const center = this.parts[id].group.getWorldPosition(this._v2);
+   504→    const dir = this._v1.copy(this.camera.position).sub(center);
+   505→    if (dir.lengthSq() < 1e-8) dir.set(-1, 0.35, 1); // اتجاه احتياطي إذا تطابقت النقطة
+   506→    dir.normalize().multiplyScalar(3.2).add(center);
+   507→    this.startCamTween(this._v1, this._v2, 0.5);
+   508→  }
+   509→
+   510→  /** (14) إتلاف كامل: إيقاف الحلقة، فصل المستمعين، تحرير الهندسات والمواد، إزالة اللوحة */
+   511→  dispose(): void {
+   512→    if (this.disposed) return;
+   513→    this.disposed = true;
+   514→    if (this.rafId !== 0) cancelAnimationFrame(this.rafId);
+   515→    this.rafId = 0;
+   516→    this.controls?.dispose();
+   517→    const dom = this.renderer?.domElement;
+   518→    if (dom) {
+   519→      dom.removeEventListener('pointerdown', this.onPointerDown);
+   520→      dom.removeEventListener('pointerup', this.onPointerUp);
+   521→      dom.removeEventListener('pointermove', this.onPointerMove);
+   522→    }
+   523→    this.resizeObserver?.disconnect();
+   524→    this.resizeObserver = null;
+   525→    if (this.scene) {
+   526→      this.scene.traverse((obj) => {
+   527→        const maybeMesh = obj as THREE.Mesh;
+   528→        if (maybeMesh.geometry) maybeMesh.geometry.dispose();
+   529→        const mat: THREE.Material | THREE.Material[] | undefined = maybeMesh.material;
+   530→        if (Array.isArray(mat)) {
+   531→          for (const m of mat) disposeMaterial(m);
+   532→        } else if (mat) {
+   533→          disposeMaterial(mat);
+   534→        }
+   535→      });
+   536→      if (this.scene.environment instanceof THREE.Texture) this.scene.environment.dispose();
+   537→      if (this.scene.background instanceof THREE.Texture) this.scene.background.dispose();
+   538→    }
+   539→    this.renderer?.dispose();
+   540→    dom?.remove();
+   541→    this.emissiveOriginals.clear();
+   542→    this.shellOriginals.clear();
+   543→    this.damagedOriginals.clear();
+   544→    this.painter?.dispose();
+   545→    this.painter = null;
+   546→  }
+   547→
+   548→  // ====================================================================
+   549→  // الخاصة — الحلقة والحركة
+   550→  // ====================================================================
+   551→
+   552→  private get blocked(): boolean {
+   553→    return this.failed || this.disposed;
+   554→  }
+   555→
+   556→  private fail(messageAr: string): void {
+   557→    this.failed = true;
+   558→    this.callbacks.onError?.(messageAr);
+   559→  }
+   560→
+   561→  /** (6) حلقة الرسم: دوّارات، اقتراب القطع، تنعيم الغطاء، تنعيم الكاميرا، ثم الرسم */
+   562→  private readonly tick = (): void => {
+   563→    if (this.disposed || this.failed) return;
+   564→    this.rafId = requestAnimationFrame(this.tick);
+   565→    const dt = Math.min(this.clock.getDelta(), 0.05); // حماية من قفزات التبويبات الخاملة
+   566→    const k = 1 - Math.exp(-LERP_RATE * dt);
+   567→
+   568→    // دوران شفرات المراوح حول محورها المحفوظ — فقط والجهاز يعمل فعلاً
+   569→    if (this.spinning) {
+   570→      for (const spinner of this.spinners) {
+   571→        spinner.obj.rotateOnAxis(spinner.axis, SPIN_SPEED * dt);
+   572→      }
+   573→    }
+   574→
+   575→    // اقتراب القطع نحو أهدافها (الموضع lerp والدوران slerp) — عدا الهيكل الثابت
+   576→    for (const id of COMPONENT_IDS) {
+   577→      if (id === 'case') continue;
+   578→      const part = this.parts[id];
+   579→      part.group.position.lerp(part.targetPos, k);
+   580→      part.group.quaternion.slerp(part.targetQuat, k);
+   581→    }
+   582→
+   583→    // تطفو القطعة الملتقطة (awaiting) فوق الصينية بلطف — إشارة بصرية لجاهزية التركيب
+   584→    const elapsed = this.clock.getElapsedTime();
+   585→    for (const id of COMPONENT_IDS) {
+   586→      if (id === 'case') continue;
+   587→      if (this.lastState && this.lastState.parts[id] === 'awaiting' && this.dragId !== id) {
+   588→        const part = this.parts[id];
+   589→        part.group.position.y = part.trayPos.y + 0.16 + Math.sin(elapsed * 3) * 0.04;
+   590→      }
+   591→    }
+   592→
+   593→    // تنعيم دوران الغطاء الجانبي نحو الهدف
+   594→    const panel = this.visuals.sidePanel;
+   595→    panel.rotation.y += (this.panelTarget - panel.rotation.y) * k;
+   596→
+   597→    // استكمال تنعيم الكاميرا (resetCamera / focusComponent)
+   598→    const tween = this.camTween;
+   599→    if (tween) {
+   600→      tween.t = Math.min(tween.t + dt / tween.dur, 1);
+   601→      const eased = PCScene.easeInOut(tween.t);
+   602→      this.camera.position.lerpVectors(tween.fromPos, tween.toPos, eased);
+   603→      this.controls.target.lerpVectors(tween.fromTarget, tween.toTarget, eased);
+   604→      if (tween.t >= 1) this.camTween = null;
+   605→    }
+   606→
+   607→    this.controls.update();
+   608→
+   609→    // إعادة رسم نسيج الشاشة الافتراضية بمعدل مقيد
+   610→    if (this.painter && nowMs() - this.lastMonitorDrawAt >= MONITOR_REDRAW_MS) {
+   611→      this.drawMonitor(false);
+   612→    }
+   613→
+   614→    this.renderer.render(this.scene, this.camera);
+   615→  };
+   616→
+   617→  /** تنعيم easeInOut: t<0.5 ? 2t² : 1 − (−2t+2)²/2 */
+   618→  private static easeInOut(t: number): number {
+   619→    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+   620→  }
+   621→
+   622→  /** إعادة حساب أهداف القطع من آخر حالة متزامنة + علم التفجير الحالي */
+   623→  private recomputeTargets(): void {
+   624→    const parts = this.lastState?.parts;
+   625→    for (const id of COMPONENT_IDS) {
+   626→      if (id === 'case') continue;
+   627→      const part = this.parts[id];
+   628→      const status: string | undefined = parts ? parts[id] : undefined;
+   629→      if (status === 'removed' || status === 'damaged') {
+   630→        part.targetPos.copy(part.trayPos);
+   631→        part.targetRot.copy(part.trayRot);
+   632→        if (status === 'damaged') {
+   633→          // القطعة التالفة تستلقي مائلة على الصينية
+   634→          part.targetRot.z += 0.35;
+   635→        }
+   636→      } else if (status === 'awaiting') {
+   637→        // ملتقطة من الصينية — ترتفع قليلاً (وتطفو في حلقة الرسم)
+   638→        part.targetPos.copy(part.trayPos);
+   639→        part.targetPos.y += 0.16;
+   640→        part.targetRot.copy(part.trayRot);
+   641→      } else if (status === 'separated') {
+   642→        // فصل جزئي: ما زالت في موضعها مع إزاحة صغيرة نحو اتجاه الفك
+   643→        part.targetPos.copy(part.basePos);
+   644→        part.targetPos.addScaledVector(part.explodeVec, SEPARATE_FACTOR);
+   645→        part.targetRot.set(0, 0, 0);
+   646→      } else {
+   647→        part.targetPos.copy(part.basePos);
+   648→        if (this.exploded) part.targetPos.add(part.explodeVec);
+   649→        part.targetRot.set(0, 0, 0);
+   650→      }
+   651→      part.targetQuat.setFromEuler(part.targetRot);
+   652→    }
+   653→  }
+   654→
+   655→  /** نسخ الأهداف فورًا إلى المجسمات (للتنعيم المعطَّل animate=false) */
+   656→  private snapToTargets(): void {
+   657→    for (const id of COMPONENT_IDS) {
+   658→      if (id === 'case') continue;
+   659→      const part = this.parts[id];
+   660→      part.group.position.copy(part.targetPos);
+   661→      part.group.quaternion.copy(part.targetQuat);
+   662→    }
+   663→    this.visuals.sidePanel.rotation.y = this.panelTarget;
+   664→  }
+   665→
+   666→  /**
+   667→   * (5) تطبيق الأعلام فورًا على المجسمات الفرعية.
+   668→   * افتراضات المحاور (لأن بناء المصنع موازٍ ولم يُثبَّت بعد):
+   669→   *  - مزلاج PCIe ورافعة CPU: دوران حول Y المحلي (اللوح عمودي يواجه -X).
+   670→   *  - مزالج RAM: دوران حول Z بإشارة متناوبة بين الطرفين.
+   671→   *  - البراغي: ترتفع على +Y (مسامير اللوحة تُسحب على -X) مع دوران طفيف حول Z.
+   672→   *  - القوابس: إزاحة -X 0.12 عند الفصل.
+   673→   * كل الإزاحات نسبية إلى القيم الأصلية المحفوظة عند البناء.
+   674→   */
+   675→  private applyFlags(flags: Record<MachineFlag, boolean>, animate: boolean): void {
+   676→    // الغطاء الجانبي — عبر هدف تنعيمي تتبعه الحلقة
+   677→    this.panelTarget = flags.panelOpen ? PANEL_OPEN_ANGLE : 0;
+   678→    if (!animate) this.visuals.sidePanel.rotation.y = this.panelTarget;
+   679→
+   680→    // مزلاج PCIe
+   681→    if (this.latchRec) {
+   682→      this.latchRec.obj.rotation.y = this.latchRec.baseRot + (flags.pcieLatchOpen ? LATCH_OPEN_ANGLE : 0);
+   683→    }
+   684→
+   685→    // مزالج RAM
+   686→    for (const clip of this.clipRecs) {
+   687→      clip.obj.rotation.z = clip.baseRotZ + (flags.ramClipsOpen ? clip.sign * CLIP_OPEN_ANGLE : 0);
+   688→    }
+   689→
+   690→    // رافعة مقبس CPU
+   691→    if (this.leverRec) {
+   692→      this.leverRec.obj.rotation.y = this.leverRec.baseRot + (flags.cpuLeverOpen ? LEVER_OPEN_ANGLE : 0);
+   693→    }
+   694→
+   695→    // البراغي (gpu/psu/fan/m2/mobo)
+   696→    for (const [flag, recs] of this.screwMap) {
+   697→      const out = flags[flag];
+   698→      for (const rec of recs) {
+   699→        rec.obj.position.copy(rec.basePos);
+   700→        if (out) {
+   701→          rec.obj.position[rec.axis] += rec.delta;
+   702→          rec.obj.rotation.z = rec.baseRotZ + SCREW_SPIN;
+   703→        } else {
+   704→          rec.obj.rotation.z = rec.baseRotZ;
+   705→        }
+   706→      }
+   707→    }
+   708→
+   709→    // قوابس الموصلات (fan headers / front panel)
+   710→    for (const plug of this.plugRecs) {
+   711→      plug.obj.position.x = plug.baseX - (flags[plug.flag] ? PLUG_PULL : 0);
+   712→    }
+   713→
+   714→    // لمبة الطاقة — مادة خاصة بها (cached) — تنطفئ مع مزود ميت
+   715→    const led = this.visuals.flags.powerLed;
+   716→    if (led) {
+   717→      const mat = led.material;
+   718→      if (!Array.isArray(mat) && 'emissive' in mat) {
+   719→        const std = mat as THREE.MeshStandardMaterial;
+   720→        const alive = flags.powerOn && !(this.lastState?.peripherals.psuDead ?? false);
+   721→        std.emissive.set(alive ? COLORS.green : 0x000000);
+   722→        std.emissiveIntensity = LED_INTENSITY;
+   723→      }
+   724→    }
+   725→  }
+   726→
+   727→  // ====================================================================
+   728→  // الخاصة — مواد الهيكل (X-Ray / العزل)
+   729→  // ====================================================================
+   730→
+   731→  /** إعادة حساب مواد الهيكل من الحالة المجمّعة (xray يتقدم على العزل) */
+   732→  private refreshShellMaterials(): void {
+   733→    for (const [mat, saved] of this.shellOriginals) {
+   734→      mat.opacity = saved.opacity;
+   735→      mat.transparent = saved.transparent;
+   736→      mat.depthWrite = saved.depthWrite;
+   737→    }
+   738→    this.shellOriginals.clear();
+   739→    if (this.xrayOn) {
+   740→      this.applyShellOpacity(this.visuals.caseShell, 0.12);
+   741→      this.applyShellOpacity(this.visuals.sidePanel, 0.06);
+   742→    } else if (this.isolatedId !== null && this.isolatedId !== 'case') {
+   743→      this.applyShellOpacity(this.visuals.caseShell, 0.08);
+   744→    }
+   745→  }
+   746→
+   747→  /** تطبيق شفافية على مواد مجموعة (الزجاج شفاف أصلًا فيبقى كما هو) */
+   748→  private applyShellOpacity(root: THREE.Object3D, opacity: number): void {
+   749→    root.traverse((obj) => {
+   750→      if (!(obj instanceof THREE.Mesh)) return;
+   751→      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+   752→      for (const mat of mats) {
+   753→        if (mat.transparent) continue; // الزجاج/الشفاف الأصلي لا يُمسّ
+   754→        if (!this.shellOriginals.has(mat)) {
+   755→          this.shellOriginals.set(mat, {
+   756→            opacity: mat.opacity,
+   757→            transparent: mat.transparent,
+   758→            depthWrite: mat.depthWrite,
+   759→          });
+   760→        }
+   761→        mat.transparent = true;
+   762→        mat.opacity = opacity;
+   763→        mat.depthWrite = false;
+   764→      }
+   765→    });
+   766→  }
+   767→
+   768→  /** استعادة emissive الأصلي لكل شبكات الإبراز الحالي */
+   769→  private restoreHighlight(): void {
+   770→    for (const [mesh, saved] of this.emissiveOriginals) {
+   771→      const mat = mesh.material;
+   772→      if (Array.isArray(mat) || !('emissive' in mat)) continue;
+   773→      const std = mat as THREE.MeshStandardMaterial;
+   774→      std.emissive.setHex(saved.hex);
+   775→      std.emissiveIntensity = saved.intensity;
+   776→    }
+   777→    this.emissiveOriginals.clear();
+   778→  }
+   779→
+   780→  // ====================================================================
+   781→  // الخاصة — الشاشة الافتراضية والقطع التالفة
+   782→  // ====================================================================
+   783→
+   784→  /**
+   785→   * تحميل الأصول الحقيقية المرخصة CC0 (توجيه v3 §3) — فشلها لا يعطل المشهد:
+   786→   *  1) مسح لوحة دوائر (Poly Haven — circuit_board): يستبدل وجه PCB الإجرائي للوحة الأم
+   787→   *     بمسح ضوئي واقعي بخامات PBR كاملة (Diffuse/Normal/ARM).
+   788→   *  2) مفك مسطّح (Poly Haven — screwdriver): أداة تدريب ثانوية على طاولة صينية القطع.
+   789→   */
+   790→  private loadRealAssets(visuals: PartVisuals): void {
+   791→    const loader = new GLTFLoader();
+   792→    const root = visuals.root;
+   793→
+   794→    // 1) أساس PCB الحقيقي — يستبدل وجه اللوحة الأمامي فقط، ويبقى الباقي إجرائيًا تفاعليًا
+   795→    loader.load(
+   796→      '/models/circuit-board/circuit_board_1k.gltf',
+   797→      (gltf) => {
+   798→        if (this.disposed || this.failed) return;
+   799→        const pcb = visuals.dynamic.motherboard.getObjectByName('mobo-pcb');
+   800→        if (!pcb) return;
+   801→        const scan = gltf.scene;
+   802→        scan.traverse((obj) => {
+   803→          if (!(obj instanceof THREE.Mesh)) return;
+   804→          obj.castShadow = false;
+   805→          obj.receiveShadow = true;
+   806→          // توحيد الخامات: منع أي emissive قد يأتي من الأصل (يبقى الإبراز صادقًا)
+   807→          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+   808→          for (const m of mats) {
+   809→            if ('emissiveIntensity' in m) (m as THREE.MeshStandardMaterial).emissiveIntensity = 0;
+   810→          }
+   811→        });
+   812→        // bbox الأصل (م): 0.404×0.078×0.398 — رأسيًا مُدار بحيث مكوّناته نحو -X (وجه المشاهد)
+   813→        const bbox = new THREE.Box3().setFromObject(scan);
+   814→        const size = bbox.getSize(new THREE.Vector3());
+   815→        const targetH = BOARD.yMax - BOARD.yMin;      // 3.0
+   816→        const targetD = BOARD.zMax - BOARD.zMin;      // 2.44
+   817→        scan.rotation.z = Math.PI / 2;                // +Y المحلي → -X عالمي
+   818→        scan.scale.set(
+   819→          BOARD.thickness / Math.max(size.y, 1e-6),   // سماكة اللوحة
+   820→          targetH / Math.max(size.x, 1e-6),           // ارتفاع اللوحة
+   821→          targetD / Math.max(size.z, 1e-6),           // عمق اللوحة
+   822→        );
+   823→        // إعادة قياس bbox بعد الدوران ثم تمركز اللوحة على مستوى المجموعة
+   824→        scan.updateMatrixWorld(true);
+   825→        const bbox2 = new THREE.Box3().setFromObject(scan);
+   826→        const center2 = bbox2.getCenter(new THREE.Vector3());
+   827→        scan.position.sub(center2);
+   828→        scan.position.x += BOARD.thickness * 0.18;    // بارز قليلًا نحو الوجه
+   829→        scan.name = 'mobo-real-pcb';
+   830→        pcb.add(scan);
+   831→        // إخفاء الوجه الإجرائي الأخضر (يُبقى الجسم مرجعًا للسماكة والظهر)
+   832→        if (pcb instanceof THREE.Mesh && !Array.isArray(pcb.material)) {
+   833→          pcb.material = pcb.material.clone();
+   834→          (pcb.material as THREE.MeshStandardMaterial).color.set(0x0f2a1f);
+   835→        }
+   836→      },
+   837→      undefined,
+   838→      () => {
+   839→        // فشل تحميل الأصل → يبقى PCB الإجرائي كما هو (مشهد كامل بلا انقطاع)
+   840→        console.warn('[PCScene] تعذر تحميل مسح اللوحة الحقيقي — استُخدم PCB الإجرائي');
+   841→      },
+   842→    );
+   843→
+   844→    // 2) مفك تدريبي على طاولة الصينية (جزء بصري ثانوي — بلا تفاعل)
+   845→    loader.load(
+   846→      '/models/screwdriver/screwdriver_1k.gltf',
+   847→      (gltf) => {
+   848→        if (this.disposed || this.failed) return;
+   849→        const tool = gltf.scene;
+   850→        const bbox = new THREE.Box3().setFromObject(tool);
+   851→        const size = bbox.getSize(new THREE.Vector3());
+   852→        const s = 1.6 / Math.max(size.y, 1e-6); // طول مستهدف ≈ 16سم
+   853→        tool.scale.setScalar(s);
+   854→        tool.updateMatrixWorld(true);
+   855→        const b2 = new THREE.Box3().setFromObject(tool);
+   856→        tool.position.set(-3.1, 0.912 - b2.min.y, 3.55);
+   857→        tool.rotation.y = 0.5;
+   858→        tool.name = 'desk-screwdriver';
+   859→        root.add(tool);
+   860→      },
+   861→      undefined,
+   862→      () => console.warn('[PCScene] تعذر تحميل المفك التدريبي'),
+   863→    );
+   864→  }
+   865→
+   866→  /** رسم نسيج الشاشة الافتراضية من محرك الشاشة (المصدر الوحيد للحقيقة) */
+   867→  private drawMonitor(force: boolean): void {
+   868→    if (!this.painter || this.blocked) return;
+   869→    if (!force && nowMs() - this.lastMonitorDrawAt < MONITOR_REDRAW_MS) return;
+   870→    this.lastMonitorDrawAt = nowMs();
+   871→    const sim = this.lastState;
+   872→    const elapsed = this.bootStartedAt !== null ? Math.max(0, Date.now() - this.bootStartedAt) : 0;
+   873→    if (!sim) {
+   874→      this.painter.draw(
+   875→        { screen: 'noSignal', bootProgress: 0, postLinesAr: [], bootDevicesAr: [], canType: false },
+   876→        this.notepad,
+   877→        Date.now(),
+   878→      );
+   879→      return;
+   880→    }
+   881→    const view = computeMonitorView(sim, elapsed);
+   882→    this.painter.draw(view, this.notepad, Date.now());
+   883→  }
+   884→
+   885→  /** تحديثات بصرية لحظية: دوران المراوح/كابل الشاشة/توهج القطع التالفة */
+   886→  private updateRuntimeVisuals(s: SimulationState): void {
+   887→    // المراوح تدور فقط مع كهرباء موصولة وجهاز يعمل ومزود حي
+   888→    this.spinning = s.flags.powerOn && s.flags.acConnected && !s.peripherals.psuDead;
+   889→
+   890→    // كابل إشارة الشاشة يختفي عند فصله (المواصفة: الكابلات لا تطفو في الفراغ)
+   891→    if (this.monitorCableGroup) {
+   892→      this.monitorCableGroup.visible = s.peripherals.monitorCableConnected;
+   893→    }
+   894→
+   895→    // توهج أحمر ثابت للقطع التالفة تدريبيًا
+   896→    for (const id of COMPONENT_IDS) {
+   897→      const isDamaged = s.parts[id] === 'damaged';
+   898→      const wasDamaged = this.damagedIds.has(id);
+   899→      if (isDamaged && !wasDamaged) {
+   900→        this.parts[id].group.traverse((obj) => {
+   901→          if (!(obj instanceof THREE.Mesh)) return;
+   902→          const mat = obj.material;
+   903→          if (Array.isArray(mat) || !('emissive' in mat)) return;
+   904→          const std = mat as THREE.MeshStandardMaterial;
+   905→          if (!this.damagedOriginals.has(obj)) {
+   906→            this.damagedOriginals.set(obj, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
+   907→          }
+   908→          std.emissive.setHex(DAMAGED_HEX);
+   909→          std.emissiveIntensity = 0.45;
+   910→        });
+   911→        this.damagedIds.add(id);
+   912→      } else if (!isDamaged && wasDamaged) {
+   913→        this.parts[id].group.traverse((obj) => {
+   914→          const saved = this.damagedOriginals.get(obj as THREE.Mesh);
+   915→          if (!saved) return;
+   916→          const mesh = obj as THREE.Mesh;
+   917→          const mat = mesh.material;
+   918→          if (Array.isArray(mat) || !('emissive' in mat)) return;
+   919→          (mat as THREE.MeshStandardMaterial).emissive.setHex(saved.hex);
+   920→          (mat as THREE.MeshStandardMaterial).emissiveIntensity = saved.intensity;
+   921→          this.damagedOriginals.delete(mesh);
+   922→        });
+   923→        this.damagedIds.delete(id);
+   924→      }
+   925→    }
+   926→  }
+   927→
+   928→  private startCamTween(toPos: THREE.Vector3, toTarget: THREE.Vector3, dur: number): void {
+   929→    this.camTween = {
+   930→      fromPos: this.camera.position.clone(),
+   931→      toPos,
+   932→      fromTarget: this.controls.target.clone(),
+   933→      toTarget,
+   934→      t: 0,
+   935→      dur,
+   936→    };
+   937→  }
+   938→
+   939→  // ====================================================================
+   940→  // الخاصة — الاختيار بالأشعة
+   941→  // ====================================================================
+   942→
+   943→  /** إيجاد الهدف عند نقطة شاشة: أول إصابة مرئية غير شفافة — قطعة PC أو طرفية */
+   944→  private pickAt(clientX: number, clientY: number): PickedInfo {
+   945→    const rect = this.renderer.domElement.getBoundingClientRect();
+   946→    const w = rect.width > 0 ? rect.width : 1;
+   947→    const h = rect.height > 0 ? rect.height : 1;
+   948→    this._ndc.set(((clientX - rect.left) / w) * 2 - 1, -((clientY - rect.top) / h) * 2 + 1);
+   949→    this.raycaster.setFromCamera(this._ndc, this.camera);
+   950→    const hits = this.raycaster.intersectObjects(this.visuals.root.children, true);
+   951→    for (const hit of hits) {
+   952→      if (this.isHidden(hit.object)) continue;        // تجاهل ما خفيه العزل
+   953→      if (this.isSeeThrough(hit.object)) continue;    // الزجاج/الشفاف لا يحجب الاختيار
+   954→      let cur: THREE.Object3D | null = hit.object;
+   955→      while (cur) {
+   956→        // الطرفيات (زر الشاشة / زر طاقة الشاشة) — لا كيبورد ولا ماوس (توجيه v3 أ.1)
+   957→        const per: unknown = cur.userData['peripheral'];
+   958→        if (typeof per === 'string') {
+   959→          return { type: 'periph', kind: per as PeripheralKind };
+   960→        }
+   961→        const cid: unknown = cur.userData['componentId'];
+   962→        if (typeof cid === 'string' && (COMPONENT_IDS as readonly string[]).includes(cid)) {
+   963→          return { type: 'part', id: cid as ComponentId };
+   964→        }
+   965→        cur = cur.parent;
+   966→      }
+   967→      return null; // أول إصابة مرئية بلا معرّف → تعامل كفراغ (الأدوات الثانوية غير قابلة للنقر)
+   968→    }
+   969→    return null;
+   970→  }
+   971→
+   972→  /** هل الجسم (أو أحد أسلافه) مخفي؟ */
+   973→  private isHidden(obj: THREE.Object3D): boolean {
+   974→    let cur: THREE.Object3D | null = obj;
+   975→    while (cur) {
+   976→      if (!cur.visible) return true;
+   977→      cur = cur.parent;
+   978→    }
+   979→    return false;
+   980→  }
+   981→
+   982→  /** هل الشبك بمادة شفافة؟ (الزجاج والهيكل الشفاف يسمحان بمرور النقر) */
+   983→  private isSeeThrough(obj: THREE.Object3D): boolean {
+   984→    if (!(obj instanceof THREE.Mesh)) return false;
+   985→    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+   986→    for (const mat of mats) {
+   987→      if (mat.transparent) return true;
+   988→    }
+   989→    return false;
+   990→  }
+   991→
+   992→  // ====================================================================
+   993→  // الخاصة — بناء السجلات الداخلية
+   994→  // ====================================================================
+   995→
+   996→  /** (4) بناء سجل الحركة لكل مكوّن من MOUNTS/TRAY/EXPLODE_VECTORS */
+   997→  private initDynamicState(visuals: PartVisuals): void {
+   998→    const parts = {} as Record<ComponentId, DynamicPart>;
+   999→    for (const id of COMPONENT_IDS) {
+  1000→      const group = visuals.dynamic[id];
+  1001→      const mount = MOUNTS[id];
+  1002→      parts[id] = {
+  1003→        group,
+  1004→        basePos: new THREE.Vector3(...mount),
+  1005→        baseRot: new THREE.Euler(0, 0, 0),
+  1006→        trayPos: new THREE.Vector3(...TRAY.slots[id]),
+  1007→        trayRot: new THREE.Euler(...TRAY.rotations[id]),
+  1008→        explodeVec: new THREE.Vector3(...EXPLODE_VECTORS[id]),
+  1009→        targetPos: new THREE.Vector3(...mount),
+  1010→        targetRot: new THREE.Euler(0, 0, 0),
+  1011→        targetQuat: new THREE.Quaternion(),
+  1012→      };
+  1013→    }
+  1014→    this.parts = parts;
+  1015→  }
+  1016→
+  1017→  /** التقاط القيم الأصلية لمجسمات الأعلام مرة واحدة عند البناء */
+  1018→  private initFlagRecords(visuals: PartVisuals): void {
+  1019→    const flags: FlagVisuals = visuals.flags;
+  1020→
+  1021→    if (flags.pcieLatch) this.latchRec = { obj: flags.pcieLatch, baseRot: flags.pcieLatch.rotation.y };
+  1022→    if (flags.cpuLever) this.leverRec = { obj: flags.cpuLever, baseRot: flags.cpuLever.rotation.y };
+  1023→
+  1024→    this.clipRecs = flags.ramClips.map((obj, index): ClipRec => ({
+  1025→      obj,
+  1026→      baseRotZ: obj.rotation.z,
+  1027→      sign: index % 2 === 0 ? 1 : -1,
+  1028→    }));
+  1029→
+  1030→    const screwDefs: Array<{ flag: MachineFlag; objs: THREE.Object3D[]; axis: 'x' | 'y'; delta: number }> = [
+  1031→      { flag: 'gpuScrewsOut', objs: flags.gpuScrews, axis: 'y', delta: SCREW_LIFT },
+  1032→      { flag: 'psuScrewsOut', objs: flags.psuScrews, axis: 'y', delta: SCREW_LIFT },
+  1033→      { flag: 'fanScrewsOut', objs: flags.fanScrews, axis: 'y', delta: SCREW_LIFT },
+  1034→      { flag: 'm2ScrewOut', objs: flags.m2Screw ? [flags.m2Screw] : [], axis: 'y', delta: SCREW_LIFT },
+  1035→      // مسامير اللوحة تُسحب بعيدًا عن الجدار الأيمن (-X)
+  1036→      { flag: 'moboScrewsOut', objs: flags.moboScrews, axis: 'x', delta: -SCREW_LIFT },
+  1037→    ];
+  1038→    for (const def of screwDefs) {
+  1039→      this.screwMap.set(
+  1040→        def.flag,
+  1041→        def.objs.map((obj): ScrewRec => ({
+  1042→          obj,
+  1043→          basePos: obj.position.clone(),
+  1044→          baseRotZ: obj.rotation.z,
+  1045→          axis: def.axis,
+  1046→          delta: def.delta,
+  1047→        })),
+  1048→      );
+  1049→    }
+  1050→
+  1051→    if (flags.fanHeaderPlug) {
+  1052→      this.plugRecs.push({ flag: 'fanHeadersDisconnected', obj: flags.fanHeaderPlug, baseX: flags.fanHeaderPlug.position.x });
+  1053→    }
+  1054→    if (flags.frontPanelPlug) {
+  1055→      this.plugRecs.push({ flag: 'frontPanelDisconnected', obj: flags.frontPanelPlug, baseX: flags.frontPanelPlug.position.x });
+  1056→    }
+  1057→
+  1058→    // محور دوران كل دوّار يُستنتج من هندسته (أصغر بُعد = عمود قرص المروحة)
+  1059→    this.spinners = visuals.spinners.map((obj): SpinnerRec => ({ obj, axis: this.computeSpinnerAxis(obj) }));
+  1060→  }
+  1061→
+  1062→  /** استنتاج محور الدوران: أصغر بُعد في صندوق الإحاطة للشبك الأول هو عمود القرص */
+  1063→  private computeSpinnerAxis(spinner: THREE.Object3D): THREE.Vector3 {
+  1064→    const fallback = new THREE.Vector3(0, 1, 0);
+  1065→    const mesh = this.firstMesh(spinner);
+  1066→    if (!mesh || !mesh.geometry) return fallback;
+  1067→    const geometry = mesh.geometry;
+  1068→    if (!geometry.boundingBox) geometry.computeBoundingBox();
+  1069→    const bb = geometry.boundingBox;
+  1070→    if (!bb) return fallback;
+  1071→    const ex = bb.max.x - bb.min.x;
+  1072→    const ey = bb.max.y - bb.min.y;
+  1073→    const ez = bb.max.z - bb.min.z;
+  1074→    const axis = new THREE.Vector3(
+  1075→      ex <= ey && ex <= ez ? 1 : 0,
+  1076→      ey <= ex && ey <= ez ? 1 : 0,
+  1077→      ez <= ex && ey <= ez ? 1 : 0,
+  1078→    );
+  1079→    if (axis.lengthSq() === 0) return fallback;
+  1080→    // تحويل المحور من فضاء الشبك إلى الفضاء المحلي للدوّار إن كان ابنًا مُدارًا
+  1081→    if (mesh !== spinner) {
+  1082→      spinner.updateWorldMatrix(true, false);
+  1083→      mesh.updateWorldMatrix(true, false);
+  1084→      const qSpinner = new THREE.Quaternion();
+  1085→      const qMesh = new THREE.Quaternion();
+  1086→      spinner.getWorldQuaternion(qSpinner);
+  1087→      mesh.getWorldQuaternion(qMesh);
+  1088→      axis.applyQuaternion(qSpinner.invert().multiply(qMesh));
+  1089→    }
+  1090→    return axis.normalize();
+  1091→  }
+  1092→
+  1093→  /** أول Mesh داخل شجرة كائن (بدون تخصيصات) */
+  1094→  private firstMesh(obj: THREE.Object3D): THREE.Mesh | null {
+  1095→    if (obj instanceof THREE.Mesh) return obj;
+  1096→    for (const child of obj.children) {
+  1097→      const found = this.firstMesh(child);
+  1098→      if (found) return found;
+  1099→    }
+  1100→    return null;
+  1101→  }
+  1102→
+  1103→  // ====================================================================
+  1104→  // الخاصة — الحجم والمؤشر
+  1105→  // ====================================================================
+  1106→
+  1107→  /** (13)(15) كثافة البكسل حسب الجودة */
+  1108→  private pixelRatioFor(q: SceneQuality): number {
+  1109→    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  1110→    if (q === 'low') return 1;
+  1111→    if (q === 'medium') return Math.min(dpr, 1.5);
+  1112→    return Math.min(dpr, 2);
+  1113→  }
+  1114→
+  1115→  /** (15) استجابة تغيّر حجم الحاوية */
+  1116→  private onResize(): void {
+  1117→    if (this.blocked) return;
+  1118→    const w = this.container.clientWidth;
+  1119→    const h = this.container.clientHeight;
+  1120→    if (w <= 0 || h <= 0) return;
+  1121→    this.camera.aspect = w / h;
+  1122→    this.camera.updateProjectionMatrix();
+  1123→    this.renderer.setSize(w, h, false); // updateStyle=false — CSS 100% يتكفل بالعرض
+  1124→  }
+  1125→
+  1126→  private readonly onPointerDown = (event: PointerEvent): void => {
+  1127→    if (this.blocked) return;
+  1128→    this.pointerDownActive = true;
+  1129→    this.downX = event.clientX;
+  1130→    this.downY = event.clientY;
+  1131→    // بدء سحب محتمل: فقط بالزر الأيسر وعند تفعيل وضع الفك/التركيب
+  1132→    if (this.dragEnabled && event.button === 0) {
+  1133→      const picked = this.pickAt(event.clientX, event.clientY);
+  1134→      if (picked && picked.type === 'part' && DRAGGABLE.has(this.lastState?.parts[picked.id] ?? '')) {
+  1135→        this.pendingDrag = { id: picked.id, startX: event.clientX, startY: event.clientY };
+  1136→      }
+  1137→    }
+  1138→  };
+  1139→
+  1140→  /** (7) نقرة فقط إذا كانت المسافة بين down/up أقل من 6px — والسحب الفعلي يُعالج قبلها */
+  1141→  private readonly onPointerUp = (event: PointerEvent): void => {
+  1142→    if (this.blocked) return;
+  1143→    if (this.dragId) {
+  1144→      this.finishDrag(event.clientX, event.clientY);
+  1145→      this.pointerDownActive = false;
+  1146→      return;
+  1147→    }
+  1148→    this.pendingDrag = null;
+  1149→    if (!this.pointerDownActive) return;
+  1150→    this.pointerDownActive = false;
+  1151→    const dx = event.clientX - this.downX;
+  1152→    const dy = event.clientY - this.downY;
+  1153→    if (dx * dx + dy * dy >= CLICK_MAX_DIST_SQ) return; // سحب لا نقرة
+  1154→    const picked = this.pickAt(event.clientX, event.clientY);
+  1155→    if (picked && picked.type === 'periph') {
+  1156→      this.callbacks.onPeripheral?.(picked.kind, picked.detail);
+  1157→      return;
+  1158→    }
+  1159→    this.callbacks.onSelect(picked ? picked.id : null);
+  1160→  };
+  1161→
+  1162→  /** (7) تحويم/سحب — بفحص مُقيَّد زمنيًا للتحويم (100ms) */
+  1163→  private readonly onPointerMove = (event: PointerEvent): void => {
+  1164→    if (this.blocked) return;
+  1165→    if (this.dragId) {
+  1166→      this.updateDrag(event.clientX, event.clientY);
+  1167→      return;
+  1168→    }
+  1169→    if (this.pendingDrag) {
+  1170→      const dx = event.clientX - this.pendingDrag.startX;
+  1171→      const dy = event.clientY - this.pendingDrag.startY;
+  1172→      if (dx * dx + dy * dy >= DRAG_START_DIST_SQ) {
+  1173→        this.beginDrag(this.pendingDrag.id, event.clientX, event.clientY);
+  1174→        this.updateDrag(event.clientX, event.clientY);
+  1175→      }
+  1176→      return;
+  1177→    }
+  1178→    const now = performance.now();
+  1179→    if (now - this.lastHoverAt < HOVER_THROTTLE_MS) return;
+  1180→    this.lastHoverAt = now;
+  1181→    this.renderer.domElement.style.cursor = this.pickAt(event.clientX, event.clientY) ? 'pointer' : '';
+  1182→  };
+  1183→
+  1184→  /** دبل-كليك: إعادة الكاميرا إلى الوضع الافتراضي (موثقة في الإعدادات) */
+  1185→  private readonly onDoubleClick = (): void => {
+  1186→    if (this.blocked) return;
+  1187→    this.resetCamera();
+  1188→  };
+  1189→
+  1190→  // ====================================================================
+  1191→  // الخاصة — سحب القطع (فك/تركيب بالماوس الحقيقي)
+  1192→  // ====================================================================
+  1193→
+  1194→  /** بدء سحب فعلي: تعطيل المداري + سطح أفقي عند ارتفاع القطعة */
+  1195→  private beginDrag(id: ComponentId, clientX: number, clientY: number): void {
+  1196→    const part = this.parts[id];
+  1197→    if (!part) return;
+  1198→    this.pendingDrag = null;
+  1199→    this.dragId = id;
+  1200→    this.controls.enabled = false;
+  1201→    this.dragPlane.set(new THREE.Vector3(0, 1, 0), -part.group.position.y);
+  1202→    // إزاحة الإمساك: فرق نقطة النقر عن مركز القطعة على السطح نفسه
+  1203→    const hit = this.rayPlaneHit(clientX, clientY);
+  1204→    if (hit) this.dragOffset.copy(part.group.position).sub(hit);
+  1205→    this.renderer.domElement.style.cursor = 'grabbing';
+  1206→  }
+  1207→
+  1208→  /** تحديث موضع القطعة أثناء السحب (بصريًا فقط — الحالة المنطقية لا تتغير هنا) */
+  1209→  private updateDrag(clientX: number, clientY: number): void {
+  1210→    const id = this.dragId;
+  1211→    if (!id) return;
+  1212→    const hit = this.rayPlaneHit(clientX, clientY);
+  1213→    if (!hit) return;
+  1214→    const part = this.parts[id];
+  1215→    part.group.position.set(hit.x + this.dragOffset.x, part.group.position.y, hit.z + this.dragOffset.z);
+  1216→    // الهدف يتبع اليد — يمنع حلقة الرسم من محاربة السحب
+  1217→    part.targetPos.copy(part.group.position);
+  1218→  }
+  1219→
+  1220→  /** إنهاء السحب: تحديد منطقة الإفلات ثم إبلاغ المنطق (التحقق أولًا ثم الحركة — توجيه v3 §6) */
+  1221→  private finishDrag(clientX: number, clientY: number): void {
+  1222→    const id = this.dragId;
+  1223→    this.dragId = null;
+  1224→    this.controls.enabled = true;
+  1225→    this.renderer.domElement.style.cursor = '';
+  1226→    if (!id) return;
+  1227→    const hit = this.rayPlaneHit(clientX, clientY);
+  1228→    let zone: DropZone = null;
+  1229→    if (hit) {
+  1230→      const inTray = hit.x >= TRAY.minX && hit.x <= TRAY.maxX && hit.z >= TRAY.minZ && hit.z <= TRAY.maxZ;
+  1231→      const inCase = hit.x >= CASE.minX && hit.x <= CASE.maxX && hit.z >= CASE.minZ && hit.z <= CASE.maxZ;
+  1232→      zone = inTray ? 'tray' : inCase ? 'case' : null;
+  1233→    }
+  1234→    // المرور عبر منطق المتجر: إن رُفض الإجراء تعاد القطعة لموضع راحتها عبر syncState
+  1235→    this.callbacks.onPartDrop?.(id, zone);
+  1236→  }
+  1237→
+  1238→  /** إلغاء أي سحب جارٍ (Esc / إيقاف الوضع) */
+  1239→  private cancelDrag(): void {
+  1240→    if (this.dragId) {
+  1241→      const part = this.parts[this.dragId];
+  1242→      this.recomputeTargets(); // يعيد الهدف الصحيح من آخر حالة
+  1243→      if (part) part.group.position.copy(part.targetPos);
+  1244→    }
+  1245→    this.dragId = null;
+  1246→    this.pendingDrag = null;
+  1247→    if (this.controls) this.controls.enabled = true;
+  1248→    if (this.renderer) this.renderer.domElement.style.cursor = '';
+  1249→  }
+  1250→
+  1251→  /** تقاطع شعاع المؤشر مع سطح السحب الحالي */
+  1252→  private rayPlaneHit(clientX: number, clientY: number): THREE.Vector3 | null {
+  1253→    const rect = this.renderer.domElement.getBoundingClientRect();
+  1254→    const w = rect.width > 0 ? rect.width : 1;
+  1255→    const h = rect.height > 0 ? rect.height : 1;
+  1256→    this._ndc.set(((clientX - rect.left) / w) * 2 - 1, -((clientY - rect.top) / h) * 2 + 1);
+  1257→    this.raycaster.setFromCamera(this._ndc, this.camera);
+  1258→    const hit = this._v2;
+  1259→    return this.raycaster.ray.intersectPlane(this.dragPlane, hit) ? hit : null;
+  1260→  }
+  1261→}
+  1262→
+  1263→/** طابع زمني بسيط (تجنب الاعتماد على performance في كل موضع) */
+  1264→function nowMs(): number {
+  1265→  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+  1266→}
+  1267→

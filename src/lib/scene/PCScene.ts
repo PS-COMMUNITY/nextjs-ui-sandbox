@@ -20,7 +20,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
 import { createScreenPainter, type ScreenPainter } from './screenTexture';
 import { computeMonitorView } from '../simulation/monitorEngine';
-import { BOARD, CASE, COLORS, DEFAULT_CAMERA, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
+import { BOARD, CASE, COLORS, DEFAULT_CAMERA, DESK, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
 import type { ViewPresetId } from './layout';
 import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
 import { COMPONENT_IDS, isInstalled } from '../types';
@@ -46,7 +46,7 @@ const LERP_RATE = 8;            // معدل الاقتراب الأسي للمو
 const HIGHLIGHT_HEX = 0x84cc16; // لون إبراز المكوّن المحدد (أخضر ليموني واضح)
 const HIGHLIGHT_INTENSITY = 0.55;
 const ENV_INTENSITY = 0.55;     // شدة الإضاءة البيئية (IBL) — توازن مع الأضواء المباشرة
-const TONE_EXPOSURE = 1.12;     // تعريض النغمة السينمائية
+const TONE_EXPOSURE = 1.38;     // تعريض النغمة السينمائية
 const LED_INTENSITY = 1.2;      // شدة توهج لمبة الطاقة
 const CLICK_MAX_DIST_SQ = 36;   // (6px)² — أقصى مسافة بين down/up تُعد نقرة
 const DRAG_START_DIST_SQ = 64;  // (8px)² — أقل حركة لتحويل الضغط إلى سحب قطعة
@@ -212,11 +212,11 @@ export class PCScene {
   private monitorCableGroup: THREE.Object3D | null = null;
 
   // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
-  private damagedOriginals = new Map<THREE.Mesh, SavedEmissive>();
+  private damagedOriginals = new Map<THREE.MeshStandardMaterial, SavedEmissive>();
   private damagedIds = new Set<ComponentId>();
 
   // ---- خرائط استعادة القيم الأصلية ----
-  private emissiveOriginals = new Map<THREE.Mesh, SavedEmissive>();
+  private emissiveOriginals = new Map<THREE.MeshStandardMaterial, SavedEmissive>();
   private shellOriginals = new Map<THREE.Material, SavedMaterial>();
 
   // ---- مخازن مؤقتة مُعاد استخدامها (منع الإنشاء داخل الحلقة) ----
@@ -285,7 +285,7 @@ export class PCScene {
       this.controls.enableDamping = true;
       this.controls.dampingFactor = 0.08;
       this.controls.minDistance = 2.2;
-      this.controls.maxDistance = 14;
+      this.controls.maxDistance = 22;
       this.controls.maxPolarAngle = 1.45;
       this.controls.update();
       // تفاعل المستخدم يلغي أي تنعيم كاميرا جارٍ
@@ -340,6 +340,11 @@ export class PCScene {
 
       // (13) ضبط كثافة البكسل حسب الجودة (الظلال مضبوطة أعلاه بنفس القيمة)
       this.setQuality(this.quality);
+
+      // خطاف تشخيصي للتطوير فقط (لا يتغير سلوك التطبيق)
+      if (typeof window !== 'undefined') {
+        (window as unknown as Record<string, unknown>)['__pcScene'] = this;
+      }
 
       // (6) بدء حلقة الرسم
       this.rafId = requestAnimationFrame(this.tick);
@@ -468,9 +473,11 @@ export class PCScene {
       const mat = obj.material;
       if (Array.isArray(mat) || !('emissive' in mat)) return;
       const std = mat as THREE.MeshStandardMaterial;
-      // نلتقط الأصل مرة واحدة لكل جلسة إبراز، ونستعيده عند الإلغاء
-      if (!this.emissiveOriginals.has(obj)) {
-        this.emissiveOriginals.set(obj, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
+      // نلتقط الأصل **مرة واحدة لكل مادة مشتركة** (توجيه v4: المفاتيح بالمواد لا
+      // بالشبكات — الشبكات تتشارك خامات مخزّنة، والحفظ لكل شبك كان يلتقط قيمة
+      // خضراء مطليّة حديثًا كـ«أصل» فلا يُستعاد الإبراز أبدًا)
+      if (!this.emissiveOriginals.has(std)) {
+        this.emissiveOriginals.set(std, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
       }
       std.emissive.setHex(HIGHLIGHT_HEX);
       std.emissiveIntensity = HIGHLIGHT_INTENSITY;
@@ -767,10 +774,7 @@ export class PCScene {
 
   /** استعادة emissive الأصلي لكل شبكات الإبراز الحالي */
   private restoreHighlight(): void {
-    for (const [mesh, saved] of this.emissiveOriginals) {
-      const mat = mesh.material;
-      if (Array.isArray(mat) || !('emissive' in mat)) continue;
-      const std = mat as THREE.MeshStandardMaterial;
+    for (const [std, saved] of this.emissiveOriginals) {
       std.emissive.setHex(saved.hex);
       std.emissiveIntensity = saved.intensity;
     }
@@ -782,10 +786,12 @@ export class PCScene {
   // ====================================================================
 
   /**
-   * تحميل الأصول الحقيقية المرخصة CC0 (توجيه v3 §3) — فشلها لا يعطل المشهد:
-   *  1) مسح لوحة دوائر (Poly Haven — circuit_board): يستبدل وجه PCB الإجرائي للوحة الأم
-   *     بمسح ضوئي واقعي بخامات PBR كاملة (Diffuse/Normal/ARM).
-   *  2) مفك مسطّح (Poly Haven — screwdriver): أداة تدريب ثانوية على طاولة صينية القطع.
+   * تحميل الأصول الحقيقية المرخصة CC0 (توجيه v3 §3 + v4 أ.4) — فشلها لا يعطل المشهد:
+   *  1) مسح لوحة دوائر (Poly Haven — circuit_board): يستبدل وجه PCB الإجرائي للوحة الأم.
+   *  2) مفك مسطّح (Poly Haven — screwdriver): أداة تدريب على سجادة القطع.
+   *  3) طقم مفكات (screwdrivers_02) + كماشات (pliers): أدوات حقيقية على السجادة.
+   *  4) مصباح مكتب (desk_lamp_arm_01): إضاءة مكتب واقعية فوق السجادة + ضوء نقطي دافئ.
+   *  5) صندوق عدة معدني (metal_tool_chest): تحت المكتب — تفصيل ورشة.
    */
   private loadRealAssets(visuals: PartVisuals): void {
     const loader = new GLTFLoader();
@@ -841,7 +847,7 @@ export class PCScene {
       },
     );
 
-    // 2) مفك تدريبي على طاولة الصينية (جزء بصري ثانوي — بلا تفاعل)
+    // 2) مفك تدريبي على سجادة القطع (جزء بصري ثانوي — بلا تفاعل)
     loader.load(
       '/models/screwdriver/screwdriver_1k.gltf',
       (gltf) => {
@@ -853,7 +859,7 @@ export class PCScene {
         tool.scale.setScalar(s);
         tool.updateMatrixWorld(true);
         const b2 = new THREE.Box3().setFromObject(tool);
-        tool.position.set(-3.1, 0.912 - b2.min.y, 3.55);
+        tool.position.set(-3.1, TRAY.tableTopY - b2.min.y, 3.55);
         tool.rotation.y = 0.5;
         tool.name = 'desk-screwdriver';
         root.add(tool);
@@ -861,6 +867,65 @@ export class PCScene {
       undefined,
       () => console.warn('[PCScene] تعذر تحميل المفك التدريبي'),
     );
+
+    // 3..5) أدوات وزينة الورشة CC0 — كلها فشلها صامت (تفصيل ثانوي)
+    const placeTool = (
+      url: string,
+      name: string,
+      targetLen: number,          // البعد الأطول المستهدف بوحدات المشهد
+      pos: [number, number, number],
+      rotY: number,
+      opts?: { light?: boolean },
+    ): void => {
+      loader.load(
+        url,
+        (gltf) => {
+          if (this.disposed || this.failed) return;
+          const obj = gltf.scene;
+          // توحيد الخامات: منع أي emissive قد يأتي من الأصل
+          obj.traverse((o) => {
+            if (!(o instanceof THREE.Mesh)) return;
+            o.castShadow = this.quality !== 'low';
+            o.receiveShadow = true;
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (const m of mats) {
+              if ('emissiveIntensity' in m) (m as THREE.MeshStandardMaterial).emissiveIntensity = 0;
+            }
+          });
+          const bbox = new THREE.Box3().setFromObject(obj);
+          const size = bbox.getSize(new THREE.Vector3());
+          const s = targetLen / Math.max(size.x, size.y, size.z, 1e-6);
+          obj.scale.setScalar(s);
+          obj.updateMatrixWorld(true);
+          const b2 = new THREE.Box3().setFromObject(obj);
+          obj.position.set(pos[0], pos[1] - b2.min.y, pos[2]);
+          obj.rotation.y = rotY;
+          obj.name = name;
+          root.add(obj);
+          if (opts?.light) {
+            const head = new THREE.Vector3((b2.min.x + b2.max.x) / 2, b2.max.y - 0.15, (b2.min.z + b2.max.z) / 2);
+            obj.updateMatrixWorld(true);
+            const worldHead = head.applyMatrix4(obj.matrixWorld);
+            const warm = new THREE.PointLight(0xffe7c4, 0.7, 9, 1.4);
+            warm.position.copy(worldHead);
+            warm.name = `${name}-light`;
+            root.add(warm);
+          }
+        },
+        undefined,
+        () => console.warn(`[PCScene] تعذر تحميل ${name}`),
+      );
+    };
+
+    // طقم مفكات على حافة السجادة اليسرى (طوله الطبيعي ≈ 2.2 وحدة)
+    placeTool('/models/screwdrivers_02/screwdrivers_02_1k.gltf', 'tool-screwdriver-set', 2.2, [-4.0, TRAY.tableTopY, 1.85], 1.25);
+    // كماشات قرب صينية البراغي
+    placeTool('/models/pliers/pliers_1k.gltf', 'tool-pliers', 1.5, [-4.0, TRAY.tableTopY, 2.75], -0.5);
+    // مصباح مكتب على الطرف الأيمن للمكتب — ذراعه يمتد فوق المكتب المفتوح
+    // (بعيدًا عن جسم الجهاز كي لا يحجب النقر على القطع — توجيه v4)
+    placeTool('/models/desk_lamp_arm_01/desk_lamp_arm_01_1k.gltf', 'desk-lamp', 4.6, [7.4, 0, 3.1], -2.2, { light: true });
+    // صندوق عدة معدني تحت المكتب (على أرضية المختبر)
+    placeTool('/models/metal_tool_chest/metal_tool_chest_1k.gltf', 'under-desk-tool-chest', 5.4, [5.4, DESK.floorY, 5.2], 0.15);
   }
 
   /** رسم نسيج الشاشة الافتراضية من محرك الشاشة (المصدر الوحيد للحقيقة) */
@@ -902,8 +967,9 @@ export class PCScene {
           const mat = obj.material;
           if (Array.isArray(mat) || !('emissive' in mat)) return;
           const std = mat as THREE.MeshStandardMaterial;
-          if (!this.damagedOriginals.has(obj)) {
-            this.damagedOriginals.set(obj, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
+          // حفظ بالمواد المشتركة (نفس إصلاح الإبراز — توجيه v4)
+          if (!this.damagedOriginals.has(std)) {
+            this.damagedOriginals.set(std, { hex: std.emissive.getHex(), intensity: std.emissiveIntensity });
           }
           std.emissive.setHex(DAMAGED_HEX);
           std.emissiveIntensity = 0.45;
@@ -911,14 +977,15 @@ export class PCScene {
         this.damagedIds.add(id);
       } else if (!isDamaged && wasDamaged) {
         this.parts[id].group.traverse((obj) => {
-          const saved = this.damagedOriginals.get(obj as THREE.Mesh);
-          if (!saved) return;
-          const mesh = obj as THREE.Mesh;
-          const mat = mesh.material;
+          if (!(obj instanceof THREE.Mesh)) return;
+          const mat = obj.material;
           if (Array.isArray(mat) || !('emissive' in mat)) return;
-          (mat as THREE.MeshStandardMaterial).emissive.setHex(saved.hex);
-          (mat as THREE.MeshStandardMaterial).emissiveIntensity = saved.intensity;
-          this.damagedOriginals.delete(mesh);
+          const std = mat as THREE.MeshStandardMaterial;
+          const saved = this.damagedOriginals.get(std);
+          if (!saved) return;
+          std.emissive.setHex(saved.hex);
+          std.emissiveIntensity = saved.intensity;
+          this.damagedOriginals.delete(std);
         });
         this.damagedIds.delete(id);
       }
@@ -964,7 +1031,8 @@ export class PCScene {
         }
         cur = cur.parent;
       }
-      return null; // أول إصابة مرئية بلا معرّف → تعامل كفراغ (الأدوات الثانوية غير قابلة للنقر)
+      // إصابة أولى بلا معرف (عدة/زينة) — تمرير النقر عبرها إلى ما خلفها (توجيه v4)
+      continue;
     }
     return null;
   }
