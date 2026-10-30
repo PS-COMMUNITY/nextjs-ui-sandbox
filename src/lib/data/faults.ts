@@ -14,7 +14,7 @@ import { COMPONENT_IDS, isInstalled, type DiagnosisCode, type MonitorScreen, typ
 export type FaultDifficulty = 'سهل' | 'متوسط' | 'صعب' | 'مركّب';
 
 export interface FaultDef {
-  id: string;                 // F01..F14
+  id: string;                 // F01..F16
   titleAr: string;
   difficulty: FaultDifficulty;
   complaintAr: string;        // بطاقة الطلب — ماذا يقول العميل
@@ -34,6 +34,11 @@ const copy = (s: SimulationState): SimulationState => ({
   flags: { ...s.flags },
   parts: { ...s.parts },
   peripherals: { ...s.peripherals },
+  os: { ...s.os, driversMissing: [...s.os.driversMissing] },
+  disks: s.disks,
+  firmware: { ...s.firmware },
+  usbMedia: s.usbMedia,
+  thermal: { ...s.thermal },
 });
 
 /** حالة مرجعية مشغّلة للاختبارات: كهرباء موصولة، جهاز يعمل، غطاء مغلق */
@@ -384,6 +389,54 @@ export const FAULTS: FaultDef[] = [
     isFixed: (s) => isInstalled(s.parts.ram) && isInstalled(s.parts.gpuPower),
     preCode: 'POST_FAIL',
     preScreen: 'post',
+  },
+  // ===== F15 (V6 — عطل نظام تشغيل) =====
+  {
+    id: 'F15',
+    titleAr: 'تعريف بطاقة الرسوميات مفقود',
+    difficulty: 'متوسط',
+    complaintAr: '«أعدت تنصيب الويندوز وأصبحت كل شيء يبدو ضبابيًا والألعاب لا تفتح، والشاشة تحني في الأفلام».',
+    hypothesisAr: 'النظام يعمل بتعريف أساسي عام (Microsoft Basic Display) — تحقق من Device Manager قبل تغيير أي قطعة.',
+    faultAr: 'تعريف بطاقة الرسوميات غير مثبت بعد إعادة تنصيب النظام — العتاد سليم تمامًا، العيب منطقي برمجي.',
+    evidencesAr: ['دقة الشاشة منخفضة ولا تتغير', 'Device Manager يُظهر مثلث أصفر تحت Display adapters', 'لا يوجد خيار تسريع رسومي في الإعدادات'],
+    apply: (s) => {
+      const n = copy(s);
+      n.os.driversMissing = Array.from(new Set([...n.os.driversMissing, 'gpu']));
+      return n;
+    },
+    fix: (s) => {
+      const n = copy(s);
+      n.os.driversMissing = n.os.driversMissing.filter((d) => d !== 'gpu');
+      return n;
+    },
+    isFixed: (s) => !s.os.driversMissing.includes('gpu'),
+    preCode: 'POST_PASS_BOOT_OK',
+    preScreen: 'os',
+  },
+  // ===== F16 (V6 — عطل إقلاع النظام) =====
+  {
+    id: 'F16',
+    titleAr: 'تلف بيانات إقلاع النظام (Boot Configuration)',
+    difficulty: 'صعب',
+    complaintAr: '«توقف الكهرباء أثناء تحديث — الآن الجهاز يفتح على رسالة خطأ Windows failed to start ثم يعيد المحاولة بلا نهاية».',
+    hypothesisAr: 'POST ينجح والعتاد سليم — ملفات الإقلاع (BCD) تالفة، والإصلاح من بيئة Recovery عبر أوامر bootrec.',
+    faultAr: 'تلف Boot Configuration Data (BCD) — الجهاز يعبر POST بنجاح ثم يفشل تحميل النظام ويظهر Recovery Environment.',
+    evidencesAr: ['POST يكتمل بلا أخطاء عتادية', 'رسالة File: \\Boot\\BCD — Status: 0xc000000f', 'دخول Recovery ممكن والمكونات كلها مثبتة'],
+    apply: (s) => {
+      const n = copy(s);
+      n.os.bcdCorrupt = true;
+      n.os.repairAttempts = 0;
+      return n;
+    },
+    fix: (s) => {
+      const n = copy(s);
+      n.os.bcdCorrupt = false;
+      n.os.repairAttempts = 0;
+      return n;
+    },
+    isFixed: (s) => !s.os.bcdCorrupt,
+    preCode: 'POST_PASS_BOOT_OK',
+    preScreen: 'os',
   },
 ];
 

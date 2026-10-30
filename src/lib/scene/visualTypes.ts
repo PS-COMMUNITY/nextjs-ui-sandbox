@@ -46,6 +46,20 @@ export interface PCSceneCallbacks {
   onPeripheral?: (kind: PeripheralKind, detail?: string) => void;
   /** إفلات قطعة مسحوبة بالماوس: تمرر للمنطق التعليمي للتحقق قبل قبول الحركة */
   onPartDrop?: (id: ComponentId, zone: 'tray' | 'case' | null) => void;
+  /** (V6-B) دخول/خروج وضع التحكم بالشاشة المجسمة (الواجهة تُحدّث شارتها) */
+  onFocusMode?: (on: boolean) => void;
+  /** (V6 §3) تحديث الحرارة المُحاكاة (بيانات تعليمية — تُعرض في الواجهة) */
+  onThermal?: (cpuTempC: number, gpuTempC: number) => void;
+  /** (V6 §3) إطفاء حراري تعليمي — تجاوز الحد بلا تبريد */
+  onThermalShutdown?: (cpuTempC: number) => void;
+  /** (V6-D) تغيير إعدادات UEFI من شاشة البرنامج الثابت داخل النظام الافتراضي */
+  onFirmwareChange?: (patch: Record<string, unknown>) => void;
+  /** (V6-D) اختيار جهاز إقلاع من UEFI (نقر مزدوج في تبويب Boot) */
+  onBootDevice?: (deviceId: string) => void;
+  /** (V6-E/F16) Startup Repair من بيئة الاسترداد (يفشل تعليميًا ويعد المحاولات) */
+  onStartupRepair?: () => void;
+  /** (V6-E/F16) إعادة تشغيل من بيئة الاسترداد */
+  onRecoveryRestart?: () => void;
   onReady?: () => void;
   onError?: (messageAr: string) => void;
 }

@@ -134,10 +134,79 @@ export function initialPeripheralState(): PeripheralState {
   return { monitorOn: true, monitorCableConnected: true, psuDead: false, ramIncompatible: false };
 }
 
+// ============ النظام الافتراضي والأقراص (V6 — مصدر حقيقة واحد) ============
+/** عائلات Windows المدعومة تعليميًا — المعرفات تُشتق من كتالوج windowsCatalog */
+export type WinFamilyId = 'xp' | 'vista' | '7' | '8' | '8.1' | '10' | '11';
+
+/** قسم منطقي واحد داخل قرص افتراضي */
+export interface VirtualPartition {
+  id: string;
+  label: string;                       // مثل «System Reserved» أو «C»
+  letter: string | null;               // حرف السائق أو null (EFI/MSR)
+  kind: 'efi' | 'msr' | 'recovery' | 'primary';
+  fs: 'ntfs' | 'fat32' | 'exfat' | 'none';
+  sizeGB: number;
+  usedGB: number;
+  hasOs: boolean;                      // هل عليه نظام مثبت (قرص الإقلاع)
+}
+
+/** قرص افتراضي داخل Sandbox المحاكاة — لا يمس أقراص المستخدم الحقيقية إطلاقًا */
+export interface VirtualDisk {
+  id: string;                          // 'm2-1' | 'hdd-1'
+  labelAr: string;                     // «قرص M.2 NVMe»
+  bus: 'nvme' | 'sata';
+  sizeGB: number;
+  style: 'gpt' | 'mbr' | null;         // null = غير مهيأ (Not Initialized)
+  parts: VirtualPartition[];
+}
+
+/** حالة النظام الافتراضي المثبت + حالة إقلاعه (ترتبط بمحرك POST/BOOT) */
+export interface OsState {
+  installed: WinFamilyId | null;       // العائلة المثبتة أو null
+  edition: string | null;              // اسم النسخة المثبتة (مثل «Pro 64-bit»)
+  driversMissing: ComponentId[];       // أجهزة بلا تعريف (سيناريو F15)
+  bcdCorrupt: boolean;                 // تلف بيانات الإقلاع (سيناريو F16)
+  repairAttempts: number;              // محاولات Startup Repair (تعليمي)
+  installedAt: number | null;
+}
+
+export function initialOsState(): OsState {
+  return { installed: null, edition: null, driversMissing: [], bcdCorrupt: false, repairAttempts: 0, installedAt: null };
+}
+
+/** إعدادات البرنامج الثابت (UEFI) التعليمية */
+export interface FirmwareState {
+  secureBoot: boolean;
+  tpm: boolean;                        // TPM 2.0 (شرط Windows 11)
+  xmp: boolean;
+  bootOrder: string[];                 // 'usb' ثم أقراص بالمعرفات
+  setupRequested: boolean;             // طلب الدخول إلى إعدادات UEFI (زر/DEL)
+}
+
+export function initialFirmwareState(): FirmwareState {
+  return { secureBoot: true, tpm: true, xmp: false, bootOrder: ['usb', 'm2-1', 'hdd-1'], setupRequested: false };
+}
+
+/** الحالة الحرارية المُحاكاة (بيانات تعليمية معلنة — ليست قياسًا حقيقيًا) */
+export interface ThermalState {
+  cpuTempC: number;
+  gpuTempC: number;
+  simulatedNotice: true;
+}
+
+export function initialThermalState(): ThermalState {
+  return { cpuTempC: 26, gpuTempC: 26, simulatedNotice: true };
+}
+
 export interface SimulationState {
   flags: Record<MachineFlag, boolean>;
   parts: Record<ComponentId, PartStatus>;
   peripherals: PeripheralState;
+  os: OsState;                         // V6: النظام الافتراضي جزء من مصدر الحقيقة الواحد
+  disks: VirtualDisk[];                // V6: الأقراص الافتراضية
+  firmware: FirmwareState;             // V6: إعدادات UEFI
+  usbMedia: WinFamilyId | null;        // V6: وسيط تثبيت مُدخل (null = لا شيء)
+  thermal: ThermalState;               // V6: حرارة مُحاكاة للمراوح والتعليم
 }
 
 export function initialSimulationState(): SimulationState {
@@ -145,10 +214,49 @@ export function initialSimulationState(): SimulationState {
   for (const f of MACHINE_FLAGS) flags[f] = false;
   const parts = {} as Record<ComponentId, PartStatus>;
   for (const id of COMPONENT_IDS) parts[id] = 'installed';
-  return { flags, parts, peripherals: initialPeripheralState() };
+  return {
+    flags,
+    parts,
+    peripherals: initialPeripheralState(),
+    // الجهاز المرجعي يأتي بنظام مثبت مسبقًا (Windows 10 Pro على قرص M.2 بنمط GPT)
+    // — إعادة التثبيت بأي عائلة ممكنة عبر معالج التثبيت (V6-D).
+    os: { installed: '10', edition: 'Pro 64-bit', driversMissing: [], bcdCorrupt: false, repairAttempts: 0, installedAt: Date.now() },
+    disks: [
+      {
+        id: 'm2-1',
+        labelAr: 'قرص M.2 NVMe',
+        bus: 'nvme',
+        sizeGB: 1000,
+        style: 'gpt',
+        parts: [
+          { id: 'm2-1-p1', label: 'EFI System Partition', letter: null, kind: 'efi', fs: 'fat32', sizeGB: 0.1, usedGB: 0.03, hasOs: false },
+          { id: 'm2-1-p2', label: 'Microsoft Reserved', letter: null, kind: 'msr', fs: 'none', sizeGB: 0.016, usedGB: 0, hasOs: false },
+          { id: 'm2-1-p3', label: 'OS', letter: 'C', kind: 'primary', fs: 'ntfs', sizeGB: 999.88, usedGB: 86, hasOs: true },
+        ],
+      },
+      { id: 'hdd-1', labelAr: 'قرص ميكانيكي SATA', bus: 'sata', sizeGB: 1000, style: null, parts: [] },
+    ],
+    firmware: initialFirmwareState(),
+    usbMedia: null,
+    thermal: initialThermalState(),
+  };
 }
 
-/** دمج دفاعي: حالة محفوظة قديمة/ناقصة + قيم افتراضية للحقول الجديدة */
+/** نسخة دفاعية موحدة لحالة المحاكاة (تشمل كل حقول V6) — تُستخدم في كل المحركات */
+export function copySimulation(s: SimulationState): SimulationState {
+  return {
+    flags: { ...s.flags },
+    parts: { ...s.parts },
+    peripherals: { ...s.peripherals },
+    os: { ...s.os, driversMissing: [...s.os.driversMissing] },
+    disks: s.disks.map((d) => ({ ...d, parts: d.parts.map((p) => ({ ...p })) })),
+    firmware: { ...s.firmware, bootOrder: [...s.firmware.bootOrder] },
+    usbMedia: s.usbMedia,
+    thermal: { ...s.thermal },
+  };
+}
+
+/** دمج دفاعي: حالة محفوظة قديمة/ناقصة + قيم افتراضية للحقول الجديدة (schema versioning) */
 export function normalizeSimulationState(raw: Partial<SimulationState> | undefined | null): SimulationState {
   const base = initialSimulationState();
   if (!raw || typeof raw !== 'object') return base;
@@ -156,6 +264,11 @@ export function normalizeSimulationState(raw: Partial<SimulationState> | undefin
     flags: { ...base.flags, ...(typeof raw.flags === 'object' && raw.flags ? raw.flags : {}) },
     parts: { ...base.parts, ...(typeof raw.parts === 'object' && raw.parts ? raw.parts : {}) },
     peripherals: { ...base.peripherals, ...(typeof raw.peripherals === 'object' && raw.peripherals ? raw.peripherals : {}) },
+    os: { ...base.os, ...(typeof raw.os === 'object' && raw.os ? raw.os : {}) },
+    disks: Array.isArray(raw.disks) && raw.disks.length > 0 ? raw.disks : base.disks,
+    firmware: { ...base.firmware, ...(typeof raw.firmware === 'object' && raw.firmware ? raw.firmware : {}) },
+    usbMedia: raw.usbMedia ?? null,
+    thermal: { ...base.thermal, ...(typeof raw.thermal === 'object' && raw.thermal ? raw.thermal : {}) },
   };
 }
 
@@ -339,5 +452,5 @@ export interface ReportSummary {
   simulatedValuesNoticeAr: string;
 }
 
-export const APP_VERSION = '4.0.0';
+export const APP_VERSION = '6.0.0';
 export const CATALOG_VERSION = '2025-01-rev2';

@@ -30,6 +30,7 @@ import {
   CheckCircle2,
   CircleDashed,
   Wind,
+  Thermometer,
   MonitorUp,
   MonitorX,
   Monitor,
@@ -51,6 +52,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { isWebGLAvailable, PCScene } from '@/lib/scene/PCScene';
+import { preloadGlbAssets } from '@/lib/scene/glbParts';
 import type { ComponentId, ChecklistItem, MachineFlag, PartStatus } from '@/lib/types';
 import { assemblyStateOf, ASSEMBLY_STATE_INFO, SECURE_FLAGS } from '@/lib/types';
 import { COMPONENT_MAP } from '@/lib/data/catalog';
@@ -507,6 +509,8 @@ export default function LabScreen() {
   const [dragMode, setDragMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [canType, setCanType] = useState(false);
+  const [focusMode, setFocusModeState] = useState(false);
+  const [fansReport, setFansReport] = useState<Array<{ labelAr: string; rpm: number; running: boolean; stateAr: string; airflowAr: string }>>([]);
 
   const sim = useLabStore((s) => s.sim);
   const selected = useLabStore((s) => s.selected);
@@ -552,6 +556,43 @@ export default function LabScreen() {
         const after = useLabStore.getState().sim;
         sceneRef.current?.syncState(after);
       },
+      // (V6-B) شارة وضع التحكم بالشاشة
+      onFocusMode: (on: boolean) => {
+        setFocusModeState(on);
+        useLabStore.getState().setInputMode(on ? 'monitor' : 'lab');
+      },
+      // (V6 §3) الحرارة المُحاكاة → المتجر (مصدر الحقيقة)
+      onThermal: (cpu, gpu) => useLabStore.getState().setThermal(cpu, gpu),
+      // إطفاء حراري تعليمي
+      onThermalShutdown: (cpu) => {
+        const st = useLabStore.getState();
+        if (st.sim.flags.powerOn) {
+          st.toggleFlag('powerOn');
+          toast.error(`إطفاء حراري تعليمي: حرارة المعالج بلغت ${cpu.toFixed(0)}°C — تحقق من المبرد ومراوح الهيكل`);
+        }
+      },
+      // (V6-D) إعدادات UEFI من داخل النظام الافتراضي
+      onFirmwareChange: (patch) => {
+        const st = useLabStore.getState();
+        const key = Object.keys(patch)[0];
+        if (key === 'bootOrder' && Array.isArray(patch.bootOrder)) st.patchFirmware({ bootOrder: patch.bootOrder as string[] });
+        else if (key === 'secureBoot') st.patchFirmware({ secureBoot: Boolean(patch.secureBoot) });
+        else if (key === 'tpm') st.patchFirmware({ tpm: Boolean(patch.tpm) });
+        else if (key === 'xmp') st.patchFirmware({ xmp: Boolean(patch.xmp) });
+        else if (key === 'setupRequested') st.patchFirmware({ setupRequested: Boolean(patch.setupRequested) });
+      },
+      onBootDevice: (deviceId) => {
+        const st = useLabStore.getState();
+        st.bootFromDevice(deviceId);
+        st.patchFirmware({ setupRequested: false });
+      },
+      // (V6-E/F16) بيئة الاسترداد
+      onStartupRepair: () => useLabStore.getState().runStartupRepair(),
+      onRecoveryRestart: () => {
+        const st = useLabStore.getState();
+        st.toggleFlag('powerOn'); // إطفاء
+        setTimeout(() => useLabStore.getState().toggleFlag('powerOn'), 900); // تشغيل من جديد
+      },
       onError: fail,
     };
     let scene: PCScene | null = null;
@@ -559,25 +600,36 @@ export default function LabScreen() {
       queueMicrotask(() => fail('متصفحك لا يدعم WebGL — لن يمكن عرض المشهد ثلاثي الأبعاد. استخدم متصفحًا حديثًا أو فعّل تسريع العتاد.'));
       return;
     }
-    try {
-      scene = new PCScene({ container: el, quality, callbacks });
-      sceneRef.current = scene;
-      const st = useLabStore.getState();
-      scene.syncState(st.sim);
-      scene.setXray(st.xray);
-      scene.setExploded(st.exploded);
-      scene.setAirflow(st.airflowVisible);
-      scene.setBootClock(st.bootStartedAt);
-      scene.setNotepad(st.notepad);
-      scene.setDragEnabled(false);
-      // خطاف فحص تطويري فقط (غير مستخدم في الإنتاج الوظيفي)
-      if (typeof window !== 'undefined') {
-        (window as unknown as Record<string, unknown>).__pcrs = { scene };
+    // (V5) تحميل النماذج الحقيقية قبل إنشاء المشهد — الفشل يبقي المجسمات الإجرائية
+    let cancelled = false;
+    void (async () => {
+      try {
+        await preloadGlbAssets();
+      } catch {
+        // تجاهل: buildAllParts ستستخدم المجسمات الإجرائية
       }
-    } catch {
-      queueMicrotask(() => fail('تعذر إنشاء المشهد ثلاثي الأبعاد — قد تكون موارد الجهاز منخفضة.'));
-    }
+      if (cancelled) return;
+      try {
+        scene = new PCScene({ container: el, quality, callbacks });
+        sceneRef.current = scene;
+        const st = useLabStore.getState();
+        scene.syncState(st.sim);
+        scene.setXray(st.xray);
+        scene.setExploded(st.exploded);
+        scene.setAirflow(st.airflowVisible);
+        scene.setBootClock(st.bootStartedAt);
+        scene.setNotepad(st.notepad);
+        scene.setDragEnabled(false);
+        // خطاف فحص تطويري فقط (غير مستخدم في الإنتاج الوظيفي)
+        if (typeof window !== 'undefined') {
+          (window as unknown as Record<string, unknown>).__pcrs = { scene };
+        }
+      } catch {
+        queueMicrotask(() => fail('تعذر إنشاء المشهد ثلاثي الأبعاد — قد تكون موارد الجهاز منخفضة.'));
+      }
+    })();
     return () => {
+      cancelled = true;
       scene?.dispose();
       sceneRef.current = null;
     };
@@ -627,14 +679,34 @@ export default function LabScreen() {
     return () => clearInterval(iv);
   }, [sim, bootStartedAt]);
 
-  // ===== اختصارات لوحة المفاتيح الحقيقية (توجيه v3 §5) =====
-  // لا تُلتقط أثناء الكتابة في input/textarea/contenteditable ولا مع مفاتيح معدلة.
+  // (V6 §3) قراءة حية لتقرير المراوح من المشهد (سرعات/حالات لكل مروحة)
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const scene = sceneRef.current;
+      if (scene) setFansReport(scene.getFanReport());
+    }, 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ===== اختصارات لوحة المفاتيح الحقيقية (توجيه v3 §5 + v6 §4.3) =====
+  // في وضع التحكم بالشاشة: كل المفاتيح توجّه إلى النظام الافتراضي (عدا Esc للخروج).
+  // في وضع المختبر: الاختصارات لا تُلتقط أثناء الكتابة في input/textarea/مفاتيح معدلة.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const st = useLabStore.getState();
+
+      // (V6-B) وضع التحكم بالشاشة: أولوية الإدخال للنظام الافتراضي
+      if (st.inputMode === 'monitor') {
+        // مفاتيح المتصفح المحفوظة تمر دائمًا (تحديث/ملء شاشة/أدوات المطور)
+        if (e.key === 'F5' || e.key === 'F11' || e.key === 'F12' || ((e.ctrlKey || e.metaKey) && ['r', 'l', 't', 'w', 'j'].includes(e.key.toLowerCase()))) return;
+        const consumed = sceneRef.current?.handleMonitorKey(e);
+        if (consumed) e.preventDefault();
+        return;
+      }
+
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const st = useLabStore.getState();
       switch (e.code) {
         case 'KeyR': // إعادة ضبط منظور الكاميرا
           sceneRef.current?.resetCamera();
@@ -653,6 +725,9 @@ export default function LabScreen() {
         case 'KeyH': // إظهار/إخفاء تلميحات التحكم
           st.setHintsVisible(!st.hintsVisible);
           break;
+        case 'KeyM': // (V6-B) تفعيل وضع التحكم بالشاشة
+          sceneRef.current?.setFocusMode(true);
+          break;
         case 'Digit1': // منظير أمامي
           sceneRef.current?.setViewPreset('front');
           break;
@@ -661,6 +736,9 @@ export default function LabScreen() {
           break;
         case 'Digit3': // منظير علوي
           sceneRef.current?.setViewPreset('top');
+          break;
+        case 'Delete': // (V6-D) الدخول إلى إعدادات UEFI أثناء الإقلاع
+          st.requestSetup();
           break;
         case 'Escape': // إلغاء التحديد/العزل
           st.select(null);
@@ -694,7 +772,11 @@ export default function LabScreen() {
   const focusSelected = useCallback(() => {
     if (selected) sceneRef.current?.focusComponent(selected);
   }, [selected]);
-  const gotoMonitor = useCallback(() => sceneRef.current?.focusMonitor(), []);
+  const toggleScreenControl = useCallback(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.setFocusMode(!scene.isFocusMode());
+  }, []);
 
   if (failed) {
     return <FallbackView messageAr={errorAr} />;
@@ -738,8 +820,8 @@ export default function LabScreen() {
         <Button size="sm" variant={airflowVisible ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={() => setAirflow(!airflowVisible)} title="أسهم اتجاه تدفق الهواء">
           <Wind className="h-3.5 w-3.5" aria-hidden /> هواء
         </Button>
-        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={gotoMonitor} title="الانتقال إلى الشاشة الافتراضية">
-          <MonitorUp className="h-3.5 w-3.5" aria-hidden /> الشاشة
+        <Button size="sm" variant={focusMode ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleScreenControl} title="وضع التحكم بالشاشة المجسمة: الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي (M)">
+          <MonitorUp className="h-3.5 w-3.5" aria-hidden /> التحكم بالشاشة
         </Button>
         <Separator orientation="vertical" className="mx-1 h-5" />
         <Button
@@ -827,6 +909,34 @@ export default function LabScreen() {
       <div className={cn('grid gap-3', sidePanelsHidden ? '' : 'lg:grid-cols-[minmax(0,1fr)_360px]')}>
         <div className="space-y-2 min-w-0">
           <SafetyStrip />
+
+          {/* (V6 §3) قراءة حية: الحرارة المُحاكاة + سرعة كل مروحة وحالتها واتجاه تدفقها */}
+          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-card/40 px-2.5 py-1.5" dir="rtl" aria-label="قراءة المراوح والحرارة المحاكاة">
+            <Badge variant="outline" className="gap-1 text-[10px]">
+              <Thermometer className="h-3 w-3" aria-hidden />
+              CPU {sim.thermal.cpuTempC.toFixed(0)}°C / GPU {sim.thermal.gpuTempC.toFixed(0)}°C
+            </Badge>
+            <span className="text-[10px] text-muted-foreground">محاكاة تعليمية:</span>
+            {fansReport.length === 0 ? (
+              <span className="text-[10px] text-muted-foreground">…تجهيز منظومة المراوح</span>
+            ) : (
+              fansReport.map((f) => (
+                <Badge
+                  key={f.labelAr}
+                  variant="outline"
+                  className={cn(
+                    'gap-1 text-[10px]',
+                    !f.running ? 'border-slate-600/40 text-slate-400' : f.rpm > 1200 ? 'border-rose-600/40 text-rose-400' : 'border-emerald-600/40 text-emerald-400',
+                  )}
+                  title={`${f.labelAr} — ${f.airflowAr}`}
+                >
+                  <Wind className="h-3 w-3" aria-hidden />
+                  {f.labelAr}: {f.running ? `${f.rpm} RPM` : 'متوقفة'}
+                </Badge>
+              ))
+            )}
+          </div>
+
           <div
             ref={sceneWrapRef}
             className={cn(
@@ -841,6 +951,19 @@ export default function LabScreen() {
               role="application"
               aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
             />
+            {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن */}
+            {focusMode ? (
+              <div className="pointer-events-auto absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-2 bg-emerald-950/80 px-3 py-1.5 text-xs text-emerald-200 backdrop-blur-sm" dir="rtl">
+                <MonitorUp className="h-3.5 w-3.5" aria-hidden />
+                <span className="font-bold">وضع التحكم بالشاشة</span>
+                <span className="opacity-80">— الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي داخل الشاشة المجسمة</span>
+                <kbd className="rounded border border-emerald-500/50 px-1 font-mono">Esc</kbd>
+                <span className="opacity-80">للعودة للمختبر</span>
+                <Button size="sm" variant="secondary" className="h-6 gap-1 px-2 text-[10px]" onClick={() => sceneRef.current?.setFocusMode(false)}>
+                  <DoorClosed className="h-3 w-3" aria-hidden /> خروج
+                </Button>
+              </div>
+            ) : null}
             <HintsOverlay dragMode={dragMode} />
           </div>
 

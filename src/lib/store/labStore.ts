@@ -10,10 +10,12 @@ import { toast } from 'sonner';
 import type {
   ComponentId,
   DiagnosisCode,
+  FirmwareState,
   MachineFlag,
   PartStatus,
   SessionEvent,
   SimulationState,
+  WinFamilyId,
 } from '@/lib/types';
 import { APP_VERSION, isInstalled, normalizeSimulationState } from '@/lib/types';
 import { initialSimulationState } from '@/lib/types';
@@ -64,6 +66,9 @@ export type ScreenId =
 
 export type GraphicsQuality = 'low' | 'medium' | 'high';
 
+/** وضع الإدخال: مختبر (كاميرا/قطع) أو التحكم بالشاشة المجسمة (توجيه V6 §4.3) */
+export type InputMode = 'lab' | 'monitor';
+
 interface SaveStatus {
   available: boolean;
   lastSavedAt: number | null;
@@ -78,6 +83,7 @@ interface LabStore {
   notepad: string;                // دفتر النظام الافتراضي — يُكتب من حقل إدخال حقيقي (توجيه v3 أ.2)
   hintsVisible: boolean;          // تلميحات التحكم بالماوس/الكيبورد الحقيقيين (زر H)
   airflowVisible: boolean;        // أسهم تدفق الهواء
+  inputMode: InputMode;           // V6-B: وضع المختبر أو وضع التحكم بالشاشة
   // === واجهة ===
   screen: ScreenId;
   selected: ComponentId | null;
@@ -109,6 +115,23 @@ interface LabStore {
   setQuality: (q: GraphicsQuality) => void;
   setSidePanelsHidden: (v: boolean) => void;
   toggleFlag: (f: MachineFlag) => void;
+  setInputMode: (m: InputMode) => void;
+  // V6-C/D: النظام والأقراص والبرنامج الثابت
+  insertUsb: (family: WinFamilyId | null) => void;
+  exitSetup: () => void;
+  completeInstall: (family: WinFamilyId, editionAr: string, diskId: string, plan: Array<{ label: string; kind: 'efi' | 'msr' | 'recovery' | 'primary'; fs: string; sizeGB: number }> | null) => void;
+  clearDisk: (diskId: string) => void;
+  initDisk: (diskId: string, style: 'gpt' | 'mbr') => void;
+  createPartition: (diskId: string, sizeGB: number, fs: 'ntfs' | 'fat32') => void;
+  deletePartition: (diskId: string, partId: string) => void;
+  formatPartition: (diskId: string, partId: string) => void;
+  fixDriver: (componentId: ComponentId) => void;
+  repairBcd: () => void;
+  runStartupRepair: () => void;
+  patchFirmware: (patch: Partial<FirmwareState>) => void;
+  requestSetup: () => void;
+  bootFromDevice: (deviceId: string) => void;
+  setThermal: (cpuTempC: number, gpuTempC: number) => void;
   // فك/تركيب بآلة الحالات الكاملة
   detachPart: (id: ComponentId) => void;   // installed → separated (فصل جزئي)
   extractPart: (id: ComponentId) => void;  // separated → removed (استخراج للصينية)
@@ -188,6 +211,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   notepad: '',
   hintsVisible: true,
   airflowVisible: false,
+  inputMode: 'lab',
   screen: 'home',
   selected: null,
   xray: false,
@@ -418,6 +442,184 @@ export const useLabStore = create<LabStore>((set, get) => ({
   setHintsVisible: (v) => set({ hintsVisible: v }),
 
   setAirflow: (v) => set({ airflowVisible: v }),
+
+  setInputMode: (inputMode) => set({ inputMode }),
+
+  // ============ V6-C/D: النظام الافتراضي والأقراص والبرنامج الثابت ============
+
+  insertUsb: (family) => {
+    const s = get();
+    set({ sim: { ...s.sim, usbMedia: family } });
+    s.logEvent('other', family ? `أُدخل وسيط تثبيت: ${family}` : 'أُخرج وسيط التثبيت', true);
+    toast.success(family ? `وُصل وسيط تثبيت ${family} — سيلي الترتيب أولوية الإقلاع` : 'أُخرج وسيط التثبيت');
+    schedulePersist(get);
+  },
+
+  exitSetup: () => {
+    const s = get();
+    // الخروج من المعالج: إخراج الوسيط وإعادة تشغيل باردة (بدون تغيير النظام)
+    const sim = { ...s.sim, usbMedia: null };
+    sim.flags.powerOn = false;
+    set({ sim, bootStartedAt: null });
+    s.logEvent('other', 'الخروج من معالج التثبيت — إعادة تشغيل باردة', true);
+    schedulePersist(get);
+  },
+
+  completeInstall: (family, editionAr, diskId, plan) => {
+    const s = get();
+    const disks = s.sim.disks.map((d) => {
+      if (d.id !== diskId) {
+        // إزالة علامة hasOs من الأقراص الأخرى (نظام واحد نشط)
+        return { ...d, parts: d.parts.map((p) => ({ ...p, hasOs: false })) };
+      }
+      const parts = plan && plan.length > 0
+        ? plan.map((p, i) => ({
+            id: `${d.id}-n${i}-${Date.now() % 100000}`,
+            label: p.kind === 'primary' ? 'OS' : p.label,
+            letter: p.kind === 'primary' ? 'C' : null,
+            kind: p.kind,
+            fs: p.fs as 'ntfs' | 'fat32' | 'none',
+            sizeGB: p.sizeGB,
+            usedGB: p.kind === 'primary' ? 24 : 0.02,
+            hasOs: p.kind === 'primary',
+          }))
+        : d.parts.map((p) => ({ ...p, hasOs: p.kind === 'primary', usedGB: p.kind === 'primary' ? 24 : p.usedGB }));
+      return { ...d, style: (d.style ?? 'gpt') as 'gpt' | 'mbr', parts };
+    });
+    const sim: SimulationState = {
+      ...s.sim,
+      disks,
+      os: { installed: family, edition: editionAr, driversMissing: [], bcdCorrupt: false, repairAttempts: 0, installedAt: Date.now() },
+      usbMedia: null,
+      firmware: { ...s.sim.firmware, bootOrder: s.sim.firmware.bootOrder.filter((x) => x !== 'usb').concat(s.sim.firmware.bootOrder.includes('usb') ? ['usb'] : []) },
+    };
+    set({ sim });
+    s.logEvent('other', `اكتمل تثبيت النظام التعليمي: ${family} ${editionAr} على ${diskId}`, true, 'محاكاة تعليمية — لا ملفات حقيقية');
+    toast.success(`اكتمل التثبيت: ${family} ${editionAr} — أُعيد التشغيل إلى سطح المكتب`);
+    schedulePersist(get);
+  },
+
+  clearDisk: (diskId) => {
+    const s = get();
+    const hadOs = s.sim.disks.find((d) => d.id === diskId)?.parts.some((p) => p.hasOs) ?? false;
+    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: [] } : d));
+    const os = hadOs ? { ...s.sim.os, installed: null, edition: null, installedAt: null } : s.sim.os;
+    set({ sim: { ...s.sim, disks, os } });
+    s.logEvent('other', `حذف كل أقسام القرص ${diskId} (محاكاة)`, true, 'تحذير تعليمي: في العمل الحقيقي هذا يفقد البيانات نهائيًا');
+    schedulePersist(get);
+  },
+
+  initDisk: (diskId, style) => {
+    const s = get();
+    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, style, parts: [] } : d));
+    set({ sim: { ...s.sim, disks } });
+    s.logEvent('other', `تهيئة القرص ${diskId} بنمط ${style.toUpperCase()} (محاكاة)`, true);
+    schedulePersist(get);
+  },
+
+  createPartition: (diskId, sizeGB, fs) => {
+    const s = get();
+    const disks = s.sim.disks.map((d) => {
+      if (d.id !== diskId) return d;
+      const total = d.parts.reduce((a, p) => a + p.sizeGB, 0);
+      const unalloc = Math.max(0, d.sizeGB - total);
+      const take = Math.min(unalloc, Math.max(0.1, sizeGB));
+      if (take < 0.1) return d;
+      const part = {
+        id: `${d.id}-p${d.parts.length + 1}-${Date.now() % 100000}`,
+        label: 'Data',
+        letter: (() => { const used = new Set(d.parts.map((p) => p.letter).filter(Boolean)); for (const l of 'DEFGHIJ') { if (!used.has(l)) return l; } return null; })(),
+        kind: 'primary' as const,
+        fs,
+        sizeGB: take,
+        usedGB: 0,
+        hasOs: false,
+      };
+      return { ...d, parts: [...d.parts, part] };
+    });
+    set({ sim: { ...s.sim, disks } });
+    s.logEvent('other', `قسم جديد ${sizeGB.toFixed(1)}GB على ${diskId} بملفات ${fs.toUpperCase()} (محاكاة)`, true);
+    schedulePersist(get);
+  },
+
+  deletePartition: (diskId, partId) => {
+    const s = get();
+    const target = s.sim.disks.find((d) => d.id === diskId)?.parts.find((p) => p.id === partId);
+    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: d.parts.filter((p) => p.id !== partId) } : d));
+    const os = target?.hasOs ? { ...s.sim.os, installed: null, edition: null } : s.sim.os;
+    set({ sim: { ...s.sim, disks, os } });
+    s.logEvent('other', `حذف قسم ${partId} من ${diskId} (محاكاة)`, true, 'تأكيد تعليمي مطلوب — لا عمليات على أقراص حقيقية');
+    schedulePersist(get);
+  },
+
+  formatPartition: (diskId, partId) => {
+    const s = get();
+    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: d.parts.map((p) => (p.id === partId ? { ...p, usedGB: 0, hasOs: false } : p)) } : d));
+    set({ sim: { ...s.sim, disks } });
+    s.logEvent('other', `تهيئة قسم ${partId} (محاكاة)`, true);
+    schedulePersist(get);
+  },
+
+  fixDriver: (componentId) => {
+    const s = get();
+    const os = { ...s.sim.os, driversMissing: s.sim.os.driversMissing.filter((d) => d !== componentId) };
+    set({ sim: { ...s.sim, os } });
+    s.logEvent('install', `تثبيت تعريف: ${componentId} (محاكاة تعليمية)`, true);
+    toast.success('تم تحديث التعريف — أعد الفحص في Device Manager');
+    schedulePersist(get);
+  },
+
+  repairBcd: () => {
+    const s = get();
+    const os = { ...s.sim.os, bcdCorrupt: false, repairAttempts: 0 };
+    set({ sim: { ...s.sim, os } });
+    s.logEvent('install', 'إصلاح بيانات الإقلاع (bootrec) — محاكاة تعليمية', true);
+    schedulePersist(get);
+  },
+
+  runStartupRepair: () => {
+    const s = get();
+    // تعليميًا: الإصلاح التلقائي لا يصلح تلف BCD العميق هنا — يشرح ويعد المحاولات
+    const os = { ...s.sim.os, repairAttempts: s.sim.os.repairAttempts + 1 };
+    set({ sim: { ...s.sim, os } });
+    s.logEvent('other', `Startup Repair فشل (محاولة ${os.repairAttempts}) — يُشرح استخدام bootrec`, false, 'الإصلاح الصحيح: Command Prompt ← bootrec /fixmbr /fixboot /rebuildbcd');
+    toast.error('فشل Startup Repair — استخدم موجه الأوامر ثم bootrec /rebuildbcd');
+    schedulePersist(get);
+  },
+
+  patchFirmware: (patch) => {
+    const s = get();
+    const firmware = { ...s.sim.firmware, ...patch };
+    set({ sim: { ...s.sim, firmware } });
+    s.logEvent('flag', `إعدادات UEFI: ${Object.keys(patch).join(', ')} (محاكاة)`, true);
+    schedulePersist(get);
+  },
+
+  requestSetup: () => {
+    const s = get();
+    if (!s.sim.flags.powerOn) {
+      toast.error('شغّل الجهاز أولًا — الدخول إلى UEFI يتم أثناء بدء التشغيل');
+      return;
+    }
+    set({ sim: { ...s.sim, firmware: { ...s.sim.firmware, setupRequested: true } } });
+    s.logEvent('flag', 'طلب الدخول إلى إعدادات UEFI (DEL)', true);
+    schedulePersist(get);
+  },
+
+  bootFromDevice: (deviceId) => {
+    const s = get();
+    const order = [deviceId, ...s.sim.firmware.bootOrder.filter((x) => x !== deviceId)];
+    set({ sim: { ...s.sim, firmware: { ...s.sim.firmware, bootOrder: order, setupRequested: false } } });
+    s.logEvent('flag', `قائمة إقلاع: بدء التشغيل من ${deviceId}`, true);
+    toast.success(`الإقلاع الآن من ${deviceId}`);
+    schedulePersist(get);
+  },
+
+  setThermal: (cpuTempC, gpuTempC) => {
+    const s = get();
+    if (Math.abs(s.sim.thermal.cpuTempC - cpuTempC) < 1 && Math.abs(s.sim.thermal.gpuTempC - gpuTempC) < 1) return;
+    set({ sim: { ...s.sim, thermal: { ...s.sim.thermal, cpuTempC, gpuTempC, simulatedNotice: true } } });
+  },
 
   runDiagnosis: () => {
     const s = get();

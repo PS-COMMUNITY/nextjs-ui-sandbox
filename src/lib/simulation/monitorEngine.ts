@@ -1,21 +1,21 @@
 /**
- * monitorEngine.ts — محرك الشاشة الخارجية (8 حالات مرئية) — منطق نقّي بلا مشهد.
+ * monitorEngine.ts — محرك الشاشة الخارجية (حالات مرئية) — منطق نقّي بلا مشهد.
  *
  * يحدّد ماذا تعرض شاشة العرض الافتراضية في أي لحظة اعتمادًا على حالة المحاكاة
  * والزمن المنقضي منذ ضغط زر التشغيل (bootElapsedMs). هذه الدالة هي المصدر
- * الوحيد للحقيقة الذي يقرأه رسّام نسيج الشاشة في المشهد (screenTexture).
+ * الوحيد للحقيقة الذي يقرأه رسّام نسيج الشاشة في المشهد.
  *
- * تسلسل التمهيد المعتمد:
- *   0    → 2200ms : شعار بدء التشغيل (booting)
- *   2200 → 4800ms : رسائل POST تُكتب سطرًا سطرًا (post)
- *   4800ms+      : حسم النتيجة (فشل POST / تحذير / BIOS بلا إقلاع / نجاح)
- *   4800 → 6800ms: شاشة نجاح عند اكتمال التجميعة
- *   6800ms+      : نظام افتراضي مبسّط (os) — الكتابة بلوحة المفاتيح متاحة
+ * V6: هدف الإقلاع يُحسم من مصدر الحقيقة الواحد:
+ *   وسيط USB مُدخل وأولوية إقلاعه أولًا ⇒ معالج التثبيت (os — يديره VOS بوضع setup)
+ *   قرص عليه نظام مثبت ⇒ النظام الافتراضي (os — سطح المكتب التفاعلي)
+ *   أقراص موجودة بلا نظام ⇒ UEFI مع رسالة «Operating System not found»
+ *   طلب دخول الإعدادات ⇒ UEFI Setup مباشرة بعد POST
  */
 
 import { isInstalled } from '../types';
 import type { MonitorScreen, SimulationState } from '../types';
 import { runPost } from './postEngine';
+import { getFamily } from '../data/windowsCatalog';
 
 export const BOOT_LOGO_MS = 2200;
 export const BOOT_POST_MS = 4800;
@@ -26,10 +26,10 @@ export const MONITOR_SCREEN_INFO: Record<MonitorScreen, { labelAr: string; hintA
   noSignal: { labelAr: 'لا إشارة', hintAr: 'الشاشة تعمل لكن لا مصدر إشارة يصلها' },
   booting: { labelAr: 'شعار البدء', hintAr: 'الجهاز يمر بمرحلة التهيئة الأولى' },
   post: { labelAr: 'رسائل POST', hintAr: 'الاختبار الذاتي يكتب نتائجه سطرًا سطرًا' },
-  bios: { labelAr: 'إعدادات UEFI', hintAr: 'لا جهاز إقلاع — دخل النظام الإعدادات تلقائيًا' },
+  bios: { labelAr: 'إعدادات UEFI', hintAr: 'بيئة البرنامج الثابت — إقلاع/إعدادات/قائمة أجهزة' },
   warning: { labelAr: 'تحذير', hintAr: 'POST ناجح مع تنبيه يحتاج انتباهك' },
   success: { labelAr: 'نجاح', hintAr: 'كل الفحوص سليمة — الإقلاع جارٍ' },
-  os: { labelAr: 'نظام افتراضي', hintAr: 'سطح مكتب مبسّط — يمكنك الكتابة بلوحة المفاتيح' },
+  os: { labelAr: 'نظام افتراضي', hintAr: 'بيئة تفاعلية كاملة — ماوس وكيبورد حقيقيان' },
 };
 
 export interface MonitorView {
@@ -40,7 +40,26 @@ export interface MonitorView {
   canType: boolean;          // لوحة المفاتيح تقتبس إلى النظام الافتراضي
 }
 
-/** تسلسل POST متكيف مع حالة الجهاز — لا يعرض نجاح فحص لقطعة مفقودة (دقة تعليمية v3 §17) */
+/** قرص إقلاع فعلي: مثبت وموصول (للأقراص SATA يحتاج الكابلين) */
+function diskAvailable(sim: SimulationState, id: string): boolean {
+  if (id === 'm2-1') return isInstalled(sim.parts.ssd);
+  if (id === 'hdd-1') return isInstalled(sim.parts.hdd) && isInstalled(sim.parts.sataData) && isInstalled(sim.parts.sataPower);
+  return false;
+}
+
+/** هل يوجد قرص إقلاع صالح (مثبت وموصول) — يُستخدم لعرض الأجهزة في UEFI */
+export function bootableDevices(sim: SimulationState): Array<{ id: string; labelAr: string; hasOs: boolean }> {
+  const out: Array<{ id: string; labelAr: string; hasOs: boolean }> = [];
+  for (const disk of sim.disks) {
+    if (!diskAvailable(sim, disk.id)) continue;
+    const osLabel = sim.os.installed ? ` — ${getFamily(sim.os.installed).nameEn}` : ' — بدون نظام';
+    const style = disk.style ? (disk.style === 'gpt' ? 'GPT' : 'MBR') : 'غير مهيأ';
+    out.push({ id: disk.id, labelAr: `${disk.labelAr} ${style} ${disk.bus.toUpperCase()}${osLabel}`, hasOs: sim.os.installed !== null && disk.parts.some((p) => p.hasOs) });
+  }
+  return out;
+}
+
+/** تسلسل POST متكيف مع حالة الجهاز — لا يعرض نجاح فحص لقطعة مفقودة (دقة تعليمية) */
 function buildPostSequence(sim: SimulationState): string[] {
   return [
     isInstalled(sim.parts.cpu) ? 'Detecting CPU ... OK (LGA1700)' : 'Detecting CPU ... NOT DETECTED',
@@ -87,7 +106,6 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
   }
 
   if (bootElapsedMs < BOOT_POST_MS) {
-    // رسائل POST تتكشف سطرًا سطرًا (~650ms لكل سطر) — آخر سطر «يبحث عن أجهزة التخزين»
     const seq = buildPostSequence(sim);
     const shown = Math.min(seq.length, Math.floor((bootElapsedMs - BOOT_LOGO_MS) / 650) + 1);
     return {
@@ -98,22 +116,12 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
     };
   }
 
-  // 5) حسم النتيجة عبر محرك POST (المصدر الوحيد — لا منطق موازي).
+  // 5) حسم النتيجة عبر محرك POST (المصدر الوحيد — لا منطق موازٍ).
   const finding = runPost(sim);
-  const storageOk =
-    isInstalled(parts.ssd) ||
-    (isInstalled(parts.hdd) && isInstalled(parts.sataData) && isInstalled(parts.sataPower));
-
-  const bootDevicesAr: string[] = [];
-  if (isInstalled(parts.ssd)) bootDevicesAr.push('M.2 NVMe — 1000GB (UEFI)');
-  if (isInstalled(parts.hdd) && isInstalled(parts.sataData) && isInstalled(parts.sataPower)) {
-    bootDevicesAr.push('SATA HDD 3.5" — 1TB');
-  } else if (isInstalled(parts.hdd)) {
-    bootDevicesAr.push('SATA HDD — غير موصول (تحقق من الكابلين)');
-  }
+  const devices = bootableDevices(sim);
+  const devicesAr = devices.map((d) => d.labelAr);
 
   if (finding.code === 'POST_FAIL') {
-    // أسطر الفشل: أعد الملاحظات المختصرة على الشاشة
     return {
       ...idle,
       screen: 'post',
@@ -122,17 +130,18 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
     };
   }
 
+  if (finding.code === 'POST_PASS_BOOT_WARNING' && devices.length === 0) {
+    // لا جهاز إقلاع → دخول UEFI تلقائيًا
+    return {
+      ...idle,
+      screen: 'bios',
+      bootProgress: 1,
+      postLinesAr: [...buildPostSequence(sim), 'No bootable device found — entering UEFI Setup ...'],
+      bootDevicesAr: devicesAr,
+    };
+  }
+
   if (finding.code === 'POST_PASS_BOOT_WARNING') {
-    if (!storageOk) {
-      // لا جهاز إقلاع → دخول UEFI تلقائيًا (المصير الثاني المطلوب)
-      return {
-        ...idle,
-        screen: 'bios',
-        bootProgress: 1,
-        postLinesAr: [...buildPostSequence(sim), 'No bootable device found — entering UEFI Setup ...'],
-        bootDevicesAr,
-      };
-    }
     // تحذيرات ما بعد POST (مبرد/طاقة بطاقة/تهوية)
     return {
       ...idle,
@@ -142,9 +151,58 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
     };
   }
 
-  // POST ناجح وإقلاع سليم
-  if (bootElapsedMs < BOOT_SUCCESS_MS) {
-    return { ...idle, screen: 'success', bootProgress: 1 };
+  // ===== POST ناجح: حسم هدف الإقلاع (V6) =====
+
+  // طلب صريح للدخول إلى إعدادات UEFI (DEL / زر الواجهة) — يُعرض بعد اكتمال POST
+  if (sim.firmware.setupRequested) {
+    return {
+      ...idle,
+      screen: 'bios',
+      bootProgress: 1,
+      postLinesAr: [...buildPostSequence(sim), 'Entering UEFI Setup ...'],
+      bootDevicesAr: devicesAr,
+    };
   }
-  return { ...idle, screen: 'os', bootProgress: 1, canType: true };
+
+  // الوسيط المُدخل أولوية الإقلاع له ⇒ معالج التثبيت داخل بيئة الوسيط
+  if (sim.usbMedia && sim.firmware.bootOrder[0] === 'usb') {
+    if (bootElapsedMs < BOOT_SUCCESS_MS) {
+      return { ...idle, screen: 'success', bootProgress: 1 };
+    }
+    return { ...idle, screen: 'os', bootProgress: 1, bootDevicesAr: devicesAr, canType: false };
+  }
+
+  // قرص عليه نظام مثبت ⇒ الإقلاع إليه (VOS يدير سطح المكتب أو شاشة الإصلاح)
+  const osDisk = devices.find((d) => d.hasOs);
+  if (osDisk) {
+    if (bootElapsedMs < BOOT_SUCCESS_MS) {
+      return { ...idle, screen: 'success', bootProgress: 1 };
+    }
+    // الكتابة اللوحية متاحة على سطح المكتب فقط (لا أثناء الاسترداد)
+    return { ...idle, screen: 'os', bootProgress: 1, bootDevicesAr: devicesAr, canType: !sim.os.bcdCorrupt };
+  }
+
+  // أقراص موجودة لكن بلا نظام تشغيل ⇒ «Operating System not found» + UEFI
+  if (devices.length > 0) {
+    return {
+      ...idle,
+      screen: 'bios',
+      bootProgress: 1,
+      postLinesAr: [
+        ...buildPostSequence(sim),
+        'Reboot and Select proper Boot device',
+        'or Insert Boot Media in selected Boot device',
+      ],
+      bootDevicesAr: devicesAr,
+    };
+  }
+
+  // لا أقراص إطلاقًا
+  return {
+    ...idle,
+    screen: 'bios',
+    bootProgress: 1,
+    postLinesAr: [...buildPostSequence(sim), 'No bootable device found — entering UEFI Setup ...'],
+    bootDevicesAr: devicesAr,
+  };
 }

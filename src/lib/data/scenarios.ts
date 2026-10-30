@@ -4,7 +4,7 @@
  * معدَّلة دون تغيير الحالة المُدخلة إطلاقًا.
  */
 
-import { COMPONENT_IDS, MACHINE_FLAGS, type SimulationState } from '../types';
+import { COMPONENT_IDS, copySimulation, MACHINE_FLAGS, type SimulationState } from '../types';
 
 export interface ScenarioDef {
   id: string;
@@ -14,12 +14,8 @@ export interface ScenarioDef {
   apply: (s: SimulationState) => SimulationState;
 }
 
-/** نسخة سطحية ثنائية المستوى كافية لبنية SimulationState (flags + parts + peripherals). */
-const copyState = (s: SimulationState): SimulationState => ({
-  flags: { ...s.flags },
-  parts: { ...s.parts },
-  peripherals: { ...s.peripherals },
-});
+/** نسخة دفاعية موحدة (كل حقول V6) — عبر المساعد المشترك */
+const copyState = copySimulation;
 
 export const SCENARIOS: ScenarioDef[] = [
   {

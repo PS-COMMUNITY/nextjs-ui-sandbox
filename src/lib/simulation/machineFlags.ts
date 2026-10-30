@@ -9,6 +9,7 @@
 
 import { COMPONENT_IDS, isInstalled } from '../types';
 import type { ComponentId, MachineFlag, SimulationState, StepResult } from '../types';
+import { copySimulation } from '../types';
 
 /** أسماء عربية للقطع — تظهر في رسالة «أول قطعة ناقصة» عند محاولة التشغيل. */
 const PART_LABELS_AR: Record<ComponentId, string> = {
@@ -187,5 +188,5 @@ export function canToggleFlag(s: SimulationState, f: MachineFlag): StepResult {
 export function applyToggleFlag(s: SimulationState, f: MachineFlag): SimulationState {
   const flags: Record<MachineFlag, boolean> = { ...s.flags };
   flags[f] = !s.flags[f];
-  return { flags, parts: { ...s.parts }, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), flags };
 }

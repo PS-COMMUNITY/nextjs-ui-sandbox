@@ -77,8 +77,10 @@ export function loadAll(): PersistShape | null {
     if (typeof parsed !== 'object' || parsed === null) return null;
     const data = parsed as Partial<PersistShape>;
 
-    // التحقق من الإصدار: أي بيانات من إصدار آخر تُتجاهل.
-    if (data.version !== APP_VERSION) return null;
+    // التحقق من الإصدار: نقبل إصدار V6 الحالي وإصدار V5 السابق (ترقية شفافة —
+    // normalizeSimulationState في المتجر يملأ الحقول الجديدة بقيمها الافتراضية).
+    const ACCEPTED_VERSIONS = new Set([APP_VERSION, '5.0.0', '4.0.0']);
+    if (typeof data.version !== 'string' || !ACCEPTED_VERSIONS.has(data.version)) return null;
 
     // تحقق هيكلي أساسي يحمي الواجهة من بيانات تالفة.
     if (typeof data.simulation !== 'object' || data.simulation === null) return null;

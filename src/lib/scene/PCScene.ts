@@ -20,10 +20,15 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
 import { createScreenPainter, type ScreenPainter } from './screenTexture';
 import { computeMonitorView } from '../simulation/monitorEngine';
+import { FanSystem } from './fans';
+import { VirtualOS } from '../os/vos';
+import { registerVosApps } from '../os/apps';
+import { drawInstaller, getSetupState, resetSetup } from '../os/installer';
+import { gpuSeat } from './glbParts';
 import { BOARD, CASE, COLORS, DEFAULT_CAMERA, DESK, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
 import type { ViewPresetId } from './layout';
 import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
-import { COMPONENT_IDS, isInstalled } from '../types';
+import { COMPONENT_IDS, copySimulation, isInstalled } from '../types';
 import type { ComponentId, MachineFlag, SimulationState } from '../types';
 
 // ======================================================================
@@ -41,7 +46,6 @@ const LEVER_OPEN_ANGLE = -1.1;  // رافعة مقبس CPU — حول Y
 const SCREW_LIFT = 0.06;        // إزاحة البرغي عند فكّه
 const SCREW_SPIN = 0.6;         // دوران طفيف للبرغي المفكوك
 const PLUG_PULL = 0.12;         // سحب القابس على -X عند الفصل
-const SPIN_SPEED = 2.2;         // سرعة دوران شفرات المراوح (rad/s)
 const LERP_RATE = 8;            // معدل الاقتراب الأسي للمواضع في حلقة الرسم
 const HIGHLIGHT_HEX = 0x84cc16; // لون إبراز المكوّن المحدد (أخضر ليموني واضح)
 const HIGHLIGHT_INTENSITY = 0.55;
@@ -110,12 +114,6 @@ interface PlugRec {
   flag: MachineFlag;
   obj: THREE.Object3D;
   baseX: number;
-}
-
-/** دوّار (شفرات مروحة) مع محوره المحفوظ */
-interface SpinnerRec {
-  obj: THREE.Object3D;
-  axis: THREE.Vector3; // متجه وحدة في الفضاء المحلي للدوّار
 }
 
 /** تنعيم كاميرا جارٍ (يُستكمل في حلقة الرسم) */
@@ -192,7 +190,6 @@ export class PCScene {
   private clipRecs: ClipRec[] = [];
   private screwMap = new Map<MachineFlag, ScrewRec[]>();
   private plugRecs: PlugRec[] = [];
-  private spinners: SpinnerRec[] = [];
 
   // ---- أهداف الحركة وحالة العرض ----
   private panelTarget = 0;
@@ -207,9 +204,16 @@ export class PCScene {
   private painter: ScreenPainter | null = null;
   private bootStartedAt: number | null = null;
   private notepad = '';
-  private spinning = false;
   private lastMonitorDrawAt = 0;
   private monitorCableGroup: THREE.Object3D | null = null;
+
+  // ---- V6: النظام الافتراضي + منظومة المراوح + وضع التحكم بالشاشة ----
+  private vos: VirtualOS | null = null;
+  private fans: FanSystem | null = null;
+  private focusMode = false;
+  private savedCam: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
+  private thermalAccum = 0;
+  private readonly _screenNdc = new THREE.Vector2();
 
   // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
   private damagedOriginals = new Map<THREE.MeshStandardMaterial, SavedEmissive>();
@@ -312,7 +316,7 @@ export class PCScene {
       this.initDynamicState(visuals);
       this.initFlagRecords(visuals);
 
-      // (الجلسة 4) الشاشة الافتراضية: نسيج ديناميكي + مرجع كابل الإشارة
+      // (الجلسة 4 / V6) الشاشة الافتراضية: نسيج ديناميكي + النظام الافتراضي التفاعلي
       this.painter = createScreenPainter();
       if (this.painter) {
         const screenMesh = visuals.monitor.getObjectByName('monitor-screen');
@@ -328,6 +332,20 @@ export class PCScene {
       }
       this.monitorCableGroup = visuals.monitor.getObjectByName('monitor-cable') ?? null;
 
+      // (V6-B/C) النظام الافتراضي على سطح الشاشة المجسمة — نفس كانفس الرسّام
+      if (this.painter) {
+        const canvas = (this.painter.texture as THREE.CanvasTexture).image as HTMLCanvasElement;
+        const ctx = canvas?.getContext('2d');
+        if (canvas && ctx) {
+          this.vos = new VirtualOS(ctx, canvas.width, canvas.height);
+          registerVosApps(this.vos);
+          this.wireVosCallbacks();
+        }
+      }
+
+      // (V6 §3) منظومة المراوح المستقلة لكل مروحة
+      this.fans = new FanSystem(visuals);
+
       // أصل حقيقي CC0 (Poly Haven): مسح لوحة دوائر كأساس PCB واقعي + مفك تدريبي
       this.loadRealAssets(visuals);
 
@@ -335,6 +353,9 @@ export class PCScene {
       renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
       renderer.domElement.addEventListener('pointerup', this.onPointerUp);
       renderer.domElement.addEventListener('pointermove', this.onPointerMove);
+      renderer.domElement.addEventListener('wheel', this.onWheel, { passive: false });
+      renderer.domElement.addEventListener('dblclick', this.onScreenDbl);
+      renderer.domElement.addEventListener('contextmenu', this.onContextMenu);
       this.resizeObserver = new ResizeObserver(() => this.onResize());
       this.resizeObserver.observe(this.container);
 
@@ -400,11 +421,7 @@ export class PCScene {
   syncState(s: SimulationState): void {
     if (this.blocked) return;
     // نسخة دفاعية حتى لا تؤثر طفرات المتصل على أهدافنا
-    this.lastState = {
-      flags: { ...s.flags },
-      parts: { ...s.parts },
-      peripherals: { ...s.peripherals },
-    };
+    this.lastState = copySimulation(s);
     this.recomputeTargets();
     this.applyFlags(s.flags, true);
     this.updateRuntimeVisuals(s);
@@ -418,23 +435,124 @@ export class PCScene {
     this.drawMonitor(true);
   }
 
-  /** نص دفتر الملاحظات الافتراضي — يُكتب الآن من حقل إدخال حقيقي في الواجهة (توجيه v3 أ.2) */
+  /** نص دفتر الملاحظات الافتراضي — يُكتب الآن من حقل إدخال حقيقي في الواجهة (توجيه v3 أ.2)
+   *  (V6-B): النص يُوجَّه إلى تطبيق «المفكرة» داخل النظام الافتراضي على الشاشة المجسمة */
   setNotepad(text: string): void {
     if (this.blocked) return;
     this.notepad = text;
+    if (this.vos) {
+      let win = this.vos.windows.find((w) => w.appId === 'notepad');
+      if (!win && text.length > 0) {
+        win = this.vos.openApp('notepad') ?? undefined;
+      }
+      if (win) {
+        win.state['text'] = text;
+        this.vos.dirty = true;
+      }
+    }
     this.drawMonitor(true);
   }
 
-  /** إظهار/إخفاء أسهم تدفق الهواء */
+  /** (V6 §3) إظهار/إخفاء أسهم تدفق الهواء — نسخة منظومة المراوح لكل مروحة */
   setAirflow(on: boolean): void {
     if (this.blocked) return;
-    this.visuals.airflow.visible = on;
+    this.visuals.airflow.visible = false; // الأسهم الثابتة القديمة تُستبدل بأسهم لكل مروحة
+    this.fans?.setArrowsVisible(on);
   }
 
   /** توجيه الكاميرا نحو الشاشة الافتراضية */
   focusMonitor(): void {
     if (this.blocked) return;
     this.startCamTween(new THREE.Vector3(...MONITOR_CAMERA.pos), new THREE.Vector3(...MONITOR_CAMERA.target), 0.7);
+  }
+
+  // ====================================================================
+  // (V6-B) وضع التحكم بالشاشة المجسمة — إدخال حقيقي عبر Raycast + UV
+  // ====================================================================
+
+  /** هل وضع التحكم بالشاشة نشط؟ */
+  isFocusMode(): boolean {
+    return this.focusMode;
+  }
+
+  /** تفعيل/إنهاء وضع التحكم بالشاشة: أولوية الإدخال تنتقل إلى النظام الافتراضي */
+  setFocusMode(on: boolean): void {
+    if (this.blocked || !this.vos) return;
+    if (on === this.focusMode) return;
+    const screen = this.visuals.monitor.getObjectByName('monitor-screen');
+    if (!(screen instanceof THREE.Mesh)) return;
+    this.focusMode = on;
+    this.vos.cursor.visible = on;
+    this.controls.enabled = !on;
+    if (on) {
+      // تأطير الشاشة: مسافة تحسب من أبعاد السطح الفعلية وزاوية الرؤية
+      this.savedCam = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
+      const box = new THREE.Box3().setFromObject(screen);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      // عمود السطح = أصغر بُعد — اتجاه الكاميرا من جهة المشاهد (+Z النموذج مُدار بمجموعة الشاشة)
+      const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(screen.getWorldQuaternion(new THREE.Quaternion())).normalize();
+      const fov = THREE.MathUtils.degToRad(this.camera.fov);
+      const aspect = Math.max(0.4, this.camera.aspect);
+      const distW = size.x / 2 / (Math.tan(fov / 2) * aspect);
+      const distH = size.y / 2 / Math.tan(fov / 2);
+      const dist = Math.max(distW, distH) * 1.12;
+      this.startCamTween(center.clone().addScaledVector(normal, dist), center.clone(), 0.55);
+      this.renderer.domElement.style.cursor = 'none';
+      this.callbacks.onFocusMode?.(true);
+    } else {
+      if (this.savedCam) {
+        this.startCamTween(this.savedCam.pos, this.savedCam.target, 0.5);
+        this.savedCam = null;
+      }
+      this.renderer.domElement.style.cursor = '';
+      this.callbacks.onFocusMode?.(false);
+    }
+    this.drawMonitor(true);
+  }
+
+  /** توجيه مفتاح لوحة المفاتيح الحقيقي إلى النظام الافتراضي — يعيد true إن استُهلك */
+  handleMonitorKey(ev: { key: string; code: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }): boolean {
+    if (!this.focusMode || !this.vos) return false;
+    if (ev.key === 'Escape') {
+      // الخروج الآمن من وضع الشاشة (توجيه §4.3)
+      this.setFocusMode(false);
+      return true;
+    }
+    this.vos.key({ key: ev.key, code: ev.code, ctrl: ev.ctrlKey, shift: ev.shiftKey, alt: ev.altKey });
+    this.drawMonitor(true);
+    return true;
+  }
+
+  /** تحويل نقطة شاشة المتصفح إلى إحداثيات سطح العرض (UV → بكسل) — null إن لم يصب السطح */
+  private screenHit(clientX: number, clientY: number): { x: number; y: number } | null {
+    const screen = this.visuals.monitor.getObjectByName('monitor-screen');
+    if (!(screen instanceof THREE.Mesh)) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const w = rect.width > 0 ? rect.width : 1;
+    const h = rect.height > 0 ? rect.height : 1;
+    this._screenNdc.set(((clientX - rect.left) / w) * 2 - 1, -((clientY - rect.top) / h) * 2 + 1);
+    this.raycaster.setFromCamera(this._screenNdc, this.camera);
+    const hits = this.raycaster.intersectObject(screen, false);
+    if (hits.length === 0 || hits[0].uv === undefined) return null;
+    const uv = hits[0].uv!;
+    // PlaneGeometry: (0,0) أسفل-يسار — الكانفس: (0,0) أعلى-يسار ⇒ قلب Y فقط
+    return { x: uv.x * this.vos!.W, y: (1 - uv.y) * this.vos!.H };
+  }
+
+  /** تقرير منظومة المراوح (للواجهة التعليمية) */
+  getFanReport(): ReturnType<FanSystem['report']> {
+    return this.fans?.report() ?? [];
+  }
+
+  /** تقرير جلوس البطاقة على الشق (V6-A) */
+  getGpuSeat(): typeof gpuSeat {
+    return gpuSeat;
+  }
+
+  /** النظام الافتراضي (للاختبارات الواجهية فقط) */
+  getVos(): VirtualOS | null {
+    return this.vos;
   }
 
   /** منظير جاهز: أمامي/جانبي/علوي (أزرار المشهد + اختصارات 1/2/3) */
@@ -526,6 +644,9 @@ export class PCScene {
       dom.removeEventListener('pointerdown', this.onPointerDown);
       dom.removeEventListener('pointerup', this.onPointerUp);
       dom.removeEventListener('pointermove', this.onPointerMove);
+      dom.removeEventListener('wheel', this.onWheel);
+      dom.removeEventListener('dblclick', this.onScreenDbl);
+      dom.removeEventListener('contextmenu', this.onContextMenu);
     }
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -565,17 +686,39 @@ export class PCScene {
     this.callbacks.onError?.(messageAr);
   }
 
-  /** (6) حلقة الرسم: دوّارات، اقتراب القطع، تنعيم الغطاء، تنعيم الكاميرا، ثم الرسم */
+  /** (6) حلقة الرسم: مراوح، اقتراب القطع، تنعيم الغطاء/الكاميرا، النظام الافتراضي، ثم الرسم */
   private readonly tick = (): void => {
     if (this.disposed || this.failed) return;
     this.rafId = requestAnimationFrame(this.tick);
     const dt = Math.min(this.clock.getDelta(), 0.05); // حماية من قفزات التبويبات الخاملة
     const k = 1 - Math.exp(-LERP_RATE * dt);
 
-    // دوران شفرات المراوح حول محورها المحفوظ — فقط والجهاز يعمل فعلاً
-    if (this.spinning) {
-      for (const spinner of this.spinners) {
-        spinner.obj.rotateOnAxis(spinner.axis, SPIN_SPEED * dt);
+    // (V6 §3) منظومة المراوح: سرعات ودوران كل ريش على محوره الصحيح + الحرارة المُحاكاة
+    if (this.fans && this.lastState) {
+      const s = this.lastState;
+      const powered = s.flags.powerOn && s.flags.acConnected && !s.peripherals.psuDead;
+      const conditions = {
+        powered,
+        cpuCoolerOk: isInstalled(s.parts.cooler),
+        gpuOk: isInstalled(s.parts.gpu) && isInstalled(s.parts.gpuPower),
+        caseFansOk: isInstalled(s.parts.fans) && !s.flags.fanHeadersDisconnected,
+        psuOk: powered,
+        cpuLoad: 0.42,
+        gpuLoad: 0.48,
+      };
+      this.fans.update(dt, conditions);
+
+      // الحرارة المُحاكاة (بيانات تعليمية معلنة): ترتفع بلا مبرد/بلا مراوح وتقترب من الهدف
+      this.thermalAccum += dt;
+      if (this.thermalAccum >= 1) {
+        this.thermalAccum = 0;
+        const cpuTarget = !powered ? 26 : isInstalled(s.parts.cooler) ? (s.flags.fanHeadersDisconnected ? 86 : 46) : 97;
+        const gpuTarget = !powered ? 26 : conditions.gpuOk ? 52 : isInstalled(s.parts.gpu) ? 84 : 26;
+        const cpu = THREE.MathUtils.lerp(s.thermal.cpuTempC, cpuTarget, 0.18);
+        const gpu = THREE.MathUtils.lerp(s.thermal.gpuTempC, gpuTarget, 0.18);
+        this.callbacks.onThermal?.(cpu, gpu);
+        // إطفاء حراري تعليمي عند تجاوز الحد (فصّل التبريد = الجهاز ينطفئ)
+        if (cpu >= 95.5 && powered) this.callbacks.onThermalShutdown?.(cpu);
       }
     }
 
@@ -613,9 +756,12 @@ export class PCScene {
 
     this.controls.update();
 
-    // إعادة رسم نسيج الشاشة الافتراضية بمعدل مقيد
-    if (this.painter && nowMs() - this.lastMonitorDrawAt >= MONITOR_REDRAW_MS) {
-      this.drawMonitor(false);
+    // إعادة رسم نسيج الشاشة الافتراضية: فوري في وضع التحكم بالشاشة، مُقيّد في المختبر
+    if (this.painter) {
+      const interval = this.focusMode ? 90 : MONITOR_REDRAW_MS;
+      if (nowMs() - this.lastMonitorDrawAt >= interval) {
+        this.drawMonitor(false);
+      }
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -928,10 +1074,15 @@ export class PCScene {
     placeTool('/models/metal_tool_chest/metal_tool_chest_1k.gltf', 'under-desk-tool-chest', 5.4, [5.4, DESK.floorY, 5.2], 0.15);
   }
 
-  /** رسم نسيج الشاشة الافتراضية من محرك الشاشة (المصدر الوحيد للحقيقة) */
+  /**
+   * رسم نسيج الشاشة الافتراضية:
+   *  - حالات التمهيد (off/noSignal/booting/post/warning/success) عبر الرسّام القديم.
+   *  - 'os' و 'bios' يديرهما النظام الافتراضي التفاعلي (VOS): سطح مكتب/معالج تثبيت/
+   *    بيئة استرداد/إعدادات UEFI — كلها تفاعلية بالماوس والكيبورد الحقيقيين (V6-B).
+   */
   private drawMonitor(force: boolean): void {
     if (!this.painter || this.blocked) return;
-    if (!force && nowMs() - this.lastMonitorDrawAt < MONITOR_REDRAW_MS) return;
+    if (!force && nowMs() - this.lastMonitorDrawAt < 60) return;
     this.lastMonitorDrawAt = nowMs();
     const sim = this.lastState;
     const elapsed = this.bootStartedAt !== null ? Math.max(0, Date.now() - this.bootStartedAt) : 0;
@@ -944,14 +1095,102 @@ export class PCScene {
       return;
     }
     const view = computeMonitorView(sim, elapsed);
-    this.painter.draw(view, this.notepad, Date.now());
+    const now = Date.now();
+
+    if (this.vos && (view.screen === 'os' || view.screen === 'bios')) {
+      this.drawVosScreen(sim, view.screen, now);
+      return;
+    }
+
+    this.painter.draw(view, this.notepad, now);
   }
 
-  /** تحديثات بصرية لحظية: دوران المراوح/كابل الشاشة/توهج القطع التالفة */
-  private updateRuntimeVisuals(s: SimulationState): void {
-    // المراوح تدور فقط مع كهرباء موصولة وجهاز يعمل ومزود حي
-    this.spinning = s.flags.powerOn && s.flags.acConnected && !s.peripherals.psuDead;
+  /** رسم بيئة النظام الافتراضي/البرنامج الثابت على كانفس الشاشة + رفع النسيج */
+  private drawVosScreen(sim: SimulationState, screen: 'os' | 'bios', now: number): void {
+    if (!this.vos || !this.painter) return;
+    const vos = this.vos;
 
+    if (screen === 'bios') {
+      vos.mode = 'firmware';
+      const devs = sim.disks.map((d) => `${d.id} — ${d.labelAr}${sim.os.installed ? ' (نظام)' : ''}`);
+      vos.fwData = {
+        cpuAr: 'LGA1700 — 6C/12T (reference)',
+        ramAr: `DDR5 32GB${sim.firmware.xmp ? ' @5200 (XMP)' : ' @2133'} — ${sim.flags.ramClipsOpen ? 'مزالج مفتوحة!' : 'مثبتة'}`,
+        boardAr: 'PC LAB Z690 (reference)',
+        tempsAr: `CPU ${sim.thermal.cpuTempC.toFixed(0)}°C / GPU ${sim.thermal.gpuTempC.toFixed(0)}°C (simulated)`,
+        fansAr: this.fans?.report().map((f) => `${f.labelAr}: ${f.rpm} RPM`).join(' | ') ?? '—',
+        bootOrder: [...sim.firmware.bootOrder],
+        secureBoot: sim.firmware.secureBoot,
+        tpm: sim.firmware.tpm,
+        xmp: sim.firmware.xmp,
+        devicesAr: devs,
+        onBootOrder: (order) => this.callbacks.onFirmwareChange?.({ bootOrder: order }),
+        onToggle: (key) => this.callbacks.onFirmwareChange?.({ [key]: !sim.firmware[key] }),
+        onExit: () => this.callbacks.onFirmwareChange?.({ setupRequested: false }),
+        onBootDevice: (id) => this.callbacks.onBootDevice?.(id),
+      };
+      vos.render(now);
+      this.painter.texture.needsUpdate = true;
+      return;
+    }
+
+    // screen === 'os': حسم وضع VOS من مصدر الحقيقة
+    if (sim.usbMedia && sim.firmware.bootOrder[0] === 'usb') {
+      // الإقلاع من وسيط التثبيت ⇒ معالج التثبيت (شاشة كاملة)
+      if (vos.mode !== 'setup') {
+        if (getSetupState().step === 0 || getSetupState().done) resetSetup();
+        vos.mode = 'setup';
+      }
+      vos.drawSetupWith((ctx, os2, t) => drawInstaller(os2, ctx, t), now);
+      this.painter.texture.needsUpdate = true;
+      return;
+    }
+
+    if (sim.os.bcdCorrupt && sim.os.installed) {
+      // فشل إقلاع النظام (F16) ⇒ بيئة الاسترداد
+      vos.mode = 'recovery';
+      vos.recoveryData = {
+        attempts: sim.os.repairAttempts,
+        osNameAr: sim.os.installed,
+        onStartupRepair: () => this.callbacks.onStartupRepair?.(),
+        onCommandPrompt: () => {
+          const win = vos.openApp('cmd');
+          if (win) win.state['recovery'] = true;
+          vos.mode = 'desktop';
+        },
+        onRestart: () => this.callbacks.onRecoveryRestart?.(),
+      };
+      vos.render(now);
+      this.painter.texture.needsUpdate = true;
+      return;
+    }
+
+    // سطح المكتب الافتراضي التفاعلي
+    vos.mode = 'desktop';
+    vos.render(now);
+    this.painter.texture.needsUpdate = true;
+  }
+
+  /** ربط أحداث النظام الافتراضي بمتجر الحالة (مصدر الحقيقة الواحد) */
+  private wireVosCallbacks(): void {
+    if (!this.vos) return;
+    this.vos.storeReader = () => {
+      const s = this.lastState;
+      return {
+        os: {
+          installed: s?.os.installed ?? null,
+          edition: s?.os.edition ?? null,
+          driversMissing: s?.os.driversMissing ?? [],
+          bcdCorrupt: s?.os.bcdCorrupt ?? false,
+        },
+        thermal: { cpuTempC: s?.thermal.cpuTempC ?? 26, gpuTempC: s?.thermal.gpuTempC ?? 26 },
+        fans: this.fans?.report().map((f) => ({ labelAr: f.labelAr, rpm: f.rpm, running: f.running })) ?? [],
+      };
+    };
+  }
+
+  /** تحديثات بصرية لحظية: كابل الشاشة/توهج القطع التالفة (المراوح في منظومة fans) */
+  private updateRuntimeVisuals(s: SimulationState): void {
     // كابل إشارة الشاشة يختفي عند فصله (المواصفة: الكابلات لا تطفو في الفراغ)
     if (this.monitorCableGroup) {
       this.monitorCableGroup.visible = s.peripherals.monitorCableConnected;
@@ -1061,20 +1300,20 @@ export class PCScene {
   // الخاصة — بناء السجلات الداخلية
   // ====================================================================
 
-  /** (4) بناء سجل الحركة لكل مكوّن من MOUNTS/TRAY/EXPLODE_VECTORS */
+  /** (4) بناء سجل الحركة لكل مكوّن — الموضع الأساس من موضع المجموعة الفعلي
+   *  (البطاقة تُحاذى لحظة البناء على شق PCIe x16 الحقيقي المقاس من العقد — V6-A) */
   private initDynamicState(visuals: PartVisuals): void {
     const parts = {} as Record<ComponentId, DynamicPart>;
     for (const id of COMPONENT_IDS) {
       const group = visuals.dynamic[id];
-      const mount = MOUNTS[id];
       parts[id] = {
         group,
-        basePos: new THREE.Vector3(...mount),
+        basePos: group.position.clone(), // يجسد MOUNTS أو المحاذاة المقاسة للبطاقة
         baseRot: new THREE.Euler(0, 0, 0),
         trayPos: new THREE.Vector3(...TRAY.slots[id]),
         trayRot: new THREE.Euler(...TRAY.rotations[id]),
         explodeVec: new THREE.Vector3(...EXPLODE_VECTORS[id]),
-        targetPos: new THREE.Vector3(...mount),
+        targetPos: group.position.clone(),
         targetRot: new THREE.Euler(0, 0, 0),
         targetQuat: new THREE.Quaternion(),
       };
@@ -1122,50 +1361,8 @@ export class PCScene {
     if (flags.frontPanelPlug) {
       this.plugRecs.push({ flag: 'frontPanelDisconnected', obj: flags.frontPanelPlug, baseX: flags.frontPanelPlug.position.x });
     }
-
-    // محور دوران كل دوّار يُستنتج من هندسته (أصغر بُعد = عمود قرص المروحة)
-    this.spinners = visuals.spinners.map((obj): SpinnerRec => ({ obj, axis: this.computeSpinnerAxis(obj) }));
-  }
-
-  /** استنتاج محور الدوران: أصغر بُعد في صندوق الإحاطة للشبك الأول هو عمود القرص */
-  private computeSpinnerAxis(spinner: THREE.Object3D): THREE.Vector3 {
-    const fallback = new THREE.Vector3(0, 1, 0);
-    const mesh = this.firstMesh(spinner);
-    if (!mesh || !mesh.geometry) return fallback;
-    const geometry = mesh.geometry;
-    if (!geometry.boundingBox) geometry.computeBoundingBox();
-    const bb = geometry.boundingBox;
-    if (!bb) return fallback;
-    const ex = bb.max.x - bb.min.x;
-    const ey = bb.max.y - bb.min.y;
-    const ez = bb.max.z - bb.min.z;
-    const axis = new THREE.Vector3(
-      ex <= ey && ex <= ez ? 1 : 0,
-      ey <= ex && ey <= ez ? 1 : 0,
-      ez <= ex && ey <= ez ? 1 : 0,
-    );
-    if (axis.lengthSq() === 0) return fallback;
-    // تحويل المحور من فضاء الشبك إلى الفضاء المحلي للدوّار إن كان ابنًا مُدارًا
-    if (mesh !== spinner) {
-      spinner.updateWorldMatrix(true, false);
-      mesh.updateWorldMatrix(true, false);
-      const qSpinner = new THREE.Quaternion();
-      const qMesh = new THREE.Quaternion();
-      spinner.getWorldQuaternion(qSpinner);
-      mesh.getWorldQuaternion(qMesh);
-      axis.applyQuaternion(qSpinner.invert().multiply(qMesh));
-    }
-    return axis.normalize();
-  }
-
-  /** أول Mesh داخل شجرة كائن (بدون تخصيصات) */
-  private firstMesh(obj: THREE.Object3D): THREE.Mesh | null {
-    if (obj instanceof THREE.Mesh) return obj;
-    for (const child of obj.children) {
-      const found = this.firstMesh(child);
-      if (found) return found;
-    }
-    return null;
+    // (V6 §3) دوّارات المراوح أُصبحت تديرها منظومة FanSystem المستقلة — لا استنتاج استنباطي هنا
+    void visuals;
   }
 
   // ====================================================================
@@ -1196,6 +1393,15 @@ export class PCScene {
     this.pointerDownActive = true;
     this.downX = event.clientX;
     this.downY = event.clientY;
+
+    // (V6-B) وضع التحكم بالشاشة: كل إدخال المؤشر يوجّه إلى النظام الافتراضي
+    if (this.focusMode && this.vos) {
+      const hit = this.screenHit(event.clientX, event.clientY);
+      if (hit) this.vos.pointer('down', hit.x, hit.y, { button: event.button });
+      this.drawMonitor(true);
+      return;
+    }
+
     // بدء سحب محتمل: فقط بالزر الأيسر وعند تفعيل وضع الفك/التركيب
     if (this.dragEnabled && event.button === 0) {
       const picked = this.pickAt(event.clientX, event.clientY);
@@ -1208,6 +1414,16 @@ export class PCScene {
   /** (7) نقرة فقط إذا كانت المسافة بين down/up أقل من 6px — والسحب الفعلي يُعالج قبلها */
   private readonly onPointerUp = (event: PointerEvent): void => {
     if (this.blocked) return;
+
+    // (V6-B) توجيه رفع الزر إلى النظام الافتراضي في وضع الشاشة
+    if (this.focusMode && this.vos) {
+      const hit = this.screenHit(event.clientX, event.clientY);
+      if (hit) this.vos.pointer('up', hit.x, hit.y, { button: event.button });
+      this.drawMonitor(true);
+      this.pointerDownActive = false;
+      return;
+    }
+
     if (this.dragId) {
       this.finishDrag(event.clientX, event.clientY);
       this.pointerDownActive = false;
@@ -1219,6 +1435,17 @@ export class PCScene {
     const dx = event.clientX - this.downX;
     const dy = event.clientY - this.downY;
     if (dx * dx + dy * dy >= CLICK_MAX_DIST_SQ) return; // سحب لا نقرة
+
+    // (V6-B §4.3) النقر على سطح الشاشة المجسمة نفسه يدخل وضع التحكم ويسلّم النقرة
+    const onScreen = this.screenHit(event.clientX, event.clientY);
+    if (onScreen && this.vos) {
+      this.setFocusMode(true);
+      this.vos.pointer('down', onScreen.x, onScreen.y, { button: event.button });
+      this.vos.pointer('up', onScreen.x, onScreen.y, { button: event.button });
+      this.drawMonitor(true);
+      return;
+    }
+
     const picked = this.pickAt(event.clientX, event.clientY);
     if (picked && picked.type === 'periph') {
       this.callbacks.onPeripheral?.(picked.kind, picked.detail);
@@ -1230,6 +1457,15 @@ export class PCScene {
   /** (7) تحويم/سحب — بفحص مُقيَّد زمنيًا للتحويم (100ms) */
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (this.blocked) return;
+
+    // (V6-B) حركة المؤشر الحقيقي → المؤشر الافتراضي داخل الشاشة المجسمة
+    if (this.focusMode && this.vos) {
+      const hit = this.screenHit(event.clientX, event.clientY);
+      if (hit) this.vos.pointer('move', hit.x, hit.y);
+      this.drawMonitor(true);
+      return;
+    }
+
     if (this.dragId) {
       this.updateDrag(event.clientX, event.clientY);
       return;
@@ -1247,6 +1483,35 @@ export class PCScene {
     if (now - this.lastHoverAt < HOVER_THROTTLE_MS) return;
     this.lastHoverAt = now;
     this.renderer.domElement.style.cursor = this.pickAt(event.clientX, event.clientY) ? 'pointer' : '';
+  };
+
+  /** (V6-B) عجلة الماوس → تمرير داخل النظام الافتراضي في وضع الشاشة */
+  private readonly onWheel = (event: WheelEvent): void => {
+    if (this.blocked) return;
+    if (!this.focusMode || !this.vos) return;
+    event.preventDefault();
+    const hit = this.screenHit(event.clientX, event.clientY);
+    if (hit) this.vos.wheel(hit.x, hit.y, event.deltaY);
+    this.drawMonitor(true);
+  };
+
+  /** (V6-B) نقر مزدوج داخل الشاشة (الأيقونات/شريط العنوان) */
+  private readonly onScreenDbl = (event: MouseEvent): void => {
+    if (this.blocked) return;
+    if (!this.focusMode || !this.vos) return;
+    const hit = this.screenHit(event.clientX, event.clientY);
+    if (hit) this.vos.pointer('dbl', hit.x, hit.y);
+    this.drawMonitor(true);
+  };
+
+  /** (V6-B) الزر الأيمن → قائمة سياق النظام الافتراضي */
+  private readonly onContextMenu = (event: MouseEvent): void => {
+    if (this.blocked) return;
+    if (!this.focusMode || !this.vos) return;
+    event.preventDefault();
+    const hit = this.screenHit(event.clientX, event.clientY);
+    if (hit) this.vos.pointer('right', hit.x, hit.y);
+    this.drawMonitor(true);
   };
 
   /** دبل-كليك: إعادة الكاميرا إلى الوضع الافتراضي (موثقة في الإعدادات) */

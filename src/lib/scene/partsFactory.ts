@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import type { ComponentId } from '../types';
 import type { SceneQuality, FlagVisuals, PartVisuals } from './visualTypes';
 import { BOARD, CASE, COLORS, DESK, MOUNTS, PERIPH, TRAY } from './layout';
+import { applyGlbParts } from './glbParts';
 import {
   brushedTexture,
   fanGrillTexture,
@@ -1692,5 +1693,11 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
     sataPower,
   };
 
-  return { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, airflow };
+  const visualResult: PartVisuals = { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, airflow };
+
+  // (V5) استبدال المجسمات الإجرائية بالنماذج الحقيقية (GLB مُحمّلة مسبقًا قبل إنشاء المشهد).
+  // الفشل الفردي يُبقي المجسم الإجرائي في مكانه — لا مشهد مكسور أبدًا.
+  applyGlbParts(visualResult);
+
+  return visualResult;
 }

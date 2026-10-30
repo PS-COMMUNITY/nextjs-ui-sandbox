@@ -21,6 +21,7 @@ import type {
   SimulationState,
   StepResult,
 } from '../types';
+import { copySimulation } from '../types';
 import { CABLE_IDS, isInstalled } from '../types';
 
 /** الأسماء العربية المعتمدة للقطع — تظهر في الرسائل والقوائم التعليمية. */
@@ -321,7 +322,7 @@ export function applyRemove(s: SimulationState, id: ComponentId): SimulationStat
   if (id !== 'case') {
     parts[id] = 'removed'; // الهيكل لا يُفك — الحالة تبقى كما هي
   }
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 /** يركّب القطعة (تغيير parts[id] فقط — الأعلام لا تُعدَّل هنا). */
@@ -330,7 +331,7 @@ export function applyInstall(s: SimulationState, id: ComponentId): SimulationSta
   if (id !== 'case') {
     parts[id] = 'installed'; // الهيكل موجود دائمًا — لا تغيير
   }
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 // ============ انتقالات آلة الحالات الثمانية ============
@@ -339,33 +340,33 @@ export function applyInstall(s: SimulationState, id: ComponentId): SimulationSta
 export function applyDetach(s: SimulationState, id: ComponentId): SimulationState {
   const parts: Record<ComponentId, PartStatus> = { ...s.parts };
   parts[id] = 'separated';
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 /** استخراج كلي: separated (أو أي حالة) → removed في صينية القطع */
 export function applyExtract(s: SimulationState, id: ComponentId): SimulationState {
   const parts: Record<ComponentId, PartStatus> = { ...s.parts };
   parts[id] = 'removed';
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 /** التقاط من الصينية: removed → awaiting (AWAITING_INSTALL) */
 export function applyPrepare(s: SimulationState, id: ComponentId): SimulationState {
   const parts: Record<ComponentId, PartStatus> = { ...s.parts };
   parts[id] = 'awaiting';
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 /** تلف تدريبي مقصود (وضع الاستكشاف): أي حالة → damaged */
 export function applyDamage(s: SimulationState, id: ComponentId): SimulationState {
   const parts: Record<ComponentId, PartStatus> = { ...s.parts };
   parts[id] = 'damaged';
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
 
 /** استبدال القطعة التالفة بأخرى سليمة من المخزن التعليمي: damaged → removed */
 export function applyRepair(s: SimulationState, id: ComponentId): SimulationState {
   const parts: Record<ComponentId, PartStatus> = { ...s.parts };
   parts[id] = 'removed';
-  return { flags: { ...s.flags }, parts, peripherals: { ...s.peripherals } };
+  return { ...copySimulation(s), parts };
 }
