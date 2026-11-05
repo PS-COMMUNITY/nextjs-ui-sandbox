@@ -304,6 +304,18 @@ export class PCScene {
       this.controls.maxDistance = 22;
       this.controls.maxPolarAngle = 1.45;
       this.controls.update();
+      // (V8.1) حجز الأزيموت ديناميكيًا: الكاميرا تبقى داخل الورشة ولا تعبر جدار المكتب
+      // (تجربة فني حقيقي — لا خروج من الغرفة إلى الفراغ خلف الجدار)
+      this.controls.addEventListener('change', () => {
+        const dist = this.camera.position.distanceTo(this.controls.target);
+        const cosMin = THREE.MathUtils.clamp(
+          (DESK.minZ + 0.9 - this.controls.target.z) / Math.max(dist, 0.001),
+          -1, 0.35,
+        );
+        const azMax = Math.acos(cosMin);
+        this.controls.minAzimuthAngle = -azMax;
+        this.controls.maxAzimuthAngle = azMax;
+      });
       // تفاعل المستخدم يلغي أي تنعيم كاميرا جارٍ
       this.controls.addEventListener('start', () => {
         this.camTween = null;

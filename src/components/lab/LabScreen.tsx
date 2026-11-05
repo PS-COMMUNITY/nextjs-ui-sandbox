@@ -1076,7 +1076,7 @@ export default function LabScreen() {
         scene.setDragEnabled(false);
         // خطاف فحص تطويري فقط (غير مستخدم في الإنتاج الوظيفي)
         if (typeof window !== 'undefined') {
-          (window as unknown as Record<string, unknown>).__pcrs = { scene };
+          (window as unknown as Record<string, unknown>).__pcrs = { scene, store: useLabStore };
         }
       } catch {
         queueMicrotask(() => fail('تعذر إنشاء المشهد ثلاثي الأبعاد — قد تكون موارد الجهاز منخفضة.'));

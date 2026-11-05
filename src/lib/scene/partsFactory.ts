@@ -258,7 +258,7 @@ export function setComponentId(g: THREE.Object3D, id: ComponentId): void {
 
 export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): void {
   scene.background = new THREE.Color(COLORS.bg);
-  scene.fog = new THREE.Fog(COLORS.bg, 20, 52);
+  scene.fog = new THREE.Fog(COLORS.bg, 26, 64);
 
   // أرضية المختبر — 75سم أسفل سطح مكتب الورشة (توجيه v4 أ.1)
   const ground = new THREE.Mesh(
@@ -281,11 +281,11 @@ export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): voi
   }
   scene.add(grid);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1b2028, 0.6));
+  scene.add(new THREE.AmbientLight(0xffffff, 1.35));
+  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1b2028, 1.3));
 
   // شمس دافئة مع ظلال (حسب الجودة) — تغطي المكتب كاملًا
-  const dir = new THREE.DirectionalLight(0xfff2e0, 2.6);
+  const dir = new THREE.DirectionalLight(0xfff2e0, 3.2);
   dir.position.set(-7, 10, 8);
   if (quality !== 'low') {
     dir.castShadow = true;
@@ -310,6 +310,13 @@ export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): voi
   front.position.set(-5, 4.5, 6);
   scene.add(front);
 
+  // (V8.1) كشاف مركّز على منطقة العمل: الجهاز + سجادة ESD — إضاءة فني حقيقية
+  const workSpot = new THREE.SpotLight(0xfff3e2, 1000, 0, 0.8, 0.5, 2);
+  workSpot.position.set(0.5, 11.5, 5.6);
+  workSpot.target.position.set(0.4, 0, 2.6);
+  scene.add(workSpot);
+  scene.add(workSpot.target);
+
   // محطة العمل: مكتب + جدار ورشة + إضاءة سقفية + مشترك كهرباء
   scene.add(buildWorkstation());
 }
@@ -329,7 +336,7 @@ function buildWorkstation(): THREE.Group {
   const cz = (DESK.minZ + DESK.maxZ) / 2;
 
   // --- سطح المكتب: لوح سميك بحافة ألمنيوم على الأطراف ---
-  const topMat = mat(0x4a525c, 0.25, 0.65, { map: brushedTexture('#525a64') });
+  const topMat = mat(0x525c68, 0.25, 0.65, { map: brushedTexture('#5d6672') });
   const top = box(w, DESK.thickness, d, topMat, cx, DESK.topY - DESK.thickness / 2, cz, true, true);
   top.name = 'desk-top';
   g.add(top);
@@ -357,25 +364,27 @@ function buildWorkstation(): THREE.Group {
   }
   g.add(box(w - 1.4, 0.1, d - 1.4, mat(0x232a32, 0.5, 0.55), cx, DESK.floorY + 3.6, cz, true, true));
 
-  // --- جدار الورشة خلف المكتب + لوح تعليق أدوات + رفان ---
+  // --- جدار الورشة خلف المكتب + لوح تعليق أدوات معلقة + لافتة الورشة + رف قطع ---
   const wallMat = mat(COLORS.wall, 0.15, 0.85);
   const wall = box(34, 26, 0.4, wallMat, cx, DESK.floorY + 13, DESK.minZ - 0.8, false, true);
   wall.name = 'workshop-wall';
   g.add(wall);
-  // إيزود السقف/الجدار: شريط داكن أفقياً + لوح تعليق خلف الجهاز
+  // إيزود السقف/الجدار: شريط داكن أفقياً
   g.add(box(34, 0.5, 0.06, mat(0x11161d, 0.2, 0.8), cx, DESK.floorY + 6.4, DESK.minZ - 0.58, false));
-  const pegboard = box(6.4, 5.2, 0.06, mat(0x171d26, 0.3, 0.75, { map: ventMeshTexture('#1c242e', '#10161d') }), 1.05, DESK.floorY + 9.4, DESK.minZ - 0.56, false);
+  // (V8.1) لوح تعليق الأدوات — الجانب الأيسر المرئي من الكاميرا الافتراضية، بأدوات معلقة حقيقية
+  const pegboard = box(6.2, 5.6, 0.06, mat(0x26303c, 0.3, 0.75, { map: ventMeshTexture('#313c4a', '#1a222c') }), -2.0, DESK.floorY + 8.6, DESK.minZ - 0.56, false);
   pegboard.name = 'pegboard';
   g.add(pegboard);
-  // رفان معدنيان على الجدار مع علب صغيرة
-  for (const sy of [DESK.floorY + 10.6, DESK.floorY + 12.2]) {
-    g.add(box(5.2, 0.1, 1.2, legMat, -3.6, sy, DESK.minZ - 0.2, false));
-    g.add(box(5.2, 0.1, 1.2, legMat, 6.8, sy, DESK.minZ - 0.2, false));
-    for (let i = 0; i < 3; i++) {
-      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x2c3641 : 0x39434e, 0.2, 0.7), -4.8 + i * 1.2, sy + 0.45, DESK.minZ - 0.2, false));
-      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x39434e : 0x2c3641, 0.2, 0.7), 5.9 + i * 1.1, sy + 0.45, DESK.minZ - 0.2, false));
-    }
-  }
+  // ضوء مركّز فوق لوح الأدوات حتى تظهر المعلقات بوضوح
+  const pegLight = new THREE.PointLight(0xeaf4ff, 90, 16, 1.6);
+  pegLight.position.set(-2.0, DESK.floorY + 12.4, DESK.minZ + 1.2);
+  g.add(pegLight);
+  buildPegboardKit(g);
+  // (V8.1) لافتة الورشة المضيئة أعلى لوح التعليق
+  g.add(buildWorkshopSign());
+  // رفان معدنيان يمين الجدار مع صناديق قطع وأدوات (V8.1: محتويات قطع PC حقيقية)
+  buildPartsShelf(g, 6.8, DESK.floorY + 10.6);
+  buildPartsShelf(g, 6.8, DESK.floorY + 12.2);
 
   // --- مصابيح سقفية معلقة (زينة + إضاءة) ---
   const barMat = mat(0x39424d, 0.5, 0.45);
@@ -385,7 +394,7 @@ function buildWorkstation(): THREE.Group {
     g.add(cyl(0.02, 3.4, mat(0x1a2028, 0.4, 0.5), 'y', bx, DESK.floorY + 16.2, bz, false)); // سلك التعليق
     g.add(box(0.5, 0.12, 4.4, barMat, bx, DESK.floorY + 14.4, bz, false));
     g.add(box(0.42, 0.03, 4.2, glowMat, bx, DESK.floorY + 14.32, bz, false));
-    const lamp = new THREE.PointLight(0xf2f6ff, 1.5, 26, 1.4);
+    const lamp = new THREE.PointLight(0xf2f6ff, 55, 26, 1.4);
     lamp.position.set(bx, DESK.floorY + 14.0, bz);
     g.add(lamp);
   }
@@ -409,6 +418,157 @@ function buildWorkstation(): THREE.Group {
   g.add(strip);
 
   return g;
+}
+
+// ============================================================
+// (V8.1) لوح التعليق بأدوات معلقة + لافتة الورشة + رف قطع PC
+// ============================================================
+
+/** أدوات معلقة على لوح التعليق: مفكات ملونة كماشة فرشاة + صناديق صغيرة */
+function buildPegboardKit(g: THREE.Group): void {
+  const hookMat = mat(0x8b939d, 0.85, 0.35);
+  const zF = DESK.minZ - 0.47; // أمام وجه لوح التعليق
+  const topY = DESK.floorY + 10.9; // مستوى الخطاف
+
+  // 4 مفكات معلقة رأسًا بمقابض ملونة مختلفة (كما في كل ورشة)
+  const handles = [0xc2453a, 0xe8a13c, 0x3f9d7a, 0x9aa3ad];
+  const xs = [-4.5, -3.65, -2.8, -1.95];
+  for (let i = 0; i < 4; i++) {
+    const x = xs[i];
+    g.add(cyl(0.035, 0.22, hookMat, 'z', x, topY + 0.18, zF, false));       // خطاف
+    const shaft = cyl(0.032, 1.15, mat(0xb8c0c9, 0.9, 0.3), 'y', x, topY - 0.62, zF, true);
+    g.add(shaft);
+    g.add(cyl(0.095, 0.62, mat(handles[i], 0.25, 0.55), 'y', x, topY + 0.28, zF, true)); // المقبض فوق الخطاف
+    g.add(cyl(0.05, 0.1, mat(0x2a323c, 0.4, 0.5), 'y', x, topY - 1.24, zF, false));        // طرف المفك
+  }
+
+  // كماشة معلقة (ساقان متقاطعتان بمقبضين أحمرين)
+  const plx = -1.15;
+  g.add(cyl(0.035, 0.22, hookMat, 'z', plx, topY + 0.18, zF, false));
+  for (const side of [-1, 1]) {
+    const leg = box(0.07, 1.7, 0.09, mat(0x9aa3ad, 0.8, 0.35), plx + side * 0.09, topY - 0.75, zF, true);
+    leg.rotation.z = side * 0.1;
+    g.add(leg);
+    const grip = box(0.11, 0.62, 0.12, mat(0xc2453a, 0.25, 0.55), plx + side * 0.22, topY - 1.35, zF, true);
+    grip.rotation.z = side * 0.16;
+    g.add(grip);
+  }
+  g.add(cyl(0.05, 0.08, mat(0x2a323c, 0.6, 0.4), 'z', plx, topY + 0.05, zF, false)); // مفصل
+
+  // فرشاة تنظيف معلقة
+  const brx = -0.45;
+  g.add(cyl(0.035, 0.22, hookMat, 'z', brx, topY + 0.18, zF, false));
+  g.add(box(0.24, 0.8, 0.12, mat(0x39424d, 0.3, 0.55), brx, topY - 0.55, zF, true));
+  g.add(box(0.3, 0.5, 0.16, mat(0xe8c76b, 0.05, 0.85), brx, topY - 1.2, zF, true));        // شعيرات
+
+  // جهاز اختبار شبكة معلق (صندوق صغير بمصابيح)
+  const tx = -4.95;
+  g.add(cyl(0.035, 0.22, hookMat, 'z', tx, topY + 0.18, zF, false));
+  g.add(box(0.42, 0.85, 0.14, mat(0x1d232b, 0.3, 0.55), tx, topY - 0.55, zF, true));
+  for (let i = 0; i < 4; i++) {
+    g.add(box(0.07, 0.07, 0.03,
+      mat(i % 2 ? 0x22c55e : 0xeab308, 0.1, 0.5, { emissive: i % 2 ? 0x114422 : 0x443311, emissiveIntensity: 0.8 }),
+      tx - 0.12 + (i % 2) * 0.24, topY - 0.35 - Math.floor(i / 2) * 0.22, zF + 0.08, false));
+  }
+
+  // شريط صناديق صغيرة أسفل اللوح (براغٍ ووصلات مصنفة)
+  for (let i = 0; i < 4; i++) {
+    const bx = -4.3 + i * 1.3;
+    g.add(box(1.05, 0.78, 0.72, mat(i % 2 ? 0x2c3641 : 0x39434e, 0.25, 0.65), bx, DESK.floorY + 6.55, DESK.minZ - 0.35, false));
+    g.add(box(1.05, 0.5, 0.05, mat(0x1d232b, 0.3, 0.6), bx, DESK.floorY + 6.55, DESK.minZ - 0.02, false)); // واجهة الدرج
+    g.add(cyl(0.05, 0.06, mat(0x9aa3ad, 0.8, 0.35), 'z', bx, DESK.floorY + 6.55, DESK.minZ + 0.01, false)); // مقبض
+  }
+}
+
+/** لافتة الورشة المضيئة — كانفاس بنص عربي/إنجليزي */
+function workshopSignTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = '#0a1219';
+  ctx.fillRect(0, 0, 1024, 256);
+  ctx.strokeStyle = '#22d3ee';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(12, 12, 1000, 232);
+  ctx.textAlign = 'center';
+  ctx.direction = 'rtl';
+  ctx.fillStyle = '#e8fbff';
+  ctx.font = 'bold 92px Tahoma, Arial, sans-serif';
+  ctx.fillText('ورشة صيانة الحاسوب', 512, 122);
+  ctx.fillStyle = '#22d3ee';
+  ctx.font = 'bold 40px monospace';
+  ctx.fillText('PC REPAIR WORKSHOP — ESD SAFE AREA', 512, 200);
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 4;
+  return t;
+}
+
+function buildWorkshopSign(): THREE.Mesh {
+  const tex = workshopSignTexture();
+  const dark = mat(0x0d141c, 0.3, 0.7);
+  const face = new THREE.MeshStandardMaterial({
+    map: tex,
+    emissive: 0xffffff,
+    emissiveMap: tex,
+    emissiveIntensity: 0.85,
+    roughness: 0.6,
+    metalness: 0.1,
+  });
+  const sign = new THREE.Mesh(new THREE.BoxGeometry(4.9, 1.25, 0.12), [dark, dark, dark, dark, face, dark]);
+  sign.position.set(0.4, DESK.floorY + 12.35, DESK.minZ - 0.5);
+  sign.name = 'workshop-sign';
+  return sign;
+}
+
+/** رف قطع على الجدار: صناديق أدراج + رامات واقفة + مروحة غيار */
+function buildPartsShelf(g: THREE.Group, centerX: number, sy: number): void {
+  const shelfMat = mat(0x2b323b, 0.6, 0.45, { map: brushedTexture('#2f3740') });
+  g.add(box(5.2, 0.1, 1.2, shelfMat, centerX, sy, DESK.minZ - 0.2, false));
+  // دعامتان تحت الرف
+  g.add(box(0.08, 0.9, 1.0, shelfMat, centerX - 2.2, sy - 0.5, DESK.minZ - 0.2, false));
+  g.add(box(0.08, 0.9, 1.0, shelfMat, centerX + 2.2, sy - 0.5, DESK.minZ - 0.2, false));
+
+  // صناديق أدراج مصنفة (3 عبر عرض الرف)
+  for (let i = 0; i < 3; i++) {
+    const bx = centerX - 1.7 + i * 1.7;
+    g.add(box(1.4, 0.75, 0.9, mat(i % 2 ? 0x2c3641 : 0x39434e, 0.25, 0.65), bx, sy + 0.43, DESK.minZ - 0.2, false));
+    g.add(box(1.4, 0.45, 0.06, mat(0x1d232b, 0.3, 0.6), bx, sy + 0.38, DESK.minZ + 0.26, false));
+    g.add(cyl(0.05, 0.06, mat(0x9aa3ad, 0.8, 0.35), 'z', bx, sy + 0.38, DESK.minZ + 0.3, false));
+  }
+
+  const isLower = sy < DESK.floorY + 11.4;
+  if (isLower) {
+    // شرائح RAM واقفة مائلة على الرف السفلي
+    for (let i = 0; i < 3; i++) {
+      const ram = box(0.14, 1.15, 0.42, mat(0x1a5c40, 0.4, 0.5, { map: pcbTexture('#1a5c40') }), centerX - 0.6 + i * 0.2, sy + 0.62, DESK.minZ + 0.25, false);
+      ram.rotation.x = -0.16;
+      ram.rotation.z = 0.06 * (i - 1);
+      g.add(ram);
+    }
+    // مروحة غيار 120mm مستلقية
+    const fan = new THREE.Group();
+    const frame = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.07, 8, 26), mat(0x232a33, 0.4, 0.55));
+    fan.add(frame);
+    fan.add(cyl(0.13, 0.16, mat(0x2a323c, 0.4, 0.5), 'x', 0, 0, 0, false));
+    for (let b = 0; b < 5; b++) {
+      const blade = box(0.34, 0.02, 0.16, mat(0x3a4450, 0.3, 0.5), 0.22, 0, 0, false);
+      blade.rotation.y = (b / 5) * Math.PI * 2;
+      blade.rotation.x = 0.5;
+      blade.position.set(Math.cos((b / 5) * Math.PI * 2) * 0.24, 0.05, Math.sin((b / 5) * Math.PI * 2) * 0.24);
+      fan.add(blade);
+    }
+    fan.rotation.y = Math.PI / 2;
+    fan.rotation.x = Math.PI / 2;
+    fan.position.set(centerX + 1.55, sy + 0.56, DESK.minZ - 0.2);
+    g.add(fan);
+  } else {
+    // علبة GPU مغلفة + علبة أقراص على الرف العلوي
+    g.add(box(2.2, 0.6, 0.8, mat(0x1d232b, 0.3, 0.6), centerX - 1.0, sy + 0.4, DESK.minZ - 0.2, false));
+    g.add(box(2.2, 0.16, 0.84, mat(0x22d3ee, 0.3, 0.5, { emissive: 0x0e4a55, emissiveIntensity: 0.4 }), centerX - 1.0, sy + 0.68, DESK.minZ - 0.2, false));
+    for (let i = 0; i < 2; i++) {
+      g.add(box(1.1, 0.24, 0.75, mat(0x39434e, 0.3, 0.6), centerX + 1.35, sy + 0.22 + i * 0.28, DESK.minZ - 0.2, false));
+    }
+  }
 }
 
 // ============================================================
@@ -1007,7 +1167,7 @@ function buildGpu(flags: FlagVisuals): THREE.Group {
   g.add(cyl(0.21, 2.24, shroudMat, 'z', -0.315, -0.26, 0, true));
   // شريط إضاءة سماوي + لوحة اسم عامة
   const gpuGlow = new THREE.MeshStandardMaterial({
-    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.55, roughness: 0.35, metalness: 0.1, flatShading: false,
+    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.85, roughness: 0.35, metalness: 0.1, flatShading: false,
   });
   g.add(box(0.02, 0.07, 2.05, gpuGlow, -0.535, -0.26, 0.05, false));
   g.add(plane(0.5, 0.13, mat(0xffffff, 0.2, 0.5, { map: gpuPlateTexture() }), 'x', -0.545, -0.13, 0));

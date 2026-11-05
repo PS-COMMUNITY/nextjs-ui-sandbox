@@ -132,10 +132,10 @@ export const EXPLODE_VECTORS: Record<ComponentId, Vec3> = {
 /** إزاحة الفصل الجزئي (نسبة من متجه التفجير — القطعة ما زالت في مكانها) */
 export const SEPARATE_FACTOR = 0.22;
 
-/** الكاميرا الافتراضية: ترى المكتب كاملًا — الجهاز + الشاشة + سجادة القطع */
+/** الكاميرا الافتراضية: ترى محطة الصيانة كاملة — الجهاز على سجادة ESD + الشاشة + لوح الأدوات */
 export const DEFAULT_CAMERA = {
-  pos: [-9.4, 6.9, 13.4] as Vec3,
-  target: [1.3, 1.7, 2.9] as Vec3,
+  pos: [-8.4, 8.0, 14.8] as Vec3,
+  target: [1.4, 1.3, 2.6] as Vec3,
 };
 
 // ============ الشاشة على المكتب (لا كيبورد ولا ماوس — توجيه v3 أ.1 / v4 أ.3) ============
@@ -168,7 +168,7 @@ export const VIEW_PRESETS: Record<ViewPresetId, { pos: Vec3; target: Vec3 }> = {
 
 /** ألوان المشهد الموحدة — فاتحة كفاية لتبقى القطع مقروءة داخل هيكل داكن */
 export const COLORS = {
-  bg: 0x0d1218,
+  bg: 0x141b24,
   metalDark: 0x232a33,
   metalMid: 0x3a4450,
   pcb: 0x1a5c40,
@@ -184,7 +184,7 @@ export const COLORS = {
   green: 0x22c55e,
   red: 0xef4444,
   yellow: 0xeab308,
-  deskTop: 0x3a4149,     // سطح مكتب الورشة
+  deskTop: 0x4c5661,     // سطح مكتب الورشة
   deskSteel: 0x2b323b,   // أرجل المكتب الفولاذية
-  wall: 0x1a212b,        // جدار الورشة
+  wall: 0x2b3543,        // جدار الورشة
 };
