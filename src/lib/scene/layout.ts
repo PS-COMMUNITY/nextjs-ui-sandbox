@@ -51,7 +51,7 @@ export const MOUNTS: Record<ComponentId, Vec3> = {
   cpu: [1.77, 3.37, 1.33],
   cooler: [0.97, 3.37, 1.47],
   ram: [1.82, 3.3, 2.07],
-  gpu: [1.47, 2.99, 1.7],
+  gpu: [1.47, 2.99, 1.7], // initial guess only — overridden by alignGpuToSlot
   psu: [1.32, 0.485, 0.92],
   ssd: [1.8, 2.59, 1.93],
   hdd: [1.05, 0.78, 3.55],     // قفص القرص الميكانيكي 3.5" أسفل الواجهة الأمامية

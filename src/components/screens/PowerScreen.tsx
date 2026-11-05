@@ -108,7 +108,7 @@ export default function PowerScreen() {
           : '[&>div]:bg-rose-500';
 
   return (
-    <div dir="rtl" className="space-y-6 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {/* ===== ترويسة الشاشة ===== */}
       <header className="flex items-center gap-3">
         <div className="flex size-10 items-center justify-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">

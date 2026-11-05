@@ -163,6 +163,13 @@ export default function AppShell() {
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
+      {/* (إصلاح U11) رابط «تخطَّ إلى المحتوى» — أول عنصر قابل للتركيز، يظهر فقط عند التركيز بلوحة المفاتيح */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:start-2 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-primary-foreground focus:shadow-lg"
+      >
+        تخطَّ إلى المحتوى
+      </a>
       {/* الشريط العلوي */}
       <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 no-print">
         <div className="mx-auto max-w-[1600px] px-3 sm:px-4">
@@ -277,7 +284,7 @@ export default function AppShell() {
           })}
         </aside>
 
-        <main className="flex-1 min-w-0 px-3 sm:px-4 py-4 sm:py-6">
+        <main id="main-content" className="flex-1 min-w-0 px-3 sm:px-4 py-4 sm:py-6">
           {screen === 'home' && <HomeScreen />}
           {screen === 'lab' && <LabScreen />}
           {screen === 'tech' && <TechnicianScreen />}

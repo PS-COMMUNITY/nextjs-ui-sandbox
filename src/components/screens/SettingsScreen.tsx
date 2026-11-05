@@ -59,7 +59,8 @@ import {
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
-import { downloadJson, readTextFile } from '@/lib/services/exportService';
+import { downloadFile, readTextFile } from '@/lib/services/exportService';
+import { buildBackupJson } from '@/lib/services/persistence';
 import { useLabStore, type GraphicsQuality } from '@/lib/store/labStore';
 import { APP_VERSION, CATALOG_VERSION } from '@/lib/types';
 
@@ -116,17 +117,22 @@ export default function SettingsScreen() {
   // ===== تصدير نسخة JSON =====
   const handleExport = () => {
     try {
-      const obj = {
-        version: APP_VERSION,
+      // (إصلاح U1) بنّاء النسخة الموحد في persistence — يشمل جلسة الفني ودفتر النظام
+      // والمهمة النشطة مثل تصدير «سجل الجلسات» تمامًا، فلا يمحو الاستيراد جلسة قائمة.
+      const st = useLabStore.getState();
+      const json = buildBackupJson({
         simulation: sim,
+        tech: st.tech,
         logs,
         quizScores,
         missionsDone,
         lessonsRead,
+        notepad: st.notepad,
+        activeMissionId: st.activeMissionId,
+        missionStepIndex: st.missionStepIndex,
         settings: { quality },
-        savedAt: Date.now(),
-      };
-      downloadJson(obj, 'pcrs-backup.json');
+      });
+      downloadFile('pcrs-backup.json', 'application/json;charset=utf-8', json);
       logEvent('export', 'تصدير نسخة احتياطية JSON', true);
       toast.success('صُدِّرت النسخة الاحتياطية — تحقق من مجلد التنزيلات');
     } catch (e) {

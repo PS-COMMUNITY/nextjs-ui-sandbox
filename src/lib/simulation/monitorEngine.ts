@@ -17,9 +17,10 @@ import type { MonitorScreen, SimulationState } from '../types';
 import { runPost } from './postEngine';
 import { getFamily } from '../data/windowsCatalog';
 
-export const BOOT_LOGO_MS = 2200;
-export const BOOT_POST_MS = 4800;
-export const BOOT_SUCCESS_MS = 6800;
+// (تنظيف S7) ثوابت زمنية داخلية فقط — لا يوجد أي مستوردٍ خارجي لها (تحقق بالفحص الآلي).
+const BOOT_LOGO_MS = 2200;
+const BOOT_POST_MS = 4800;
+const BOOT_SUCCESS_MS = 6800;
 
 export const MONITOR_SCREEN_INFO: Record<MonitorScreen, { labelAr: string; hintAr: string }> = {
   off: { labelAr: 'مطفأة', hintAr: 'الشاشة نفسها مطفأة بزرها أو بلا كهرباء' },
@@ -62,6 +63,8 @@ export function bootableDevices(sim: SimulationState): Array<{ id: string; label
 /** تسلسل POST متكيف مع حالة الجهاز — لا يعرض نجاح فحص لقطعة مفقودة (دقة تعليمية) */
 function buildPostSequence(sim: SimulationState): string[] {
   return [
+    // (إصلاح S1) سطر كشف اللوحة الأم أولًا — غيابها/تلفها يُفشل POST قبل أي فحص آخر
+    isInstalled(sim.parts.motherboard) ? 'Detecting Motherboard ... OK' : 'Detecting Motherboard ... NOT DETECTED',
     isInstalled(sim.parts.cpu) ? 'Detecting CPU ... OK (LGA1700)' : 'Detecting CPU ... NOT DETECTED',
     isInstalled(sim.parts.ram) ? 'Memory Training (DDR5) ... OK' : 'Memory Training ... NO MEMORY MODULES',
     'Initializing PCIe Devices ... OK',
@@ -97,11 +100,15 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
   }
 
   // 4) مراحل التمهيد الزمنية.
+  // (إصلاح S2) تقدم إقلاع واحد رتيب (لا ينزل أبدًا) عبر مرحلتي الشعار ثم POST:
+  // نافذة POST تنتهي عند الزمن المطلق BOOT_POST_MS، فالنسبة = المنقضي / BOOT_POST_MS
+  // من 0 حتى 1.0 بالضبط عند نهاية POST — بلا قفزة 1.0→0.46 عند الانتقال booting→post.
+  const bootProgress = Math.min(1, Math.max(0, bootElapsedMs / BOOT_POST_MS));
   if (bootElapsedMs < BOOT_LOGO_MS) {
     return {
       ...idle,
       screen: 'booting',
-      bootProgress: Math.max(0, bootElapsedMs / BOOT_LOGO_MS),
+      bootProgress,
     };
   }
 
@@ -111,7 +118,7 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
     return {
       ...idle,
       screen: 'post',
-      bootProgress: (bootElapsedMs - 0) / BOOT_POST_MS,
+      bootProgress,
       postLinesAr: seq.slice(0, shown),
     };
   }
@@ -120,6 +127,12 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
   const finding = runPost(sim);
   const devices = bootableDevices(sim);
   const devicesAr = devices.map((d) => d.labelAr);
+
+  // (إصلاح S1) مزود الطاقة غائب أو تالف بتلف مباشر — لا يصل أي جهد فتبقى الشاشة
+  // بلا إشارة إطلاقًا (مسار psuDead/F12 يُعالج أعلاه في الخطوة 2 قبل الوصول إلى هنا).
+  if (finding.code === 'POWER_OFF') {
+    return idle;
+  }
 
   if (finding.code === 'POST_FAIL') {
     return {

@@ -46,7 +46,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-import { APP_VERSION } from '@/lib/types';
+import { LESSONS } from '@/lib/data/lessons';
 import type { SessionEvent } from '@/lib/types';
 import { useLabStore } from '@/lib/store/labStore';
 import {
@@ -55,11 +55,11 @@ import {
   reportToCsvRows,
   summarizeSession,
 } from '@/lib/services/reportService';
-import { downloadCsv, downloadJson } from '@/lib/services/exportService';
-import type { PersistShape } from '@/lib/services/persistence';
+import { downloadCsv, downloadFile } from '@/lib/services/exportService';
+import { buildBackupJson } from '@/lib/services/persistence';
 
-/** إجمالي المهام التعليمية المتاح في التطبيق. */
-const TOTAL_MISSIONS = 6;
+/** إجمالي المهام التعليمية المتاحة — من بيانات الدروس لا رقم ثابت (إصلاح U5). */
+const TOTAL_MISSIONS = LESSONS.length;
 
 export default function ReportsScreen() {
   const logs = useLabStore((s) => s.logs);
@@ -100,18 +100,21 @@ export default function ReportsScreen() {
 
   const handleExportBackup = () => {
     try {
-      const backup: PersistShape = {
-        version: APP_VERSION,
+      // (إصلاح U1) بنّاء النسخة الموحد في persistence — نفس شكل تصدير «الإعدادات» تمامًا
+      const st = useLabStore.getState();
+      const json = buildBackupJson({
         simulation: sim,
-        tech: useLabStore.getState().tech,
+        tech: st.tech,
         logs,
         quizScores,
         missionsDone,
         lessonsRead,
+        notepad: st.notepad,
+        activeMissionId: st.activeMissionId,
+        missionStepIndex: st.missionStepIndex,
         settings: { quality },
-        savedAt: Date.now(),
-      };
-      downloadJson(backup, 'pcrs-backup.json');
+      });
+      downloadFile('pcrs-backup.json', 'application/json;charset=utf-8', json);
       toast.success('نُزِّلت نسخة احتياطية JSON كاملة من الجلسة');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'فشل إنشاء النسخة الاحتياطية');
@@ -123,8 +126,9 @@ export default function ReportsScreen() {
     window.print();
   };
 
+  // (إصلاح U12) dir="rtl" مكرر مع جذر التطبيق (html dir="rtl") — أُزيل عن الحاوية الجذرية للشاشة
   return (
-    <div dir="rtl" className="space-y-6 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {/* ===== ترويسة الشاشة ===== */}
       <header className="flex items-center gap-3">
         <div className="flex size-10 items-center justify-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">

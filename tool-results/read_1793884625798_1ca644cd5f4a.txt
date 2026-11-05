@@ -1,0 +1,883 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * المتجر المركزي للتطبيق (Zustand) — يربط المحركات المنطقية بالمشهد والواجهة.
+     5→ * كل تعديل على حالة المحاكاة يمر من هنا: تحقق → تسجيل حدث → إشعار → حفظ مؤجل.
+     6→ * هذا هو «المصدر الوحيد للحقيقة»: المشهد 3D والتشخيص ولوحة المهام تقرأه كلها.
+     7→ */
+     8→import { create } from 'zustand';
+     9→import { toast } from 'sonner';
+    10→import type {
+    11→  ComponentId,
+    12→  DiagnosisCode,
+    13→  FirmwareState,
+    14→  MachineFlag,
+    15→  PartStatus,
+    16→  SessionEvent,
+    17→  SimulationState,
+    18→  WinFamilyId,
+    19→} from '@/lib/types';
+    20→import { APP_VERSION, isInstalled, normalizeSimulationState } from '@/lib/types';
+    21→import { initialSimulationState } from '@/lib/types';
+    22→import { COMPONENT_MAP } from '@/lib/data/catalog';
+    23→import { SCENARIOS, applyScenario } from '@/lib/data/scenarios';
+    24→import { applyFault, FAULTS } from '@/lib/data/faults';
+    25→import { canToggleFlag, applyToggleFlag, FLAG_INFO } from '@/lib/simulation/machineFlags';
+    26→import {
+    27→  canRemove,
+    28→  canInstall,
+    29→  applyRemove,
+    30→  applyInstall,
+    31→  applyDetach,
+    32→  applyExtract,
+    33→  applyPrepare,
+    34→  applyDamage,
+    35→  applyRepair,
+    36→  isCable,
+    37→} from '@/lib/simulation/assemblyEngine';
+    38→import { runPost } from '@/lib/simulation/postEngine';
+    39→import {
+    40→  newTechSession,
+    41→  stageGate,
+    42→  getHypothesis,
+    43→  getFault,
+    44→  type TechSession,
+    45→} from '@/lib/simulation/technicianEngine';
+    46→import {
+    47→  loadAll,
+    48→  saveAll,
+    49→  clearAll,
+    50→  storageAvailable,
+    51→  type PersistShape,
+    52→} from '@/lib/services/persistence';
+    53→
+    54→export type ScreenId =
+    55→  | 'home'
+    56→  | 'lab'
+    57→  | 'tech'
+    58→  | 'catalog'
+    59→  | 'training'
+    60→  | 'builder'
+    61→  | 'diagnostics'
+    62→  | 'power'
+    63→  | 'lessons'
+    64→  | 'reports'
+    65→  | 'settings';
+    66→
+    67→export type GraphicsQuality = 'low' | 'medium' | 'high';
+    68→
+    69→/** وضع الإدخال: مختبر (كاميرا/قطع) أو التحكم بالشاشة المجسمة (توجيه V6 §4.3) */
+    70→export type InputMode = 'lab' | 'monitor';
+    71→
+    72→interface SaveStatus {
+    73→  available: boolean;
+    74→  lastSavedAt: number | null;
+    75→  lastErrorAr: string | null;
+    76→}
+    77→
+    78→interface LabStore {
+    79→  // === حالة المحاكاة ===
+    80→  sim: SimulationState;
+    81→  // === الطرفيات والمشهد ===
+    82→  bootStartedAt: number | null;   // لحظة ضغط زر التشغيل (ساعة تمهيد الشاشة)
+    83→  notepad: string;                // دفتر النظام الافتراضي — يُكتب من حقل إدخال حقيقي (توجيه v3 أ.2)
+    84→  hintsVisible: boolean;          // تلميحات التحكم بالماوس/الكيبورد الحقيقيين (زر H)
+    85→  airflowVisible: boolean;        // أسهم تدفق الهواء
+    86→  inputMode: InputMode;           // V6-B: وضع المختبر أو وضع التحكم بالشاشة
+    87→  // === واجهة ===
+    88→  screen: ScreenId;
+    89→  selected: ComponentId | null;
+    90→  xray: boolean;
+    91→  exploded: boolean;
+    92→  isolated: ComponentId | null;
+    93→  quality: GraphicsQuality;
+    94→  sidePanelsHidden: boolean;
+    95→  hydrated: boolean;
+    96→  saveStatus: SaveStatus;
+    97→  // === جلسة الفني ذي المراحل التسع ===
+    98→  tech: TechSession | null;
+    99→  // === بيانات التعلم ===
+   100→  logs: SessionEvent[];
+   101→  quizScores: Record<string, { score: number; at: number }>;
+   102→  missionsDone: string[];
+   103→  lessonsRead: string[];
+   104→  activeMissionId: string | null;
+   105→  missionStepIndex: number;
+   106→  lastDiagnosis: DiagnosisCode | null;
+   107→
+   108→  // === أفعال ===
+   109→  hydrate: () => void;
+   110→  setScreen: (s: ScreenId) => void;
+   111→  select: (id: ComponentId | null) => void;
+   112→  toggleXray: () => void;
+   113→  toggleExploded: () => void;
+   114→  setIsolated: (id: ComponentId | null) => void;
+   115→  setQuality: (q: GraphicsQuality) => void;
+   116→  setSidePanelsHidden: (v: boolean) => void;
+   117→  toggleFlag: (f: MachineFlag) => void;
+   118→  setInputMode: (m: InputMode) => void;
+   119→  // V6-C/D: النظام والأقراص والبرنامج الثابت
+   120→  insertUsb: (family: WinFamilyId | null) => void;
+   121→  exitSetup: () => void;
+   122→  completeInstall: (family: WinFamilyId, editionAr: string, diskId: string, plan: Array<{ label: string; kind: 'efi' | 'msr' | 'recovery' | 'primary'; fs: string; sizeGB: number }> | null) => void;
+   123→  clearDisk: (diskId: string) => void;
+   124→  initDisk: (diskId: string, style: 'gpt' | 'mbr') => void;
+   125→  createPartition: (diskId: string, sizeGB: number, fs: 'ntfs' | 'fat32') => void;
+   126→  deletePartition: (diskId: string, partId: string) => void;
+   127→  formatPartition: (diskId: string, partId: string) => void;
+   128→  fixDriver: (componentId: ComponentId) => void;
+   129→  repairBcd: () => void;
+   130→  runStartupRepair: () => void;
+   131→  patchFirmware: (patch: Partial<FirmwareState>) => void;
+   132→  requestSetup: () => void;
+   133→  bootFromDevice: (deviceId: string) => void;
+   134→  warmRestart: () => void;             // V6-D: إعادة تشغيل دافئة (إطفاء ثم إقلاع تلقائي)
+   135→  setThermal: (cpuTempC: number, gpuTempC: number) => void;
+   136→  // فك/تركيب بآلة الحالات الكاملة
+   137→  detachPart: (id: ComponentId) => void;   // installed → separated (فصل جزئي)
+   138→  extractPart: (id: ComponentId) => void;  // separated → removed (استخراج للصينية)
+   139→  preparePart: (id: ComponentId) => void;  // removed → awaiting (التقاط للتركيب)
+   140→  installPart: (id: ComponentId) => void;  // awaiting/removed → installed
+   141→  removePart: (id: ComponentId) => void;   // مسار قديم موحد (كابلات + أزرار القوائم)
+   142→  damagePart: (id: ComponentId) => void;   // أي حالة → damaged (تلف تدريبي)
+   143→  repairPart: (id: ComponentId) => void;   // damaged → removed (استبدال من المخزن)
+   144→  // الطرفيات
+   145→  toggleMonitor: () => void;
+   146→  setNotepad: (text: string) => void;  // إدخال حقيقي من حقل نصي في الواجهة
+   147→  typeKey: (ch: string) => void;       // مدخل برمجي (لوحات مفاتيح على الشاشة إن أُضيفت مستقبلًا)
+   148→  clearNotepad: () => void;
+   149→  setHintsVisible: (v: boolean) => void;
+   150→  setAirflow: (v: boolean) => void;
+   151→  // تشخيص وسيناريوهات وأعطال
+   152→  runDiagnosis: () => void;
+   153→  runScenario: (scenarioId: string) => void;
+   154→  runFault: (faultId: string) => void;
+   155→  resetSimulation: () => void;
+   156→  // جلسة الفني
+   157→  startTechSession: (scenarioId: string) => void;
+   158→  patchTech: (patch: Partial<TechSession>) => void;
+   159→  toggleTechTool: (toolId: string) => void;
+   160→  advanceTechStage: () => void;
+   161→  abandonTechSession: () => void;
+   162→  finishTechReport: () => void;
+   163→  // تعلم وحفظ
+   164→  startMission: (id: string) => void;
+   165→  finishMissionStep: () => void;
+   166→  abandonMission: () => void;
+   167→  completeMission: (id: string) => void;
+   168→  markLessonRead: (id: string) => void;
+   169→  recordQuiz: (quizId: string, score: number) => void;
+   170→  resetTrainingData: () => void;
+   171→  resetEverything: () => void;
+   172→  importBackupFromJson: (json: string) => void;
+   173→  logEvent: (kind: string, labelAr: string, ok: boolean, detailAr?: string) => void;
+   174→}
+   175→
+   176→// ============ الحفظ المؤجل ============
+   177→let persistTimer: ReturnType<typeof setTimeout> | null = null;
+   178→
+   179→function schedulePersist(get: () => LabStore) {
+   180→  if (persistTimer) clearTimeout(persistTimer);
+   181→  persistTimer = setTimeout(() => {
+   182→    const s = get();
+   183→    if (!s.hydrated) return;
+   184→    const shape: PersistShape = {
+   185→      version: APP_VERSION,
+   186→      simulation: s.sim,
+   187→      tech: s.tech,
+   188→      logs: s.logs,
+   189→      quizScores: s.quizScores,
+   190→      missionsDone: s.missionsDone,
+   191→      lessonsRead: s.lessonsRead,
+   192→      settings: { quality: s.quality },
+   193→      savedAt: Date.now(),
+   194→    };
+   195→    const res = saveAll(shape);
+   196→    if (res.ok) {
+   197→      useLabStore.setState({ saveStatus: { available: true, lastSavedAt: Date.now(), lastErrorAr: null } });
+   198→    } else {
+   199→      useLabStore.setState({ saveStatus: { available: true, lastSavedAt: null, lastErrorAr: res.messageAr } });
+   200→    }
+   201→  }, 400);
+   202→}
+   203→
+   204→/** اسم عربي قصير للقطعة (للرسائل) */
+   205→function nameOf(id: ComponentId): string {
+   206→  return COMPONENT_MAP[id]?.nameAr ?? id;
+   207→}
+   208→
+   209→export const useLabStore = create<LabStore>((set, get) => ({
+   210→  sim: initialSimulationState(),
+   211→  bootStartedAt: null,
+   212→  notepad: '',
+   213→  hintsVisible: true,
+   214→  airflowVisible: false,
+   215→  inputMode: 'lab',
+   216→  screen: 'home',
+   217→  selected: null,
+   218→  xray: false,
+   219→  exploded: false,
+   220→  isolated: null,
+   221→  quality: 'medium',
+   222→  sidePanelsHidden: false,
+   223→  hydrated: false,
+   224→  saveStatus: { available: true, lastSavedAt: null, lastErrorAr: null },
+   225→  tech: null,
+   226→  logs: [],
+   227→  quizScores: {},
+   228→  missionsDone: [],
+   229→  lessonsRead: [],
+   230→  activeMissionId: null,
+   231→  missionStepIndex: 0,
+   232→  lastDiagnosis: null,
+   233→
+   234→  hydrate: () => {
+   235→    if (!storageAvailable()) {
+   236→      set({ hydrated: true, saveStatus: { available: false, lastSavedAt: null, lastErrorAr: 'تخزين المتصفح غير متاح — لن يُحفظ التقدم' } });
+   237→      return;
+   238→    }
+   239→    const data = loadAll();
+   240→    if (data) {
+   241→      const sim = normalizeSimulationState(data.simulation);
+   242→      // استئناف جلسة محفوظة والجهاز يعمل فيها: نُرجع ساعة التمهيد إلى الماضي
+   243→      // حتى تظهر نتيجتها المحسومة مباشرة بدل الت stuck على شعار البدء
+   244→      const bootStartedAt =
+   245→        sim.flags.powerOn && sim.flags.acConnected && !sim.peripherals.psuDead
+   246→          ? Date.now() - 9999
+   247→          : null;
+   248→      set({
+   249→        sim,
+   250→        bootStartedAt,
+   251→        tech: data.tech ?? null,
+   252→        logs: data.logs ?? [],
+   253→        quizScores: data.quizScores ?? {},
+   254→        missionsDone: data.missionsDone ?? [],
+   255→        lessonsRead: data.lessonsRead ?? [],
+   256→        quality: data.settings?.quality ?? 'medium',
+   257→        hydrated: true,
+   258→        saveStatus: { available: true, lastSavedAt: data.savedAt, lastErrorAr: null },
+   259→      });
+   260→    } else {
+   261→      set({ hydrated: true });
+   262→    }
+   263→  },
+   264→
+   265→  setScreen: (screen) => set({ screen, selected: screen === 'lab' ? get().selected : null }),
+   266→  select: (selected) => set({ selected }),
+   267→  toggleXray: () => set({ xray: !get().xray }),
+   268→  toggleExploded: () => set({ exploded: !get().exploded }),
+   269→  setIsolated: (isolated) => set({ isolated }),
+   270→  setQuality: (quality) => {
+   271→    set({ quality });
+   272→    schedulePersist(get);
+   273→  },
+   274→  setSidePanelsHidden: (sidePanelsHidden) => set({ sidePanelsHidden }),
+   275→
+   276→  toggleFlag: (f) => {
+   277→    const s = get();
+   278→    const check = canToggleFlag(s.sim, f);
+   279→    const info = FLAG_INFO[f];
+   280→    if (!check.ok) {
+   281→      s.logEvent('flag', `${info.labelAr}: مرفوض`, false, check.messageAr);
+   282→      toast.error(check.messageAr);
+   283→      return;
+   284→    }
+   285→    const sim = applyToggleFlag(s.sim, f);
+   286→    // ساعة تمهيد الشاشة: تضبط لحظة التشغيل وتُصفّر عند الإطفاء
+   287→    const bootStartedAt = f === 'powerOn' ? (sim.flags.powerOn ? Date.now() : null) : s.bootStartedAt;
+   288→    set({ sim, bootStartedAt });
+   289→    s.logEvent('flag', check.messageAr || info.labelAr, true, info.hintAr);
+   290→    toast.success(check.messageAr || info.labelAr);
+   291→    schedulePersist(get);
+   292→  },
+   293→
+   294→  // ============ آلة الحالات: فصل جزئي → استخراج → التقاط → تركيب ============
+   295→  detachPart: (id) => {
+   296→    const s = get();
+   297→    if (id === 'case') return;
+   298→    if (isCable(id)) {
+   299→      // الكابلات تفصل بحركة واحدة — التوجيه للمسار الموحد
+   300→      s.removePart(id);
+   301→      return;
+   302→    }
+   303→    if (s.sim.parts[id] !== 'installed') {
+   304→      toast.error(`${nameOf(id)}: ليست في حالة تسمح بالفصل الجزئي`);
+   305→      return;
+   306→    }
+   307→    const check = canRemove(s.sim, id);
+   308→    if (!check.ok) {
+   309→      s.logEvent('remove', `${nameOf(id)}: فصل مرفوض`, false, check.messageAr);
+   310→      toast.error(check.messageAr);
+   311→      return;
+   312→    }
+   313→    const sim = applyDetach(s.sim, id);
+   314→    set({ sim });
+   315→    s.logEvent('remove', `فصل جزئي: ${nameOf(id)}`, true, 'القطعة ما زالت في مكانها — استخرجها إلى الصينية عند الجاهزية');
+   316→    toast.success(`${nameOf(id)}: فُصلت جزئيًا — استخرجها إلى الصينية`);
+   317→    schedulePersist(get);
+   318→  },
+   319→
+   320→  extractPart: (id) => {
+   321→    const s = get();
+   322→    if (s.sim.parts[id] !== 'separated') {
+   323→      toast.error(`${nameOf(id)}: يجب فصلها جزئيًا أولًا قبل استخراجها`);
+   324→      return;
+   325→    }
+   326→    const sim = applyExtract(s.sim, id);
+   327→    set({ sim });
+   328→    s.logEvent('remove', `استخراج ${nameOf(id)} إلى صينية القطع`, true);
+   329→    toast.success(`${nameOf(id)}: نُقلت إلى صينية القطع`);
+   330→    schedulePersist(get);
+   331→  },
+   332→
+   333→  preparePart: (id) => {
+   334→    const s = get();
+   335→    if (s.sim.parts[id] !== 'removed') {
+   336→      toast.error(`${nameOf(id)}: القطعة ليست في الصينية`);
+   337→      return;
+   338→    }
+   339→    const sim = applyPrepare(s.sim, id);
+   340→    set({ sim, selected: id });
+   341→    s.logEvent('install', `التقاط ${nameOf(id)} للتركيب`, true, 'راجع شروط التركيب ثم اضغط «ركّب»');
+   342→    toast.success(`${nameOf(id)}: ملتقطة — راجع شروط التركيب ثم ركّبها`);
+   343→    schedulePersist(get);
+   344→  },
+   345→
+   346→  installPart: (id) => {
+   347→    const s = get();
+   348→    const status = s.sim.parts[id];
+   349→    if (status === 'installed') {
+   350→      toast.error(`${nameOf(id)}: مثبتة أصلًا`);
+   351→      return;
+   352→    }
+   353→    const check = canInstall(s.sim, id);
+   354→    if (!check.ok) {
+   355→      // INSTALL_REJECTED: حدث رفض تعليمي — القطعة تبقى بانتظار التركيب
+   356→      s.logEvent('install', `${nameOf(id)}: تركيب مرفوض`, false, check.messageAr);
+   357→      toast.error(check.messageAr);
+   358→      return;
+   359→    }
+   360→    const sim = applyInstall(s.sim, id);
+   361→    set({ sim });
+   362→    s.logEvent('install', `تركيب ${nameOf(id)}`, true, 'أُعيدت القطعة إلى موضع تثبيتها — أغلق المزالج والبراغي إن وجدت');
+   363→    toast.success(`${nameOf(id)}: رُكّبت في موضعها`);
+   364→    schedulePersist(get);
+   365→  },
+   366→
+   367→  removePart: (id) => {
+   368→    const s = get();
+   369→    const name = nameOf(id);
+   370→    if (id === 'case') {
+   371→      toast.error('الهيكل هو جسم الجهاز؛ استخدم زر فتح/إغلاق الغطاء الجانبي.');
+   372→      return;
+   373→    }
+   374→    const check = canRemove(s.sim, id);
+   375→    if (!check.ok) {
+   376→      s.logEvent('remove', `${name}: فك مرفوض`, false, check.messageAr);
+   377→      toast.error(check.messageAr);
+   378→      return;
+   379→    }
+   380→    // الكابلات: فصل مباشر إلى الصينية — القطع الكبيرة: فصل جزئي ثم استخراج
+   381→    const sim = isCable(id) ? applyRemove(s.sim, id) : applyDetach(s.sim, id);
+   382→    set({ sim });
+   383→    if (isCable(id)) {
+   384→      s.logEvent('remove', `فصل ${name}`, true, 'نُقل إلى صينية القطع');
+   385→      toast.success(`${name}: فُصل إلى صينية القطع`);
+   386→    } else {
+   387→      s.logEvent('remove', `فصل جزئي: ${name}`, true, 'أكمل الاستخراج إلى الصينية');
+   388→      toast.success(`${name}: فُصل جزئيًا — أكمل الاستخراج`);
+   389→    }
+   390→    schedulePersist(get);
+   391→  },
+   392→
+   393→  damagePart: (id) => {
+   394→    const s = get();
+   395→    if (id === 'case') return;
+   396→    const sim = applyDamage(s.sim, id);
+   397→    set({ sim, lastDiagnosis: null });
+   398→    s.logEvent('other', `تلف تدريبي مقصود: ${nameOf(id)}`, false, 'وضع الاستكشاف: القطعة تالفة — استبدلها من المخزن التعليمي');
+   399→    toast.warning(`${nameOf(id)}: تلف تدريبي — استبدلها من المخزن`);
+   400→    schedulePersist(get);
+   401→  },
+   402→
+   403→  repairPart: (id) => {
+   404→    const s = get();
+   405→    if (s.sim.parts[id] !== 'damaged') {
+   406→      toast.error(`${nameOf(id)}: ليست تالفة`);
+   407→      return;
+   408→    }
+   409→    const sim = applyRepair(s.sim, id);
+   410→    set({ sim });
+   411→    s.logEvent('install', `استبدال ${nameOf(id)} بقطعة سليمة`, true, 'من المخزن التعليمي');
+   412→    toast.success(`${nameOf(id)}: استُبدلت بقطعة سليمة (في الصينية)`);
+   413→    schedulePersist(get);
+   414→  },
+   415→
+   416→  // ============ الطرفيات ============
+   417→  toggleMonitor: () => {
+   418→    const s = get();
+   419→    const sim = { ...s.sim, peripherals: { ...s.sim.peripherals, monitorOn: !s.sim.peripherals.monitorOn } };
+   420→    set({ sim });
+   421→    s.logEvent('flag', sim.peripherals.monitorOn ? 'تشغيل الشاشة' : 'إطفاء الشاشة', true);
+   422→    schedulePersist(get);
+   423→  },
+   424→
+   425→  setNotepad: (text) => set({ notepad: text.slice(-400) }),
+   426→
+   427→  typeKey: (ch) => {
+   428→    const s = get();
+   429→    if (!s.notepad.length && ch.length === 1) {
+   430→      // أول حرف — لا شيء خاص
+   431→    }
+   432→    let next = s.notepad;
+   433→    if (ch === 'BACK') next = next.slice(0, -1);
+   434→    else if (ch === 'SPACE') next = `${next} `;
+   435→    else if (ch === 'ENTER') next = `${next}\n`;
+   436→    else if (ch === 'CLR') next = '';
+   437→    else next = next + ch;
+   438→    set({ notepad: next.slice(-400) });
+   439→  },
+   440→
+   441→  clearNotepad: () => set({ notepad: '' }),
+   442→
+   443→  setHintsVisible: (v) => set({ hintsVisible: v }),
+   444→
+   445→  setAirflow: (v) => set({ airflowVisible: v }),
+   446→
+   447→  setInputMode: (inputMode) => set({ inputMode }),
+   448→
+   449→  // ============ V6-C/D: النظام الافتراضي والأقراص والبرنامج الثابت ============
+   450→
+   451→  insertUsb: (family) => {
+   452→    const s = get();
+   453→    set({ sim: { ...s.sim, usbMedia: family } });
+   454→    s.logEvent('other', family ? `أُدخل وسيط تثبيت: ${family}` : 'أُخرج وسيط التثبيت', true);
+   455→    toast.success(family ? `وُصل وسيط تثبيت ${family} — سيلي الترتيب أولوية الإقلاع` : 'أُخرج وسيط التثبيت');
+   456→    schedulePersist(get);
+   457→  },
+   458→
+   459→  exitSetup: () => {
+   460→    const s = get();
+   461→    // الخروج من المعالج: إخراج الوسيط وإعادة تشغيل باردة (بدون تغيير النظام)
+   462→    const sim = { ...s.sim, usbMedia: null };
+   463→    sim.flags.powerOn = false;
+   464→    set({ sim, bootStartedAt: null });
+   465→    s.logEvent('other', 'الخروج من معالج التثبيت — إعادة تشغيل باردة', true);
+   466→    schedulePersist(get);
+   467→  },
+   468→
+   469→  completeInstall: (family, editionAr, diskId, plan) => {
+   470→    const s = get();
+   471→    const disks = s.sim.disks.map((d) => {
+   472→      if (d.id !== diskId) {
+   473→        // إزالة علامة hasOs من الأقراص الأخرى (نظام واحد نشط)
+   474→        return { ...d, parts: d.parts.map((p) => ({ ...p, hasOs: false })) };
+   475→      }
+   476→      const parts = plan && plan.length > 0
+   477→        ? plan.map((p, i) => ({
+   478→            id: `${d.id}-n${i}-${Date.now() % 100000}`,
+   479→            label: p.kind === 'primary' ? 'OS' : p.label,
+   480→            letter: p.kind === 'primary' ? 'C' : null,
+   481→            kind: p.kind,
+   482→            fs: p.fs as 'ntfs' | 'fat32' | 'none',
+   483→            sizeGB: p.sizeGB,
+   484→            usedGB: p.kind === 'primary' ? 24 : 0.02,
+   485→            hasOs: p.kind === 'primary',
+   486→          }))
+   487→        : d.parts.map((p) => ({ ...p, hasOs: p.kind === 'primary', usedGB: p.kind === 'primary' ? 24 : p.usedGB }));
+   488→      return { ...d, style: (d.style ?? 'gpt') as 'gpt' | 'mbr', parts };
+   489→    });
+   490→    const sim: SimulationState = {
+   491→      ...s.sim,
+   492→      disks,
+   493→      os: { installed: family, edition: editionAr, driversMissing: [], bcdCorrupt: false, repairAttempts: 0, installedAt: Date.now() },
+   494→      usbMedia: null,
+   495→      firmware: { ...s.sim.firmware, bootOrder: s.sim.firmware.bootOrder.filter((x) => x !== 'usb').concat(s.sim.firmware.bootOrder.includes('usb') ? ['usb'] : []) },
+   496→    };
+   497→    set({ sim });
+   498→    s.logEvent('other', `اكتمل تثبيت النظام التعليمي: ${family} ${editionAr} على ${diskId}`, true, 'محاكاة تعليمية — لا ملفات حقيقية');
+   499→    toast.success(`اكتمل التثبيت: ${family} ${editionAr} — أُعيد التشغيل إلى سطح المكتب`);
+   500→    schedulePersist(get);
+   501→  },
+   502→
+   503→  clearDisk: (diskId) => {
+   504→    const s = get();
+   505→    const hadOs = s.sim.disks.find((d) => d.id === diskId)?.parts.some((p) => p.hasOs) ?? false;
+   506→    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: [] } : d));
+   507→    const os = hadOs ? { ...s.sim.os, installed: null, edition: null, installedAt: null } : s.sim.os;
+   508→    set({ sim: { ...s.sim, disks, os } });
+   509→    s.logEvent('other', `حذف كل أقسام القرص ${diskId} (محاكاة)`, true, 'تحذير تعليمي: في العمل الحقيقي هذا يفقد البيانات نهائيًا');
+   510→    schedulePersist(get);
+   511→  },
+   512→
+   513→  initDisk: (diskId, style) => {
+   514→    const s = get();
+   515→    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, style, parts: [] } : d));
+   516→    set({ sim: { ...s.sim, disks } });
+   517→    s.logEvent('other', `تهيئة القرص ${diskId} بنمط ${style.toUpperCase()} (محاكاة)`, true);
+   518→    schedulePersist(get);
+   519→  },
+   520→
+   521→  createPartition: (diskId, sizeGB, fs) => {
+   522→    const s = get();
+   523→    const disks = s.sim.disks.map((d) => {
+   524→      if (d.id !== diskId) return d;
+   525→      const total = d.parts.reduce((a, p) => a + p.sizeGB, 0);
+   526→      const unalloc = Math.max(0, d.sizeGB - total);
+   527→      const take = Math.min(unalloc, Math.max(0.1, sizeGB));
+   528→      if (take < 0.1) return d;
+   529→      const part = {
+   530→        id: `${d.id}-p${d.parts.length + 1}-${Date.now() % 100000}`,
+   531→        label: 'Data',
+   532→        letter: (() => { const used = new Set(d.parts.map((p) => p.letter).filter(Boolean)); for (const l of 'DEFGHIJ') { if (!used.has(l)) return l; } return null; })(),
+   533→        kind: 'primary' as const,
+   534→        fs,
+   535→        sizeGB: take,
+   536→        usedGB: 0,
+   537→        hasOs: false,
+   538→      };
+   539→      return { ...d, parts: [...d.parts, part] };
+   540→    });
+   541→    set({ sim: { ...s.sim, disks } });
+   542→    s.logEvent('other', `قسم جديد ${sizeGB.toFixed(1)}GB على ${diskId} بملفات ${fs.toUpperCase()} (محاكاة)`, true);
+   543→    schedulePersist(get);
+   544→  },
+   545→
+   546→  deletePartition: (diskId, partId) => {
+   547→    const s = get();
+   548→    const target = s.sim.disks.find((d) => d.id === diskId)?.parts.find((p) => p.id === partId);
+   549→    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: d.parts.filter((p) => p.id !== partId) } : d));
+   550→    const os = target?.hasOs ? { ...s.sim.os, installed: null, edition: null } : s.sim.os;
+   551→    set({ sim: { ...s.sim, disks, os } });
+   552→    s.logEvent('other', `حذف قسم ${partId} من ${diskId} (محاكاة)`, true, 'تأكيد تعليمي مطلوب — لا عمليات على أقراص حقيقية');
+   553→    schedulePersist(get);
+   554→  },
+   555→
+   556→  formatPartition: (diskId, partId) => {
+   557→    const s = get();
+   558→    const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: d.parts.map((p) => (p.id === partId ? { ...p, usedGB: 0, hasOs: false } : p)) } : d));
+   559→    set({ sim: { ...s.sim, disks } });
+   560→    s.logEvent('other', `تهيئة قسم ${partId} (محاكاة)`, true);
+   561→    schedulePersist(get);
+   562→  },
+   563→
+   564→  fixDriver: (componentId) => {
+   565→    const s = get();
+   566→    const os = { ...s.sim.os, driversMissing: s.sim.os.driversMissing.filter((d) => d !== componentId) };
+   567→    set({ sim: { ...s.sim, os } });
+   568→    s.logEvent('install', `تثبيت تعريف: ${componentId} (محاكاة تعليمية)`, true);
+   569→    toast.success('تم تحديث التعريف — أعد الفحص في Device Manager');
+   570→    schedulePersist(get);
+   571→  },
+   572→
+   573→  repairBcd: () => {
+   574→    const s = get();
+   575→    const os = { ...s.sim.os, bcdCorrupt: false, repairAttempts: 0 };
+   576→    set({ sim: { ...s.sim, os } });
+   577→    s.logEvent('install', 'إصلاح بيانات الإقلاع (bootrec) — محاكاة تعليمية', true);
+   578→    schedulePersist(get);
+   579→  },
+   580→
+   581→  runStartupRepair: () => {
+   582→    const s = get();
+   583→    // تعليميًا: الإصلاح التلقائي لا يصلح تلف BCD العميق هنا — يشرح ويعد المحاولات
+   584→    const os = { ...s.sim.os, repairAttempts: s.sim.os.repairAttempts + 1 };
+   585→    set({ sim: { ...s.sim, os } });
+   586→    s.logEvent('other', `Startup Repair فشل (محاولة ${os.repairAttempts}) — يُشرح استخدام bootrec`, false, 'الإصلاح الصحيح: Command Prompt ← bootrec /fixmbr /fixboot /rebuildbcd');
+   587→    toast.error('فشل Startup Repair — استخدم موجه الأوامر ثم bootrec /rebuildbcd');
+   588→    schedulePersist(get);
+   589→  },
+   590→
+   591→  patchFirmware: (patch) => {
+   592→    const s = get();
+   593→    const firmware = { ...s.sim.firmware, ...patch };
+   594→    set({ sim: { ...s.sim, firmware } });
+   595→    s.logEvent('flag', `إعدادات UEFI: ${Object.keys(patch).join(', ')} (محاكاة)`, true);
+   596→    schedulePersist(get);
+   597→  },
+   598→
+   599→  requestSetup: () => {
+   600→    const s = get();
+   601→    if (!s.sim.flags.powerOn) {
+   602→      toast.error('شغّل الجهاز أولًا — الدخول إلى UEFI يتم أثناء بدء التشغيل');
+   603→      return;
+   604→    }
+   605→    set({ sim: { ...s.sim, firmware: { ...s.sim.firmware, setupRequested: true } } });
+   606→    s.logEvent('flag', 'طلب الدخول إلى إعدادات UEFI (DEL)', true);
+   607→    schedulePersist(get);
+   608→  },
+   609→
+   610→  bootFromDevice: (deviceId) => {
+   611→    const s = get();
+   612→    const order = [deviceId, ...s.sim.firmware.bootOrder.filter((x) => x !== deviceId)];
+   613→    set({ sim: { ...s.sim, firmware: { ...s.sim.firmware, bootOrder: order, setupRequested: false } } });
+   614→    s.logEvent('flag', `قائمة إقلاع: بدء التشغيل من ${deviceId}`, true);
+   615→    toast.success(`الإقلاع الآن من ${deviceId}`);
+   616→    schedulePersist(get);
+   617→  },
+   618→
+   619→  // (V6-D) إعادة تشغيل دافئة: إطفاء ثم تشغيل تلقائي بعد لحظة — سلوك زر Reset الحقيقي
+   620→  warmRestart: () => {
+   621→    const s = get();
+   622→    if (!s.sim.flags.powerOn) {
+   623→      toast.error('الجهاز مطفأ — شغّله أولًا من زر الطاقة.');
+   624→      return;
+   625→    }
+   626→    const sim = { ...s.sim };
+   627→    sim.flags.powerOn = false;
+   628→    set({ sim, bootStartedAt: null });
+   629→    s.logEvent('flag', 'إعادة تشغيل دافئة — إيقاف مؤقت ثم إقلاع تلقائي', true);
+   630→    schedulePersist(get);
+   631→    setTimeout(() => {
+   632→      const st = get();
+   633→      if (st.sim.flags.powerOn) return; // تشغيل يدوي حصل في الأثناء — لا تدخل
+   634→      const sim2 = { ...st.sim };
+   635→      sim2.flags.powerOn = true;
+   636→      set({ sim: sim2, bootStartedAt: Date.now() });
+   637→      st.logEvent('flag', 'اكتملت إعادة التشغيل — بدء الإقلاع من جديد', true);
+   638→      schedulePersist(get);
+   639→    }, 900);
+   640→  },
+   641→
+   642→  setThermal: (cpuTempC, gpuTempC) => {
+   643→    const s = get();
+   644→    if (Math.abs(s.sim.thermal.cpuTempC - cpuTempC) < 1 && Math.abs(s.sim.thermal.gpuTempC - gpuTempC) < 1) return;
+   645→    set({ sim: { ...s.sim, thermal: { ...s.sim.thermal, cpuTempC, gpuTempC, simulatedNotice: true } } });
+   646→  },
+   647→
+   648→  runDiagnosis: () => {
+   649→    const s = get();
+   650→    const finding = runPost(s.sim);
+   651→    set({ lastDiagnosis: finding.code });
+   652→    s.logEvent('post', `فحص POST: ${finding.titleAr}`, finding.code !== 'POST_FAIL', finding.detailsAr.join(' • '));
+   653→    schedulePersist(get);
+   654→  },
+   655→
+   656→  runScenario: (scenarioId) => {
+   657→    const s = get();
+   658→    const sc = SCENARIOS.find((x) => x.id === scenarioId);
+   659→    if (!sc) return;
+   660→    const sim = applyScenario(s.sim, scenarioId);
+   661→    // إطفاء الجهاز عند تطبيق أي سيناريو — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
+   662→    sim.flags.powerOn = false;
+   663→    set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
+   664→    s.logEvent('scenario', `سيناريو: ${sc.titleAr}`, true, sc.faultAr);
+   665→    toast.success(`طُبّق سيناريو «${sc.titleAr}» — ${sc.faultAr}`);
+   666→    schedulePersist(get);
+   667→  },
+   668→
+   669→  runFault: (faultId) => {
+   670→    const s = get();
+   671→    const fault = FAULTS.find((f) => f.id === faultId);
+   672→    if (!fault) return;
+   673→    const sim = applyFault(s.sim, faultId);
+   674→    // إطفاء الجهاز عند تطبيق أي عطل — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
+   675→    sim.flags.powerOn = false;
+   676→    set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
+   677→    s.logEvent('scenario', `عطل تعليمي ${fault.id}: ${fault.titleAr}`, true, fault.faultAr);
+   678→    toast.success(`طُبّق العطل ${fault.id} — ${fault.titleAr}`);
+   679→    schedulePersist(get);
+   680→  },
+   681→
+   682→  resetSimulation: () => {
+   683→    set({
+   684→      sim: initialSimulationState(),
+   685→      lastDiagnosis: null,
+   686→      selected: null,
+   687→      isolated: null,
+   688→      exploded: false,
+   689→      xray: false,
+   690→      bootStartedAt: null,
+   691→      notepad: '',
+   692→    });
+   693→    get().logEvent('other', 'إعادة تهيئة الجهاز الافتراضي', true);
+   694→    toast.success('أُعيد الجهاز إلى حالته الافتراضية');
+   695→    schedulePersist(get);
+   696→  },
+   697→
+   698→  // ============ جلسة الفني ذي المراحل التسع ============
+   699→  startTechSession: (scenarioId) => {
+   700→    const s = get();
+   701→    const fault = FAULTS.find((f) => f.id === scenarioId);
+   702→    if (!fault) return;
+   703→    const sim = applyFault(s.sim, scenarioId);
+   704→    set({ sim, tech: newTechSession(scenarioId), screen: 'tech', lastDiagnosis: null, bootStartedAt: null });
+   705→    s.logEvent('scenario', `جلسة فني جديدة — ${fault.id}: ${fault.titleAr}`, true, fault.complaintAr);
+   706→    toast.success('بدأت جلسة الفني — اقرأ بطاقة الطلب');
+   707→    schedulePersist(get);
+   708→  },
+   709→
+   710→  patchTech: (patch) => {
+   711→    const s = get();
+   712→    if (!s.tech) return;
+   713→    set({ tech: { ...s.tech, ...patch } });
+   714→    schedulePersist(get);
+   715→  },
+   716→
+   717→  toggleTechTool: (toolId) => {
+   718→    const s = get();
+   719→    if (!s.tech) return;
+   720→    const has = s.tech.toolsChosen.includes(toolId);
+   721→    const toolsChosen = has
+   722→      ? s.tech.toolsChosen.filter((t) => t !== toolId)
+   723→      : [...s.tech.toolsChosen, toolId];
+   724→    set({ tech: { ...s.tech, toolsChosen } });
+   725→    schedulePersist(get);
+   726→  },
+   727→
+   728→  advanceTechStage: () => {
+   729→    const s = get();
+   730→    if (!s.tech) return;
+   731→    const gate = stageGate(s.tech.stage, s.tech, s.sim);
+   732→    if (!gate.done) {
+   733→      toast.error(`لا يمكن الانتقال: ${gate.blockersAr.join(' • ')}`);
+   734→      s.logEvent('other', `محاولة انتقال من المرحلة ${s.tech.stage}`, false, gate.blockersAr.join(' • '));
+   735→      return;
+   736→    }
+   737→    if (s.tech.stage >= 9) return;
+   738→    const stage = (s.tech.stage + 1) as TechSession['stage'];
+   739→    set({ tech: { ...s.tech, stage } });
+   740→    s.logEvent('lesson', `المرحلة ${stage}: انتقال مكتمل`, true, gate.hintAr);
+   741→    schedulePersist(get);
+   742→  },
+   743→
+   744→  abandonTechSession: () => {
+   745→    set({ tech: null });
+   746→    toast.info('أُلغيت جلسة الفني — يمكنك بدء جلسة جديدة في أي وقت');
+   747→    schedulePersist(get);
+   748→  },
+   749→
+   750→  finishTechReport: () => {
+   751→    const s = get();
+   752→    if (!s.tech) return;
+   753→    const hyp = getHypothesis(s.tech.hypothesisId);
+   754→    const fault = getFault(s.tech.scenarioId);
+   755→    const correct = hyp?.faultId === s.tech.scenarioId;
+   756→    const tech: TechSession = { ...s.tech, reportAt: Date.now(), hypothesisCorrect: correct };
+   757→    set({ tech });
+   758→    s.logEvent(
+   759→      'delivery',
+   760→      `تقرير تسليم — ${fault?.titleAr ?? s.tech.scenarioId}`,
+   761→      true,
+   762→      `الفرضية: ${correct ? 'صحيحة' : 'غير صحيحة'} • المراحل التسع مكتملة`,
+   763→    );
+   764→    toast.success('وُلّد تقرير التسليم — راجعه ثم اطبع أو صدّره');
+   765→    schedulePersist(get);
+   766→  },
+   767→
+   768→  startMission: (id) => {
+   769→    set({ activeMissionId: id, missionStepIndex: 0, screen: 'training' });
+   770→    get().logEvent('lesson', `بدء مهمة: ${id}`, true);
+   771→    schedulePersist(get);
+   772→  },
+   773→
+   774→  finishMissionStep: () => set({ missionStepIndex: get().missionStepIndex + 1 }),
+   775→
+   776→  abandonMission: () => {
+   777→    set({ activeMissionId: null, missionStepIndex: 0 });
+   778→    schedulePersist(get);
+   779→  },
+   780→
+   781→  completeMission: (id) => {
+   782→    const s = get();
+   783→    if (s.missionsDone.includes(id)) return;
+   784→    set({ missionsDone: [...s.missionsDone, id], activeMissionId: null, missionStepIndex: 0 });
+   785→    s.logEvent('lesson', `إتمام مهمة: ${id}`, true);
+   786→    schedulePersist(get);
+   787→  },
+   788→
+   789→  markLessonRead: (id) => {
+   790→    const s = get();
+   791→    if (s.lessonsRead.includes(id)) return;
+   792→    set({ lessonsRead: [...s.lessonsRead, id] });
+   793→    s.logEvent('lesson', `إكمال درس: ${id}`, true);
+   794→    schedulePersist(get);
+   795→  },
+   796→
+   797→  recordQuiz: (quizId, score) => {
+   798→    const s = get();
+   799→    set({ quizScores: { ...s.quizScores, [quizId]: { score, at: Date.now() } } });
+   800→    s.logEvent('quiz', `اختبار: ${quizId}`, score >= 60, `الدرجة ${score}%`);
+   801→    schedulePersist(get);
+   802→  },
+   803→
+   804→  resetTrainingData: () => {
+   805→    set({ logs: [], quizScores: {}, missionsDone: [], lessonsRead: [], activeMissionId: null, missionStepIndex: 0, lastDiagnosis: null, tech: null });
+   806→    toast.success('مُسح سجل التدريب والاختبارات');
+   807→    schedulePersist(get);
+   808→  },
+   809→
+   810→  resetEverything: () => {
+   811→    const res = clearAll();
+   812→    set({
+   813→      sim: initialSimulationState(),
+   814→      tech: null,
+   815→      logs: [],
+   816→      quizScores: {},
+   817→      missionsDone: [],
+   818→      lessonsRead: [],
+   819→      activeMissionId: null,
+   820→      missionStepIndex: 0,
+   821→      lastDiagnosis: null,
+   822→      screen: 'home',
+   823→      selected: null,
+   824→      xray: false,
+   825→      exploded: false,
+   826→      isolated: null,
+   827→      quality: 'medium',
+   828→      sidePanelsHidden: false,
+   829→      hintsVisible: true,
+   830→      airflowVisible: false,
+   831→      inputMode: 'lab',
+   832→      bootStartedAt: null,
+   833→      notepad: '',
+   834→    });
+   835→    if (res.ok) toast.success('حُذفت كل البيانات المحلية وأُعيد التطبيق لحالته الأولى');
+   836→    else toast.error(res.messageAr);
+   837→  },
+   838→
+   839→  importBackupFromJson: (json) => {
+   840→    try {
+   841→      const parsed = JSON.parse(json) as PersistShape;
+   842→      if (!parsed || typeof parsed !== 'object' || !parsed.simulation || !parsed.simulation.flags || !parsed.simulation.parts) {
+   843→        throw new Error('bad-shape');
+   844→      }
+   845→      // (إصلاح تدقيق V6) فحص إصدار الملف — كان يستقبل أي شكل صالح حتى من إصدارات أحدث غير متوافقة
+   846→      const ACCEPTED = new Set([APP_VERSION, '5.0.0', '4.0.0']);
+   847→      if (typeof parsed.version !== 'string' || !ACCEPTED.has(parsed.version)) {
+   848→        toast.error(`إصدار ملف النسخة الاحتياطية غير مدعوم (${String(parsed.version ?? 'غير معروف')}) — النسخ المدعومة: 4.0.0 حتى ${APP_VERSION}`);
+   849→        return;
+   850→      }
+   851→      set({
+   852→        sim: normalizeSimulationState(parsed.simulation),
+   853→        tech: parsed.tech ?? null,
+   854→        logs: parsed.logs ?? [],
+   855→        quizScores: parsed.quizScores ?? {},
+   856→        missionsDone: parsed.missionsDone ?? [],
+   857→        lessonsRead: parsed.lessonsRead ?? [],
+   858→        lastDiagnosis: null,
+   859→      });
+   860→      toast.success('استُوردت النسخة الاحتياطية بنجاح');
+   861→      schedulePersist(get);
+   862→    } catch {
+   863→      toast.error('ملف النسخة الاحتياطية غير صالح');
+   864→    }
+   865→  },
+   866→
+   867→  logEvent: (kind, labelAr, ok, detailAr) => {
+   868→    const event: SessionEvent = { ts: Date.now(), kind, labelAr, ok, detailAr };
+   869→    set({ logs: [...get().logs, event].slice(-500) });
+   870→    schedulePersist(get);
+   871→  },
+   872→}));
+   873→
+   874→/** عدّاد القطع المثبتة (للشارات) — الهيكل مستثنى */
+   875→export function installedCount(sim: SimulationState): number {
+   876→  let n = 0;
+   877→  for (const id of Object.keys(sim.parts) as ComponentId[]) {
+   878→    if (id === 'case') continue;
+   879→    if (isInstalled(sim.parts[id] as PartStatus)) n++;
+   880→  }
+   881→  return n;
+   882→}
+   883→

@@ -593,7 +593,8 @@ function OrderPicker() {
       </CardHeader>
       <CardContent className="p-4 pt-0">
         <p className="text-xs text-muted-foreground leading-relaxed mb-3">
-          14 عطلًا تعليميًا بأربع درجات صعوبة — سيُركّب العطل على الجهاز الافتراضي وستمر بالمراحل التسع حتى تقرير التسليم.
+          {/* (إصلاح U9) العدد من بيانات الأعطال لا نص ثابت — يطابق HomeScreen */}
+          {`${FAULTS.length} عطلًا تعليميًا بأربع درجات صعوبة — سيُركّب العطل على الجهاز الافتراضي وستمر بالمراحل التسع حتى تقرير التسليم.`}
         </p>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {FAULTS.map((f) => (

@@ -72,7 +72,8 @@ export class FanSystem {
     this.buildArrows();
   }
 
-  /** محور الدوران الفعلي لعقدة الريش: الريش الإجرائي يعلن spinAxis، وGLB تستخدم الافتراضي الموثق */
+  /** محور الدوران الفعلي لعقدة الريش: الريش الإجرائي يعلن spinAxis، وGLB تحمل extras.spinAxis
+   *  (cooler/fan = x، gpu/psu = y) — الافتراضي أدناه يطابقها ويُستخدم فقط عند غيابها */
   private spinAxisOf(rotor: THREE.Object3D, glbDefault: 'x' | 'y' | 'z'): 'x' | 'y' | 'z' {
     const declared = rotor.userData['spinAxis'];
     return declared === 'x' || declared === 'y' || declared === 'z' ? declared : glbDefault;
@@ -87,7 +88,7 @@ export class FanSystem {
     if (coolerRotor) {
       this.addFan({
         id: 'cooler', labelAr: 'مروحة مبرد المعالج', location: 'cpu', kind: 'internal',
-        axis: this.spinAxisOf(coolerRotor, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 1150,
+        axis: this.spinAxisOf(coolerRotor, 'x'), sign: 1, airflow: [0, 0, -1], baseRpm: 1150,
         rotor: coolerRotor, parent: coolerRotor.parent ?? visuals.dynamic.cooler,
       });
     }
@@ -109,13 +110,13 @@ export class FanSystem {
     const front2 = find(visuals.dynamic.fans, 'fan_rotor_front-2');
     const rear = find(visuals.dynamic.fans, 'fan_rotor_rear');
     if (front1) {
-      this.addFan({ id: 'front-1', labelAr: 'مروحة أمامية علوية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front1, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front1, parent: front1.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'front-1', labelAr: 'مروحة أمامية علوية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front1, 'x'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front1, parent: front1.parent ?? visuals.dynamic.fans });
     }
     if (front2) {
-      this.addFan({ id: 'front-2', labelAr: 'مروحة أمامية سفلية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front2, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front2, parent: front2.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'front-2', labelAr: 'مروحة أمامية سفلية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front2, 'x'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front2, parent: front2.parent ?? visuals.dynamic.fans });
     }
     if (rear) {
-      this.addFan({ id: 'rear', labelAr: 'مروحة خلفية (طرد)', location: 'rear', kind: 'exhaust', axis: this.spinAxisOf(rear, 'z'), sign: -1, airflow: [0, 0, -1], baseRpm: 900, rotor: rear, parent: rear.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'rear', labelAr: 'مروحة خلفية (طرد)', location: 'rear', kind: 'exhaust', axis: this.spinAxisOf(rear, 'x'), sign: -1, airflow: [0, 0, -1], baseRpm: 900, rotor: rear, parent: rear.parent ?? visuals.dynamic.fans });
     }
 
     // 4) مروحة مزود الطاقة — تسحب من جهة المكوّنات وتطرد خلف المزود
@@ -123,7 +124,7 @@ export class FanSystem {
     if (psuRotor) {
       this.addFan({
         id: 'psu', labelAr: 'مروحة مزود الطاقة', location: 'psu', kind: 'exhaust',
-        axis: this.spinAxisOf(psuRotor, 'y'), sign: 1, airflow: [0, -1, 0], baseRpm: 1300,
+        axis: this.spinAxisOf(psuRotor, 'y'), sign: -1, airflow: [0, -1, 0], baseRpm: 1300,
         rotor: psuRotor, parent: psuRotor.parent ?? visuals.dynamic.psu,
       });
     }
@@ -189,8 +190,10 @@ export class FanSystem {
       shaft.scale.y = len;
       arrow.add(shaft);
       const head = new THREE.Mesh(headGeo, mat);
-      head.position.y = -(len / 2) - 0.1;
-      head.rotation.x = Math.PI;
+      // (إصلاح تدقيق V6-G) الرأس عند +Y دون قلب: رأس المخروط يشير باتجاه متجه التدفق
+      // نفسه (الـquaternion أدناه يحوّل +Y إلى dir) — كان مقلوبًا فتُقرأ الأسهم
+      // عكس الهواء (سحب يبدو طردًا)
+      head.position.y = len / 2 + 0.1;
       arrow.add(head);
       // +Y الافتراضي للسهم → متجه التدفق
       arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
@@ -244,10 +247,7 @@ export class FanSystem {
         fan.angle += fan.sign * ((fan.rpm / 60) * Math.PI * 2) * dt;
         fan.pivot.rotation.set(0, 0, 0);
         fan.pivot.rotation[fan.axis] = fan.angle;
-      } else if (fan.rpm < 5 && fan.angle !== 0) {
-        // تتوقف بلطف على أقرب زاوية (لا اهتزاز عند التوقف)
-        fan.rpm = 0;
-      }
+      } // خلاف ذلك: angle يتجمد أخيرًا عند توقف الدوران (لا اهتزاز)
     }
     // نبض خفيف لأسهم الهواء (حية بصريًا دون كلفة تُذكر)
     if (this.arrows.visible) {

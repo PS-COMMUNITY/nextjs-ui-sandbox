@@ -1,10 +1,10 @@
 {
-  "manifestVersion": "2.0",
-  "appVersion": "4.0.0",
-  "reviewDirective": "أمر تصحيح إلزامي — Visual Redesign v4",
-  "accessedAt": "2025-11",
+  "manifestVersion": "3.0",
+  "appVersion": "6.0.0",
+  "reviewDirective": "توثيق الأصول — V6: نماذج قطع حقيقية (GLB) + بيئة Poly Haven + مسار بديل إجرائي",
+  "accessedAt": "2026-11",
   "runtimePolicy": "local-only",
-  "note": "كل الأصول تُخدم محليًا من public/ — لا روابط خارجية وقت تشغيل التطبيق. ستة أصول حقيقية منزّلة (CC0 من Poly Haven)، والبقية إجرائية مفصلة بمعرفات ثابتة.",
+  "note": "كل الأصول تُخدم محليًا من public/ — لا روابط خارجية وقت تشغيل التطبيق. ستة أصول بيئية حقيقية من Poly Haven (CC0)، وعشرة نماذج قطع GLB في public/models/parts/ (طقم pc-builder برخصة MIT + شاشة CC0 من OpenGameArt)، والبقية إجرائية مفصلة بمعرفات ثابتة (HDD 3.5 بوصة + الكابلات الخمسة + بيئة الورشة).",
   "assets": [
     {
       "id": "polyhaven.circuit_board",
@@ -150,17 +150,142 @@
     },
     {
       "id": "procedural.pc-parts",
-      "name": "Procedural PC Parts (14 مكوّنًا تفاعليًا + حوض مبثوق + واجهة صناعية + بيئة)",
+      "name": "Procedural fallback (مسار بديل إجرائي — قطع تفاعلية + كابلات + بيئة الورشة)",
       "category": "case|motherboard-features|cpu|cooler|ram|gpu|psu|ssd|hdd|fans|atx24|eps|gpuPower|sataData|sataPower|monitor|workstation|environment",
-      "usage": "كل القطع القابلة للفك/التركيب والتفاعل التعليمي + محطة الورشة",
+      "usage": "بعد V6 صارت 10 قطع من نماذج GLB حقيقية (قسم parts أدناه)؛ يبقى المصنع الإجرائي: (1) المسار البديل عند فشل تحميل أي GLB — يُبقى المجسم الإجرائي مكانه بلا مشهد مكسور، (2) القرص الميكانيكي HDD 3.5 بوصة والكابلات الخمسة (atx24/eps/gpuPower/sataData/sataPower) التي لا نماذج منزّلة لها، (3) محطة الورشة كاملة (مكتب/جدار/سجادة/أدوات) والبيئة",
       "sourceUrl": null,
       "designer": "PC Repair 3D Studio (كود المشروع)",
       "license": "project-own",
-      "files": ["src/lib/scene/partsFactory.ts", "src/lib/scene/PCScene.ts", "src/lib/scene/layout.ts", "src/lib/scene/textures.ts"],
+      "files": ["src/lib/scene/partsFactory.ts", "src/lib/scene/glbParts.ts", "src/lib/scene/PCScene.ts", "src/lib/scene/layout.ts", "src/lib/scene/textures.ts"],
       "format": "Three.js procedural geometry",
-      "note": "مسار معتمد عند غياب نماذج مرخصة مناسبة (موثق في docs/ASSET_CANDIDATES.md). تحديث v4: حوض الهيكل ExtrudeGeometry من مقطع C بسماكة 0.09 (لا صناديق ملسقة)، واجهة بثلاث طبقات (لوح خلفي + إطار بارز + شبك غائر + لوح علوي بشعار وLED)، قفص 3.5-inch بأرضية ومطاطات، مساند نحاسية للوحة، شبك عسلوي خلفي، أقدام مطاطية، مكتب ورشة 15×10.6 وحدة بأرجل فولاذية ورف سفلي وجدار بأرفف ولوح تعليق ومصابيح سقفية ومشترك كهرباء، وشاشة بقاعدة بيضاوية وحامل مائل وذقن بشعار ولمبة (التفصيل الموثق: docs/SCENE_LAYOUT.md). معرفات ثابتة (setComponentId) تسمح باستبدال أي قطعة بنموذج GLB لاحقًا دون كسر المنطق."
+      "note": "معرفات ثابتة (setComponentId) تسمح باستبدال أي قطعة بنموذج GLB دون كسر المنطق — وهذا ما فعله applyGlbParts في V6. تحديث v4: حوض الهيكل ExtrudeGeometry من مقطع C بسماكة 0.09، واجهة بثلاث طبقات، قفص 3.5-inch، مكتب ورشة 15×10.6 وحدة، وشاشة بقاعدة وحامل (التفصيل: docs/SCENE_LAYOUT.md). في مسار الفشل الإجرائي يُعاد اشتقاق تفاصيل اللوحة (مقبس/فتحة PCIe/M.2) من MOUNTS، ويُعاد بناء كابل طاقة البطاقة ونهاية كابل الشاشة عبر alignGpuPowerCable من البطاقة الجالسة."
     }
   ],
+  "parts": {
+    "note": "نماذج قطع حقيقية (V6 — High-Fidelity Hardware Assets) في public/models/parts/. تُحمَّل مسبقًا عبر preloadGlbAssets() (قبل إنشاء PCScene) وتُطبَّق عبر applyGlbParts() داخل buildAllParts — التعريف في DEFS بملف src/lib/scene/glbParts.ts: أساس محاور (basis) + مقياس لكل محور + مرساة (center/minAll/minY) لكل نموذج. أعمال التفاعل (أعلام الفك/التركيب، دوّارات المراوح، سطح عرض الشاشة) تُعاد ربطها من عقد النماذج المسماة أدناه — وفشل تحميل أي نموذج يُبقي المجسم الإجرائي البديل مكانه.",
+    "creditsFile": "public/models/parts/CREDITS.md",
+    "sources": {
+      "pc-builder": {
+        "url": "https://github.com/Wissemm697/pc-builder",
+        "license": "MIT",
+        "licenseLine": "MIT License — Copyright (c) 2026 Wissemm697 (نص الترخيص الكامل في مستودع المصدر)",
+        "usage": "تعديل وإعادة استضافة مسموحة مع الإبقاء على إشعار الترخيص — ملف CREDITS.md هو الإشعار",
+        "files": ["case.glb", "motherboard.glb", "cpu.glb", "cooler.glb", "gpu.glb", "ram.glb", "psu.glb", "ssd.glb", "fan.glb"],
+        "compression": "EXT_meshopt_compression + EXT_texture_webp (يدعمها Three.js GLTFLoader مع MeshoptDecoder)"
+      },
+      "monitor": {
+        "url": "https://opengameart.org/content/low-poly-monitor",
+        "license": "CC0-1.0 (Public Domain)",
+        "usage": "خالٍ بلا قيود؛ أُعيد تلوين الخامات داخل التطبيق (CC0 يسمح بالتعديل)",
+        "conversion": "FBX → GLB عبر FBX2glTF (الأصل Monitor.fbx من fbx.zip)"
+      }
+    },
+    "count": 10,
+    "items": [
+      {
+        "id": "parts.case",
+        "file": "public/models/parts/case.glb",
+        "nameAr": "هيكل الصندوق",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "جسم الصندوق كاملًا (حوض/جدار لوحة/واجهة/خلف) — يقف على المكتب عند MOUNTS.case، والزجاج يُفصل ويُدار من مفصلته (v3)",
+        "nodes": ["case_glass (يُفرض عليه transparent — زجاج الأصل بلا transparent في بعض الصادرات)", "case_power_led (لمبة الطاقة الأمامية)", "anchor_slot_1..anchor_slot_7 (فتحات التوسعة الخلفية — anchor_slot_1 يحدد مستوى براكيت GPU في alignGpuToSlot)"],
+        "integration": { "anchor": "minAll", "forceTransparent": ["glass"] }
+      },
+      {
+        "id": "parts.motherboard",
+        "file": "public/models/parts/motherboard.glb",
+        "nameAr": "اللوحة الأم",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "لوحة أم عمودية على الجدار الأيمن، وجهها نحو -X — مركز bbox عند MOUNTS.motherboard؛ المقبس/الفتحات على مواضع اللوحة الحقيقية",
+        "nodes": ["anchor_pcie_x16 (مركز شق PCIe x16 — أساس جلوس البطاقة في alignGpuToSlot)", "socket_lever (رافعة مقبس المعالج — علم الفك/التركيب)", "dimm_latch_A1 / dimm_latch_A2 / dimm_latch_B1 / dimm_latch_B2 (مزالج فتحات RAM)", "pcie_x16_latch (مزلاج بطاقة الرسومات)", "m2_screw (برغي تثبيت M.2)"]
+      },
+      {
+        "id": "parts.cpu",
+        "file": "public/models/parts/cpu.glb",
+        "nameAr": "المعالج",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "معالج يُدخل بميلان داخل المقبس (IHS نحو وجه المشاهد) — يجلس داخل إطار المقبس فوق اللوحة",
+        "nodes": []
+      },
+      {
+        "id": "parts.cooler",
+        "file": "public/models/parts/cooler.glb",
+        "nameAr": "مبرد المعالج (برجي)",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "مشتت برجي فوق المعالج — البرج يبرز من وجه اللوحة والمروحة تنفخ من الأمام للخلف (نحو مخرج الخلف -Z)",
+        "nodes": ["cooler_fan_rotor (دوّار المروحة — يُدوَّر حول محوره المحلي المعلن في extras.spinAxis = x)"],
+        "extras": "عقدة الدوّار تحمل extras.spinAxis (وextras.spinDir عند توفرها) — تُقرأ في fans.ts لتحديد محور الدوران واتجاهه"
+      },
+      {
+        "id": "parts.ram",
+        "file": "public/models/parts/ram.glb",
+        "nameAr": "شريحة الذاكرة RAM",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "شريحة DIMM تُدخل رأسيًا في فتحات الذاكرة — طول الشريحة على المحور Y رأسيًا في الفتحات",
+        "nodes": []
+      },
+      {
+        "id": "parts.gpu",
+        "file": "public/models/parts/gpu.glb",
+        "nameAr": "بطاقة الرسومات",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "بطاقة تُجلس أفقيتًا في شق PCIe x16 — موضعها النهائي مشتق وقت البناء من alignGpuToSlot (MOUNTS.gpu مجرد تخمين مبدئي) والبراكيت على مستوى فتحات الهيكل",
+        "nodes": ["gpu_fan_rotor_1 / gpu_fan_rotor_2 (دوّارا المروحتين — extras.spinAxis = y)", "anchor_gpu_power (مقبس طاقة 8pin فوق البطاقة — يحدد موضع موصل gpuPower في alignGpuPowerCable)"],
+        "extras": "الدوّاران يعلنان extras.spinAxis/spinDir — الإشارة (sign) تُثبت بصريًا لكل مروحة في fans.ts"
+      },
+      {
+        "id": "parts.psu",
+        "file": "public/models/parts/psu.glb",
+        "nameAr": "مزود الطاقة",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "وحدة مزود الطاقة أسفل-خلف الهيكل — مغلقة (لا صيانة داخلية)، مروحتها نحو المكوّنات",
+        "nodes": ["psu_fan_rotor (دوّار مروحة المزود — extras.spinAxis = y)"]
+      },
+      {
+        "id": "parts.ssd",
+        "file": "public/models/parts/ssd.glb",
+        "nameAr": "قرص M.2 NVMe",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "قرص M.2 يُدخل بميلان أسفل المقبس ويُثبت ببرغي m2_screw على اللوحة",
+        "nodes": []
+      },
+      {
+        "id": "parts.fan",
+        "file": "public/models/parts/fan.glb",
+        "nameAr": "مروحة هيكل 120mm",
+        "source": "pc-builder",
+        "license": "MIT (Wissemm697/pc-builder)",
+        "role": "مروحة هيكل تُستنسخ ثلاث مرات: أمامية علوية وسفلية (سحب) وخلفية (طرد) داخل أغلفة مُدارة في مجموعة fans",
+        "nodes": ["fan_rotor (دوّار الريش — يُعاد تسميته وقت البناء: fan_rotor_front-1 / fan_rotor_front-2 / fan_rotor_rear)"],
+        "extras": "الدوّار يحمل extras.spinAxis = x — يُقرأ في fans.ts مع الافتراضي المطابق عند غيابه"
+      },
+      {
+        "id": "parts.monitor",
+        "file": "public/models/parts/monitor.glb",
+        "nameAr": "الشاشة المكتبية",
+        "source": "monitor (OpenGameArt)",
+        "license": "CC0-1.0 (Public Domain — محوّل من FBX)",
+        "role": "شاشة فيزيائية مستقلة تقف على المكتب عند PERIPH.monitorPos — سطح العرض يحمل CanvasTexture مربوطة بمحرك monitorEngine (8 حالات)",
+        "nodes": ["Monitor2_mat (مادة سطح العرض الداكنة — يُركّب مستوى العرض فوقها؛ إن غابت من النموذج يُعاد إنشاء السطح إجرائيًا مع تحذير)"],
+        "integration": { "anchor": "minY", "note": "بقية الشاشة (قاعدة/عمود/إطار/زر طاقة) أُضيفت إجرائيًا حول النموذج في v4" }
+      }
+    ],
+    "proceduralRemainder": {
+      "note": "قطع بلا نماذج منزّلة تبقى إجرائية بالكامل (كما في CREDITS.md):",
+      "items": [
+        "HDD — قرص ميكانيكي 3.5 بوصة في قفص الهيكل الأمامي (لم يُعثر على نموذج مجاني قابل للتنزيل بلا حساب وبترخيص مناسب)",
+        "الكابلات الخمسة: atx24 + eps + gpuPower + sataData + sataPower — TubeGeometry على منحنيات CatmullRom بنقاط بداية/نهاية صريحة، وموصل gpuPower يُعاد وضعه فوق البطاقة الجالسة عبر alignGpuPowerCable"
+      ]
+    }
+  },
   "rejectedSourcesSummary": [
     { "source": "Sketchfab (CC downloadable)", "reason": "تنزيل أي أصل يتطلب تسجيل دخول — مرفوض إلزاميًا" },
     { "source": "TurboSquid / CGTrader / Fab", "reason": "أصول مدفوعة أو رخص غير قابلة للتحقق بلا شراء" },

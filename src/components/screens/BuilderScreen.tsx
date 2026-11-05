@@ -125,7 +125,7 @@ export default function BuilderScreen() {
   const BannerIcon = banner.icon;
 
   return (
-    <div dir="rtl" className="space-y-6 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {/* ===== ترويسة الشاشة ===== */}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">

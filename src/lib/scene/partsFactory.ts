@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import type { ComponentId } from '../types';
 import type { SceneQuality, FlagVisuals, PartVisuals } from './visualTypes';
 import { BOARD, CASE, COLORS, DESK, MOUNTS, PERIPH, TRAY } from './layout';
-import { applyGlbParts } from './glbParts';
+import { alignGpuPowerCable, applyGlbParts } from './glbParts';
 import {
   brushedTexture,
   fanGrillTexture,
@@ -649,8 +649,11 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   }
 
   // 2) مقبس المعالج: إطار ألمنيوم + لوح إبر ذهبي + رافعة بمقبض
+  // (إصلاح تدقيق V6-G F3) مركز المقبس مشتق من MOUNTS.cpu (مصدر الحقيقة الواحد) —
+  // كانت إحداثيات v4 قديمة (عالمي z 0.95 مقابل المعالج عند 1.33)
   const alu = mat(COLORS.aluminum, 0.85, 0.4, { map: brushedTexture('#a7b0ba') });
-  const sx = 0.7, sz = -0.62; // مركز المقبس المحلي
+  const sx = MOUNTS.cpu[1] - BOARD.center[1]; // محلي 0.62
+  const sz = MOUNTS.cpu[2] - BOARD.center[2]; // محلي -0.24
   g.add(box(0.06, 0.46, 0.05, alu, onFace(0.06), sx + 0.205, sz, true)); // إطار: 4 أضلاع
   g.add(box(0.06, 0.46, 0.05, alu, onFace(0.06), sx - 0.205, sz, true));
   g.add(box(0.06, 0.05, 0.36, alu, onFace(0.06), sx, sz + 0.205, true));
@@ -660,35 +663,38 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   // رافعة المقبس: pivot عند حافة المقبس (يدور حول X المحلي عند الفتح) + مقبض عرضي
   const lever = new THREE.Object3D();
   lever.name = 'flag-cpu-lever';
-  lever.position.set(onFace(0.06) - 0.04, 0.45, -0.87);
+  lever.position.set(onFace(0.06) - 0.04, sx - 0.25, sz - 0.25);
   lever.add(box(0.025, 0.42, 0.045, mat(COLORS.plastic, 0.2, 0.5), 0, 0.21, 0.02, false));
   lever.add(box(0.025, 0.03, 0.14, mat(COLORS.plastic, 0.2, 0.5), 0, 0.42, 0.02, false)); // مقبض
   flags.cpuLever = lever;
   g.add(lever);
 
   // 2ب) مشتتا VRM بأزعاج — فوق المقبس وعلى يساره (خارج حدود المقبس بلا تداخل)
+  // (F3) كل الإزاحات نسبية إلى مركز المقبس المشتق — تنتقل معه عند أي تغيير في MOUNTS.cpu
   const vrmFinH = new THREE.BoxGeometry(0.05, 0.03, 0.44);   // أزعاج أفقية مكدسة على Y
   const vrmFinV = new THREE.BoxGeometry(0.05, 0.44, 0.03);   // أزعاج رأسية موزعة على Z
   for (let i = 0; i < 7; i++) {
     const finTop = new THREE.Mesh(vrmFinH, alu);
-    finTop.position.set(onFace(0.03) - 0.05, 0.99 + i * 0.062, -0.62);
+    finTop.position.set(onFace(0.03) - 0.05, sx + 0.29 + i * 0.062, sz);
     g.add(finTop);
     if (i < 6) {
       const finLeft = new THREE.Mesh(vrmFinV, alu);
-      finLeft.position.set(onFace(0.03) - 0.05, 0.72, -1.14 + i * 0.052);
+      finLeft.position.set(onFace(0.03) - 0.05, sx + 0.02, sz - 0.52 + i * 0.052);
       g.add(finLeft);
     }
   }
-  g.add(box(0.03, 0.5, 0.48, alu, onFace(0.03), 1.19, -0.62, false));  // قاعدة VRM العلوي (فوق المقبس)
-  g.add(box(0.03, 0.44, 0.3, alu, onFace(0.03), 0.72, -1.03, false));  // قاعدة VRM الأيسر (يسار المقبس)
+  g.add(box(0.03, 0.5, 0.48, alu, onFace(0.03), sx + 0.49, sz, false));  // قاعدة VRM العلوي (فوق المقبس)
+  g.add(box(0.03, 0.44, 0.3, alu, onFace(0.03), sx + 0.02, sz - 0.41, false));  // قاعدة VRM الأيسر (يسار المقبس)
 
   // 3) أربع فتحات RAM عمودية + مزلاجان لكل فتحة (8 pivots تدور حول X)
+  // (F3) المراكز مشتقة من MOUNTS.ram (العصاتان على ±0.1 تسقطان في الفتحتين الوسطيين)
   const ramSlotGeo = new THREE.BoxGeometry(0.05, 1.35, 0.08);
   const ramSlotMat = mat(0x1b1f26, 0.2, 0.55);
   const ramRidgeMat = mat(0x2b333d, 0.3, 0.5);
   const clipGeo = new THREE.BoxGeometry(0.07, 0.07, 0.1);
   const clipMat = mat(0x39414c, 0.3, 0.5);
-  for (const z of [-0.27, -0.07, 0.13, 0.33]) { // عالمي z = 1.30 .. 1.90
+  const ramZ = MOUNTS.ram[2] - BOARD.center[2]; // محلي 0.50 — عالمي 2.07
+  for (const z of [ramZ - 0.3, ramZ - 0.1, ramZ + 0.1, ramZ + 0.3]) { // عالمي 1.77 .. 2.37
     const slot = new THREE.Mesh(ramSlotGeo, ramSlotMat);
     slot.position.set(onFace(0.05), 0.55, z);
     g.add(slot);
@@ -743,9 +749,12 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   g.add(box(0.02, 0.2, 0.2, mat(0x2a323c, 0.4, 0.5), onFace(0.02), -0.42, 0.15, false));
 
   // 8) رأسا طاقة ATX24 و EPS مع تجويف داخلي داكن
+  // (F3) رأس ATX24 على XZ الموصل نفسه (MOUNTS.atx24) — كان منحرفًا (عالمي 3.75,2.62 مقابل 3.1,2.7)
   const black = mat(COLORS.black, 0.3, 0.5);
-  g.add(box(0.08, 0.5, 0.25, black, onFace(0.08), 1.0, 1.05, true));   // ATX24 (عالمي 3.75, 2.62)
-  g.add(box(0.05, 0.42, 0.19, mat(0x0a0e12, 0.25, 0.6), onFace(0.05) - 0.045, 1.0, 1.05, false));
+  const atxY = MOUNTS.atx24[1] - BOARD.center[1]; // محلي 0.35
+  const atxZ = MOUNTS.atx24[2] - BOARD.center[2]; // محلي 1.13
+  g.add(box(0.08, 0.5, 0.25, black, onFace(0.08), atxY, atxZ, true));   // ATX24 (عالمي 3.1, 2.7)
+  g.add(box(0.05, 0.42, 0.19, mat(0x0a0e12, 0.25, 0.6), onFace(0.05) - 0.045, atxY, atxZ, false));
   g.add(box(0.08, 0.26, 0.2, black, onFace(0.08), 1.27, -1.02, true)); // EPS (عالمي 4.02, 0.55)
   g.add(box(0.05, 0.2, 0.15, mat(0x0a0e12, 0.25, 0.6), onFace(0.05) - 0.045, 1.27, -1.02, false));
 
@@ -758,10 +767,12 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   g.add(box(0.12, 0.1, 0.02, ioPorts, onFace(0.1) - 0.045, 0.6, -1.222, false));  // إيثرنت
   g.add(box(0.12, 0.04, 0.02, ioPorts, onFace(0.1) - 0.045, 0.45, -1.222, false)); // صوت
 
-  // 10) منفذا SATA بحرف L عند الحافة العلوية
-  for (const stz of [0.05, 0.24]) {
-    g.add(box(0.05, 0.07, 0.13, black, onFace(0.05), 1.32, stz, false));
-    g.add(box(0.04, 0.025, 0.05, gold, onFace(0.04) - 0.03, 1.32, stz - 0.02, false));
+  // 10) منفذا SATA بحرف L قرب موصل sataData (F3 — كانت على الحافة العلوية بإحداثيات v4)
+  const satY = MOUNTS.sataData[1] - BOARD.center[1]; // محلي -1.30
+  const satZ = MOUNTS.sataData[2] - BOARD.center[2]; // محلي 0.96
+  for (const stz of [satZ, satZ - 0.19]) {
+    g.add(box(0.05, 0.07, 0.13, black, onFace(0.05), satY, stz, false));
+    g.add(box(0.04, 0.025, 0.05, gold, onFace(0.04) - 0.03, satY, stz - 0.02, false));
   }
 
   // 11) 4 رؤوس مراوح pin headers + قابسها
@@ -802,9 +813,9 @@ function buildMotherboard(flags: FlagVisuals): THREE.Group {
   g.add(box(0.09, 0.16, 0.26, mat(0x1d4ed8, 0.35, 0.5), onFace(0.09), 1.05, -0.42, false));
   g.add(box(0.06, 0.1, 0.18, mat(0x0d1116, 0.25, 0.6), onFace(0.06) - 0.05, 1.05, -0.42, false));
 
-  // 16) توجيه v4: ملفات VRM (chokes) مربعة داكنة يسار المقبس
-  for (const chy of [0.32, 0.16, 0.0]) {
-    for (const chz of [-0.92, -0.78]) {
+  // 16) توجيه v4: ملفات VRM (chokes) مربعة داكنة يسار المقبس (F3: نسبية إلى المقبس)
+  for (const chy of [sx - 0.38, sx - 0.54, sx - 0.7]) {
+    for (const chz of [sz - 0.3, sz - 0.16]) {
       const choke = box(0.05, 0.13, 0.13, mat(0x181e26, 0.3, 0.55), onFace(0.05), chy, chz, false);
       g.add(choke);
       g.add(box(0.02, 0.05, 0.05, mat(0x39434e, 0.4, 0.5), onFace(0.02) - 0.04, chy, chz, false));
@@ -1009,7 +1020,10 @@ function buildGpu(flags: FlagVisuals): THREE.Group {
   }
 
   // bracket خلفي: منافذ عرض (2×DP + HDMI) + فتحات
-  g.add(box(0.06, 0.5, 0.12, mat(COLORS.aluminum, 0.8, 0.4), 0, -0.03, -1.3, true));
+  // (V6-G) اسم ثابت — مرجع alignGpuPowerCable لنهاية كابل الشاشة عند غياب GLB
+  const gpuBracket = box(0.06, 0.5, 0.12, mat(COLORS.aluminum, 0.8, 0.4), 0, -0.03, -1.3, true);
+  gpuBracket.name = 'gpu-bracket';
+  g.add(gpuBracket);
   const portMat = mat(0x0d1116, 0.3, 0.6);
   for (const py of [0.06, -0.06]) {
     g.add(box(0.05, 0.1, 0.02, portMat, 0, py - 0.03, -1.372, false));
@@ -1042,7 +1056,9 @@ function buildGpu(flags: FlagVisuals): THREE.Group {
 
   // موصل طاقة 8pin مرفوع على قاعدة رافعة + نقاط إبر ذهبية
   g.add(box(0.2, 0.26, 0.22, shroudMat, -0.28, 0.14, 0.63, false));
+  // (V6-G) اسم ثابت للمقبس — مرجع alignGpuPowerCable عند غياب GLB
   const conn = box(0.16, 0.1, 0.18, mat(COLORS.black, 0.3, 0.5), -0.28, 0.31, 0.63, false);
+  conn.name = 'gpu-power-socket';
   g.add(conn);
   for (let i = 0; i < 4; i++) {
     g.add(box(0.02, 0.015, 0.02, gold, -0.34 + i * 0.04, 0.363, 0.63, false));
@@ -1245,11 +1261,12 @@ function buildAtx24(): THREE.Group {
   }
 
   // كابل من قرب PSU عالمي (1.3,0.75,1.2) عبر (0.9,2.0,1.9) و(1.4,3.0,2.5) إلى الموصل
+  // (F3) النهاية على رأس ATX24 المشتق من MOUNTS.atx24 بدل الإحداثيات القديمة
   g.add(makeCable(cablePoints(MOUNTS.atx24, [
     [1.3, 0.75, 1.2],
     [0.9, 2.0, 1.9],
     [1.4, 3.0, 2.5],
-    [1.7, 3.75, 2.62],
+    [1.7, MOUNTS.atx24[1], MOUNTS.atx24[2]],
   ]), 0.045));
 
   setComponentId(g, 'atx24');
@@ -1308,11 +1325,23 @@ function buildGpuPower(): THREE.Group {
     g.add(wire);
   }
 
-  g.add(makeCable(cablePoints(MOUNTS.gpuPower, [
-    [1.2, 0.7, 1.1],
-    [0.7, 1.4, 2.2],
-    [1.05, 2.32, 2.05],
-  ]), 0.04));
+  // (V6-G F1) كابل PSU→البطاقة: النقطتان الثابتتان مخزنتان فضاء العالم في userData،
+  // والنهاية عند الموصل نفسه — ثم يعاد اشتقاق النهايتين الأخيرتين من البطاقة الجالسة
+  // في alignGpuPowerCable (كان الكابل ينتهي عند [1.05,2.32,2.05] والموصل يطفو بعيدًا)
+  const fixedPts: Array<readonly [number, number, number]> = [
+    [1.2, 0.7, 1.1],   // مخرج من مزود الطاقة
+    [0.55, 1.5, 1.4],  // صعود من يسار الهيكل (خارج جسم البطاقة في المسارين)
+  ];
+  const mount = MOUNTS.gpuPower;
+  const pts: Array<readonly [number, number, number]> = [
+    ...fixedPts,
+    [0.55, mount[1] + 0.3, (fixedPts[1][2] + mount[2]) / 2], // نقطة اقتراب مبدئية فوق البطاقة
+    [mount[0], mount[1], mount[2]],                          // الموصل نفسه
+  ];
+  const cable = makeCable(cablePoints(mount, pts), 0.04);
+  cable.name = 'gpu-power-cable';
+  cable.userData['worldPts'] = fixedPts;
+  g.add(cable);
 
   setComponentId(g, 'gpuPower');
   return g;
@@ -1439,9 +1468,10 @@ function buildSataData(): THREE.Group {
   // موصل الطرف عند منفذ اللوحة
   g.add(box(0.05, 0.09, 0.1, mat(0x8c1d1d, 0.3, 0.55), 0, 0, 0, true, true));
   g.add(box(0.035, 0.07, 0.02, mat(0xc9a23f, 0.9, 0.3), -0.04, 0, -0.02, false));
-  // كابل أحمر رفيع: منفذ اللوحة (1.78,2.2,2.35) → انحناء لطيف → خلفية القرص (1.05,0.8,2.8)
+  // كابل أحمر رفيع: يبدأ من موصل منفذ اللوحة نفسه (MOUNTS.sataData — إصلاح F4:
+  // كان يبدأ من [1.78,2.2,2.35] فينفصل عن موصله بـ0.75) → انحناء → خلفية القرص
   g.add(makeCable(cablePoints(MOUNTS.sataData, [
-    [1.78, 2.2, 2.35],
+    [1.8, 1.45, 2.53],
     [1.6, 1.45, 2.62],
     [1.3, 0.95, 2.66],
     [1.12, 0.8, 2.72],
@@ -1546,11 +1576,13 @@ function buildMonitor(): THREE.Group {
   // ===== 4) كابل الإشارة: من خلف الشاشة → سطح المكتب → خلف الجهاز → منفذ البطاقة =====
   // مجموعة مستقلة عالميًا (يُلغى دوران الأب عليها) لضمان التوجيه الصحيح،
   // ويُخفى/يُظهر من PCScene عبر مرجع 'monitor-cable' (المنطق بلا تغيير).
+  // (V6-G F5) النقاط الثابتة مخزنة في userData ونقطة النهاية (منفذ البطاقة) تعاد
+  // اشتقاقها من البطاقة الجالسة في alignGpuPowerCable — كانت معايرة على بطاقة v3
   const cableGroup = new THREE.Group();
   cableGroup.name = 'monitor-cable';
   cableGroup.rotation.y = -PERIPH.monitorRotY; // إلغاء دوران المجموعة الأم — النقاط إحداثيات عالمية
   const mp = PERIPH.monitorPos;
-  const pts = cablePoints(mp, [
+  const signalPts: Array<readonly [number, number, number]> = [
     [mp[0] - 0.1, 0.28, mp[2] - 0.1],   // دخول من أسفل ظهر الشاشة
     [mp[0] + 0.5, 0.05, mp[2] + 1.1],   // هبوط يمين القاعدة على سطح المكتب
     [mp[0] + 2.4, 0.05, mp[2] - 0.4],   // قوس يمين الشاشة نحو خلف المكتب
@@ -1559,9 +1591,12 @@ function buildMonitor(): THREE.Group {
     [2.4, 0.05, -1.35],                 // امتداد خلف الجهاز (بعيد عن الواجهة)
     [1.28, 0.4, -0.95],                 // بداية الصعود خلف الهيكل
     [1.28, 1.4, -0.7],
-    [1.28, 1.98, 0.02],                 // منفذ DisplayPort على البطاقة
-  ]);
-  cableGroup.add(makeCable(pts, 0.028, 0x14181e));
+  ];
+  const endPts: Array<readonly [number, number, number]> = [...signalPts, [1.28, 1.98, 0.02]];
+  const signal = makeCable(cablePoints(mp, endPts), 0.028, 0x14181e);
+  signal.name = 'monitor-signal-cable';
+  signal.userData['worldPts'] = signalPts;
+  cableGroup.add(signal);
   g.add(cableGroup);
 
   return g;
@@ -1664,6 +1699,10 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   // (V5) استبدال المجسمات الإجرائية بالنماذج الحقيقية (GLB مُحمّلة مسبقًا قبل إنشاء المشهد).
   // الفشل الفردي يُبقي المجسم الإجرائي في مكانه — لا مشهد مكسور أبدًا.
   applyGlbParts(visualResult);
+
+  // (V6-G F1/F5) توحيد موصل طاقة البطاقة وكابل الشاشة على البطاقة الجالسة —
+  // نداء واحد يغطي مسار GLB ومسار الفشل الإجرائي (gpuSeat.gpuBox يُملأ دائمًا)
+  alignGpuPowerCable(visualResult);
 
   return visualResult;
 }

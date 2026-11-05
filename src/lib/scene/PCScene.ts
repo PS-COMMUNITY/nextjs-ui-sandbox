@@ -391,6 +391,13 @@ export class PCScene {
       this.renderer.shadowMap.enabled = wantShadows;
       this.renderer.shadowMap.needsUpdate = true;
       if (this.dirLight) this.dirLight.castShadow = wantShadows;
+      // (إصلاح تدقيق V6-G) تبديل shadowMap.enabled لا يُبطل الخامات تلقائيًا —
+      // بلا إعادة بناء تبقى الظلال القديمة/الغائبة مجمدة حتى يتغير شيء آخر
+      this.scene.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) m.needsUpdate = true;
+      });
     }
   }
 
@@ -400,14 +407,6 @@ export class PCScene {
     if (this.xrayOn === on) return;
     this.xrayOn = on;
     this.refreshShellMaterials();
-  }
-
-  /** (5) فتح/إغلاق الغطاء الجانبي حول مفصلته الخلفية */
-  setPanelOpen(on: boolean, animate?: boolean): void {
-    if (this.blocked) return;
-    this.panelTarget = on ? PANEL_OPEN_ANGLE : 0;
-    if (this.lastState) this.lastState.flags.panelOpen = on;
-    if (animate === false) this.visuals.sidePanel.rotation.y = this.panelTarget;
   }
 
   /** (5) تشغيل/إيقاف العرض التفجيري — يعيد حساب الأهداف من آخر حالة متزامنة */
@@ -514,7 +513,16 @@ export class PCScene {
   /** توجيه مفتاح لوحة المفاتيح الحقيقي إلى النظام الافتراضي — يعيد true إن استُهلك */
   handleMonitorKey(ev: { key: string; code: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }): boolean {
     if (!this.focusMode || !this.vos) return false;
-    if (ev.key === 'Escape') {
+    if (ev.key === 'Escape' || ev.code === 'Escape') {
+      // (V6-G عقد مع VirtualOS) إن كان النظام الافتراضي يملك تركيز الكتابة
+      // (حقل إدخال نشط) يُمرَّر Escape إليه أولًا (إغلاق حوار/إنهاء إدخال)
+      // ولا يخرج من وضع الشاشة — الاختيارية تجعل الكود صالحًا قبل وصول الدالة
+      const v = this.vos as unknown as { hasKeyboardFocus?: () => boolean };
+      if (v?.hasKeyboardFocus?.()) {
+        this.vos.key({ key: ev.key, code: ev.code, ctrl: ev.ctrlKey, shift: ev.shiftKey, alt: ev.altKey });
+        this.drawMonitor(true);
+        return true;
+      }
       // الخروج الآمن من وضع الشاشة (توجيه §4.3)
       this.setFocusMode(false);
       return true;
@@ -1248,6 +1256,13 @@ export class PCScene {
           if (!saved) return;
           std.emissive.setHex(saved.hex);
           std.emissiveIntensity = saved.intensity;
+          // (إصلاح تدقيق V6-G) الإبراز النشط أثناء الإصلاح التقط القيمة الحمراء كـ«أصل» —
+          // نحدّث قيد الاستعادة إلى القيمة الصحية وإلا أعادت فكّ الإبراز التلفًا على قطعة سليمة
+          const hl = this.emissiveOriginals.get(std);
+          if (hl) {
+            hl.hex = saved.hex;
+            hl.intensity = saved.intensity;
+          }
           this.damagedOriginals.delete(std);
         });
         this.damagedIds.delete(id);
@@ -1256,11 +1271,13 @@ export class PCScene {
   }
 
   private startCamTween(toPos: THREE.Vector3, toTarget: THREE.Vector3, dur: number): void {
+    // (إصلاح تدقيق V6-G) استنساخ الهدفين: المتصل قد يمرر مخازن مشتركة (_v1/_v2)
+    // يعيد rayPlaneHit الكتابة فيها أثناء الطيران فيفسد التنعيم الجاري
     this.camTween = {
       fromPos: this.camera.position.clone(),
-      toPos,
+      toPos: toPos.clone(),
       fromTarget: this.controls.target.clone(),
-      toTarget,
+      toTarget: toTarget.clone(),
       t: 0,
       dur,
     };
@@ -1385,8 +1402,6 @@ export class PCScene {
     if (flags.frontPanelPlug) {
       this.plugRecs.push({ flag: 'frontPanelDisconnected', obj: flags.frontPanelPlug, baseX: flags.frontPanelPlug.position.x });
     }
-    // (V6 §3) دوّارات المراوح أُصبحت تديرها منظومة FanSystem المستقلة — لا استنتاج استنباطي هنا
-    void visuals;
   }
 
   // ====================================================================

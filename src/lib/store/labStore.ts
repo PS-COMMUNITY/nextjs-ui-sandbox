@@ -45,6 +45,7 @@ import {
 } from '@/lib/simulation/technicianEngine';
 import {
   loadAll,
+  loadRawMeta,
   saveAll,
   clearAll,
   storageAvailable,
@@ -144,7 +145,6 @@ interface LabStore {
   // الطرفيات
   toggleMonitor: () => void;
   setNotepad: (text: string) => void;  // إدخال حقيقي من حقل نصي في الواجهة
-  typeKey: (ch: string) => void;       // مدخل برمجي (لوحات مفاتيح على الشاشة إن أُضيفت مستقبلًا)
   clearNotepad: () => void;
   setHintsVisible: (v: boolean) => void;
   setAirflow: (v: boolean) => void;
@@ -162,7 +162,6 @@ interface LabStore {
   finishTechReport: () => void;
   // تعلم وحفظ
   startMission: (id: string) => void;
-  finishMissionStep: () => void;
   abandonMission: () => void;
   completeMission: (id: string) => void;
   markLessonRead: (id: string) => void;
@@ -175,31 +174,81 @@ interface LabStore {
 
 // ============ الحفظ المؤجل ============
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistPending: (() => void) | null = null;
+
+function runPersist(get: () => LabStore) {
+  const s = get();
+  if (!s.hydrated) return;
+  const shape: PersistShape = {
+    version: APP_VERSION,
+    simulation: s.sim,
+    tech: s.tech,
+    logs: s.logs,
+    quizScores: s.quizScores,
+    missionsDone: s.missionsDone,
+    lessonsRead: s.lessonsRead,
+    // (إصلاح U10) المهمة النشطة وخطوتها ودفتر النظام تُحفظ أيضًا
+    notepad: s.notepad,
+    activeMissionId: s.activeMissionId,
+    missionStepIndex: s.missionStepIndex,
+    settings: { quality: s.quality },
+    savedAt: Date.now(),
+  };
+  const res = saveAll(shape);
+  if (res.ok) {
+    useLabStore.setState({ saveStatus: { available: true, lastSavedAt: Date.now(), lastErrorAr: null } });
+  } else {
+    useLabStore.setState({ saveStatus: { available: true, lastSavedAt: null, lastErrorAr: res.messageAr } });
+  }
+}
 
 function schedulePersist(get: () => LabStore) {
   if (persistTimer) clearTimeout(persistTimer);
+  persistPending = () => runPersist(get);
   persistTimer = setTimeout(() => {
-    const s = get();
-    if (!s.hydrated) return;
-    const shape: PersistShape = {
-      version: APP_VERSION,
-      simulation: s.sim,
-      tech: s.tech,
-      logs: s.logs,
-      quizScores: s.quizScores,
-      missionsDone: s.missionsDone,
-      lessonsRead: s.lessonsRead,
-      settings: { quality: s.quality },
-      savedAt: Date.now(),
-    };
-    const res = saveAll(shape);
-    if (res.ok) {
-      useLabStore.setState({ saveStatus: { available: true, lastSavedAt: Date.now(), lastErrorAr: null } });
-    } else {
-      useLabStore.setState({ saveStatus: { available: true, lastSavedAt: null, lastErrorAr: res.messageAr } });
-    }
+    persistTimer = null;
+    const fn = persistPending;
+    persistPending = null;
+    fn?.();
   }, 400);
 }
+
+/**
+ * (إصلاح U7) تنفيذ الحفظ المعلق فورًا إن وُجد — يُستدعى عند pagehide وعند إخفاء
+ * التبويب (visibilitychange) حتى لا يضيع آخر 400ms من التقدم عند إغلاق الصفحة.
+ * السلوك المؤجل الافتراضي (400ms) يبقى كما هو في بقية الأحوال.
+ */
+export function flushPersist(): void {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  const fn = persistPending;
+  persistPending = null;
+  fn?.();
+}
+
+// تسجيل مستمعي التفريغ مرة واحدة فقط (حماية SSR وHMR بعلم على مستوى الوحدة)
+let persistFlushBound = false;
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && !persistFlushBound) {
+  persistFlushBound = true;
+  window.addEventListener('pagehide', () => flushPersist());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPersist();
+  });
+}
+
+// (إصلاح U6) مؤقت إعادة التشغيل الدافئة — يُلغى إن حصل أي إطفاء/إعادة تهيئة أثناء الانتظار
+let warmRestartTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelWarmRestart(): void {
+  if (warmRestartTimer) {
+    clearTimeout(warmRestartTimer);
+    warmRestartTimer = null;
+  }
+}
+
+// (إصلاح U4) تُعرض رسالة تجاهل الحفظ التالف مرة واحدة كحد أقصى لكل جلسة تطبيق
+let discardedSaveNotified = false;
 
 /** اسم عربي قصير للقطعة (للرسائل) */
 function nameOf(id: ComponentId): string {
@@ -253,11 +302,22 @@ export const useLabStore = create<LabStore>((set, get) => ({
         quizScores: data.quizScores ?? {},
         missionsDone: data.missionsDone ?? [],
         lessonsRead: data.lessonsRead ?? [],
+        // (إصلاح U10) استعادة المهمة النشطة وخطوتها ودفتر النظام من الحفظ
+        notepad: data.notepad ?? '',
+        activeMissionId: data.activeMissionId ?? null,
+        missionStepIndex: data.missionStepIndex ?? 0,
         quality: data.settings?.quality ?? 'medium',
         hydrated: true,
         saveStatus: { available: true, lastSavedAt: data.savedAt, lastErrorAr: null },
       });
     } else {
+      // (إصلاح U4) كان فشل التحميل صامتًا: إن وُجد حفظ سابق فعلًا لكنه تالف أو من
+      // إصدار غير مدعوم، نُعلم المستخدم مرة واحدة بدل التجاهل. لا استيراد تلقائي.
+      const meta = loadRawMeta();
+      if (meta.exists && !discardedSaveNotified) {
+        discardedSaveNotified = true;
+        toast.error('تم تجاهل حفظ سابق بسبب تعارض إصدار أو بيانات غير صالحة — بدأنا جلسة جديدة');
+      }
       set({ hydrated: true });
     }
   },
@@ -422,20 +482,10 @@ export const useLabStore = create<LabStore>((set, get) => ({
     schedulePersist(get);
   },
 
-  setNotepad: (text) => set({ notepad: text.slice(-400) }),
-
-  typeKey: (ch) => {
-    const s = get();
-    if (!s.notepad.length && ch.length === 1) {
-      // أول حرف — لا شيء خاص
-    }
-    let next = s.notepad;
-    if (ch === 'BACK') next = next.slice(0, -1);
-    else if (ch === 'SPACE') next = `${next} `;
-    else if (ch === 'ENTER') next = `${next}\n`;
-    else if (ch === 'CLR') next = '';
-    else next = next + ch;
-    set({ notepad: next.slice(-400) });
+  setNotepad: (text) => {
+    set({ notepad: text.slice(-400) });
+    // (إصلاح U10) دفتر النظام الآن جزء من الحفظ — يُجدول حفظًا مؤجلًا مع كل كتابة
+    schedulePersist(get);
   },
 
   clearNotepad: () => set({ notepad: '' }),
@@ -458,9 +508,10 @@ export const useLabStore = create<LabStore>((set, get) => ({
 
   exitSetup: () => {
     const s = get();
+    cancelWarmRestart(); // (إصلاح U6) إعادة تشغيل دافئة معلّقة لا معنى لها بعد الخروج من المعالج
     // الخروج من المعالج: إخراج الوسيط وإعادة تشغيل باردة (بدون تغيير النظام)
-    const sim = { ...s.sim, usbMedia: null };
-    sim.flags.powerOn = false;
+    // (إصلاح U2) تحديث غير مُطبِع: كان يطفئ علم powerOn على كائن الأعلام المشترك
+    const sim: SimulationState = { ...s.sim, usbMedia: null, flags: { ...s.sim.flags, powerOn: false } };
     set({ sim, bootStartedAt: null });
     s.logEvent('other', 'الخروج من معالج التثبيت — إعادة تشغيل باردة', true);
     schedulePersist(get);
@@ -555,9 +606,18 @@ export const useLabStore = create<LabStore>((set, get) => ({
 
   formatPartition: (diskId, partId) => {
     const s = get();
+    const target = s.sim.disks.find((d) => d.id === diskId)?.parts.find((p) => p.id === partId);
     const disks = s.sim.disks.map((d) => (d.id === diskId ? { ...d, parts: d.parts.map((p) => (p.id === partId ? { ...p, usedGB: 0, hasOs: false } : p)) } : d));
-    set({ sim: { ...s.sim, disks } });
-    s.logEvent('other', `تهيئة قسم ${partId} (محاكاة)`, true);
+    // (إصلاح U3) التهيئة تمسح النظام إن كان مثبتًا على القسم — نفس دلالات deletePartition
+    const os = target?.hasOs ? { ...s.sim.os, installed: null, edition: null } : s.sim.os;
+    set({ sim: { ...s.sim, disks, os } });
+    s.logEvent(
+      'other',
+      `تهيئة قسم ${partId} (محاكاة)`,
+      true,
+      target?.hasOs ? 'تهيئة القسم تمسح نظام التشغيل' : 'تأكيد تعليمي مطلوب — لا عمليات على أقراص حقيقية',
+    );
+    if (target?.hasOs) toast.warning('تهيئة القسم تمسح نظام التشغيل');
     schedulePersist(get);
   },
 
@@ -623,16 +683,19 @@ export const useLabStore = create<LabStore>((set, get) => ({
       toast.error('الجهاز مطفأ — شغّله أولًا من زر الطاقة.');
       return;
     }
-    const sim = { ...s.sim };
-    sim.flags.powerOn = false;
+    cancelWarmRestart(); // (إصلاح U6) مؤقت سابق معلّق يُلغى — لا تداخل بين إعادتي تشغيل
+    // (إصلاح U2) تحديث غير مُطبِع: كان يطفئ علم powerOn على كائن الأعلام المشترك
+    const sim: SimulationState = { ...s.sim, flags: { ...s.sim.flags, powerOn: false } };
     set({ sim, bootStartedAt: null });
     s.logEvent('flag', 'إعادة تشغيل دافئة — إيقاف مؤقت ثم إقلاع تلقائي', true);
     schedulePersist(get);
-    setTimeout(() => {
+    warmRestartTimer = setTimeout(() => {
+      warmRestartTimer = null;
       const st = get();
-      if (st.sim.flags.powerOn) return; // تشغيل يدوي حصل في الأثناء — لا تدخل
-      const sim2 = { ...st.sim };
-      sim2.flags.powerOn = true;
+      // (إصلاح U6) حارس: لا نُقلع إلا إذا كان المتجر ما زال ينتظر مرحلة إعادة التشغيل
+      // (لم يشغّل المستخدم الجهاز يدويًا في الأثناء)
+      if (st.sim.flags.powerOn) return;
+      const sim2: SimulationState = { ...st.sim, flags: { ...st.sim.flags, powerOn: true } };
       set({ sim: sim2, bootStartedAt: Date.now() });
       st.logEvent('flag', 'اكتملت إعادة التشغيل — بدء الإقلاع من جديد', true);
       schedulePersist(get);
@@ -657,9 +720,10 @@ export const useLabStore = create<LabStore>((set, get) => ({
     const s = get();
     const sc = SCENARIOS.find((x) => x.id === scenarioId);
     if (!sc) return;
-    const sim = applyScenario(s.sim, scenarioId);
+    const faultSim = applyScenario(s.sim, scenarioId);
     // إطفاء الجهاز عند تطبيق أي سيناريو — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
-    sim.flags.powerOn = false;
+    // (إصلاح U2) تحديث غير مُطبِع للأعلام بدل التعديل على الكائن المعاد من المحرك
+    const sim: SimulationState = { ...faultSim, flags: { ...faultSim.flags, powerOn: false } };
     set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
     s.logEvent('scenario', `سيناريو: ${sc.titleAr}`, true, sc.faultAr);
     toast.success(`طُبّق سيناريو «${sc.titleAr}» — ${sc.faultAr}`);
@@ -670,9 +734,10 @@ export const useLabStore = create<LabStore>((set, get) => ({
     const s = get();
     const fault = FAULTS.find((f) => f.id === faultId);
     if (!fault) return;
-    const sim = applyFault(s.sim, faultId);
+    const faultSim = applyFault(s.sim, faultId);
     // إطفاء الجهاز عند تطبيق أي عطل — العمل على جهاز بارد، ويمنع شعار بدء متجمدًا
-    sim.flags.powerOn = false;
+    // (إصلاح U2) تحديث غير مُطبِع للأعلام بدل التعديل على الكائن المعاد من المحرك
+    const sim: SimulationState = { ...faultSim, flags: { ...faultSim.flags, powerOn: false } };
     set({ sim, lastDiagnosis: null, selected: null, bootStartedAt: null });
     s.logEvent('scenario', `عطل تعليمي ${fault.id}: ${fault.titleAr}`, true, fault.faultAr);
     toast.success(`طُبّق العطل ${fault.id} — ${fault.titleAr}`);
@@ -680,6 +745,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   },
 
   resetSimulation: () => {
+    cancelWarmRestart(); // (إصلاح U6) إعادة تشغيل معلّقة لا معنى لها بعد إعادة التهيئة
     set({
       sim: initialSimulationState(),
       lastDiagnosis: null,
@@ -771,8 +837,6 @@ export const useLabStore = create<LabStore>((set, get) => ({
     schedulePersist(get);
   },
 
-  finishMissionStep: () => set({ missionStepIndex: get().missionStepIndex + 1 }),
-
   abandonMission: () => {
     set({ activeMissionId: null, missionStepIndex: 0 });
     schedulePersist(get);
@@ -808,6 +872,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   },
 
   resetEverything: () => {
+    cancelWarmRestart(); // (إصلاح U6) إعادة تشغيل معلّقة لا معنى لها بعد مسح كل شيء
     const res = clearAll();
     set({
       sim: initialSimulationState(),
@@ -838,7 +903,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
 
   importBackupFromJson: (json) => {
     try {
-      const parsed = JSON.parse(json) as PersistShape;
+      // Partial: ملف خارجي قد يغيب منه أي حقل (خصوصًا نسخ قديمة) — كل الاستخدامات محمية بـ ??
+      const parsed = JSON.parse(json) as Partial<PersistShape>;
       if (!parsed || typeof parsed !== 'object' || !parsed.simulation || !parsed.simulation.flags || !parsed.simulation.parts) {
         throw new Error('bad-shape');
       }
@@ -855,6 +921,10 @@ export const useLabStore = create<LabStore>((set, get) => ({
         quizScores: parsed.quizScores ?? {},
         missionsDone: parsed.missionsDone ?? [],
         lessonsRead: parsed.lessonsRead ?? [],
+        // (إصلاح U10) حقول جديدة بقيم افتراضية آمنة — النسخ الأقدم تُحمّل دون مشاكل
+        notepad: parsed.notepad ?? '',
+        activeMissionId: parsed.activeMissionId ?? null,
+        missionStepIndex: parsed.missionStepIndex ?? 0,
         lastDiagnosis: null,
       });
       toast.success('استُوردت النسخة الاحتياطية بنجاح');

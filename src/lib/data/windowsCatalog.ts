@@ -231,10 +231,15 @@ export function partitionConflictMessageAr(boot: BootMode, style: PartStyle): st
 /** بناء الأقسام التلقائية عند اختيار «جديد» على قرص غير مهيأ — حسب النمط */
 export function autoPartitionPlan(style: PartStyle, sizeGB: number): Array<{ label: string; kind: 'efi' | 'msr' | 'recovery' | 'primary'; fs: 'ntfs' | 'fat32' | 'none'; sizeGB: number; letter: string | null }> {
   if (style === 'gpt') {
+    // (ميزة B11) خطة GPT تضيف قسم استرداد 0.75GB — بترتيب EFI ← MSR ← الأساسي ← الاسترداد
+    // (الاسترداد أخيرًا كالسلوك الشائع في المثبّت الحقيقي؛ الاختيار في completeInstall بالنوع
+    // kind === 'primary' لا بالترتيب فيبقى صحيحًا)
+    const overheadGB = 0.1 + 0.016 + 0.75;
     return [
       { label: 'EFI System Partition', kind: 'efi', fs: 'fat32', sizeGB: 0.1, letter: null },
       { label: 'Microsoft Reserved', kind: 'msr', fs: 'none', sizeGB: 0.016, letter: null },
-      { label: 'Primary', kind: 'primary', fs: 'ntfs', sizeGB: Math.max(1, sizeGB - 0.2), letter: null },
+      { label: 'Primary', kind: 'primary', fs: 'ntfs', sizeGB: Math.max(1, sizeGB - overheadGB), letter: null },
+      { label: 'استرداد', kind: 'recovery', fs: 'ntfs', sizeGB: 0.75, letter: null },
     ];
   }
   return [{ label: 'Primary', kind: 'primary', fs: 'ntfs', sizeGB, letter: null }];

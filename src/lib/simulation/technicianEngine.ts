@@ -9,8 +9,8 @@
  */
 
 import { COMPONENT_IDS, isInstalled, SECURE_FLAGS } from '../types';
-import type { ComponentId, MachineFlag, SimulationState } from '../types';
-import { FAULTS } from '../data/faults';
+import type { MachineFlag, SimulationState } from '../types';
+import { FAULTS, codeLabelAr } from '../data/faults';
 import { FLAG_INFO } from './machineFlags';
 import { runPost } from './postEngine';
 
@@ -19,7 +19,7 @@ export { getFault } from '../data/faults';
 export type TechStage = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 export interface TechSession {
-  scenarioId: string;          // معرّف العطل F01..F14 المختار في بطاقة الطلب
+  scenarioId: string;          // معرّف العطل F01..F16 المختار في بطاقة الطلب
   stage: TechStage;
   orderRead: boolean;          // مرحلة 1: قُرئت بطاقة الطلب
   // مرحلة 2: السلامة
@@ -186,15 +186,19 @@ export function stageGate(stage: TechStage, session: TechSession, sim: Simulatio
       if (missing) blockers.push('قطعة ما زالت في صينية القطع — أعد تركيبها');
       if (sim.flags.panelOpen) blockers.push('الغطاء الجانبي مفتوح — أغلقه');
       if (blockers.length === 0) {
-        // (إصلاح تدقيق V6) فحص كل مثبتات القطع — كان يفحص gpu/ram/cpu فقط ويتجاهل
-        // براغي PSU/المراوح/اللوحة/قرص M.2 (SECURE_FLAGS الكاملة)
-        const openEntry = (Object.entries(SECURE_FLAGS) as Array<[ComponentId, MachineFlag[]]>).find(
-          ([, flags]) => flags.some((f) => sim.flags[f]),
-        );
-        if (openEntry) {
-          const openFlag = openEntry[1].find((f) => sim.flags[f]);
-          const label = openFlag ? FLAG_INFO[openFlag]?.labelAr ?? openFlag : 'مثبتات القطع';
-          blockers.push(`${label} — أغلق كل مزالج وبراغي القطع المفكوكة`);
+        // (إصلاح S5) فحص كل مثبتات القطع — SECURE_FLAGS الكاملة (البطاقة/الذاكرة/المعالج/
+        // قرص M.2/المراوح/مزود الطاقة/اللوحة الأم) — وجمع كل المزالج والبراغي المفتوحة
+        // في رسالة واحدة (بحد أقصى ٥ عناصر ثم «وغيرها»)، بدل الوقوف عند أول عنصر فقط.
+        const openLabels: string[] = [];
+        for (const flags of Object.values(SECURE_FLAGS) as MachineFlag[][]) {
+          for (const f of flags) {
+            if (sim.flags[f]) openLabels.push(FLAG_INFO[f]?.labelAr ?? f);
+          }
+        }
+        if (openLabels.length > 0) {
+          const shown = openLabels.slice(0, 5).join('، ');
+          const suffix = openLabels.length > 5 ? '، وغيرها' : '';
+          blockers.push(`المزلاجات/البراغي غير مثبتة: ${shown}${suffix}`);
         }
       }
       return blockers.length === 0
@@ -207,7 +211,9 @@ export function stageGate(stage: TechStage, session: TechSession, sim: Simulatio
       if (!sim.flags.powerOn || !sim.flags.acConnected) blockers.push('الجهاز غير مشغّل — شغّله من المختبر');
       else {
         const code = runPost(sim).code;
-        if (code !== 'POST_PASS_BOOT_OK') blockers.push(`نتيجة POST الحالية: ${code} — أكمل الإصلاح حتى يعمل النظام`);
+        // (إصلاح S4) تُعرض النتيجة بتسميتها العربية من codeLabelAr لا بمعرّف الإنجليزي الخام.
+        if (code !== 'POST_PASS_BOOT_OK')
+          blockers.push(`نتيجة POST الحالية: ${codeLabelAr(code)} — المطلوب: نجاح POST وإقلاع كامل`);
       }
       return blockers.length === 0
         ? pass('POST ناجح والنظام الافتراضي يعمل — ولّد تقرير التسليم.')

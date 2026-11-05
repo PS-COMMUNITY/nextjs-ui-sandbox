@@ -9,6 +9,7 @@
 import { useLabStore } from '../store/labStore';
 import { isInstalled } from '../types';
 import type { ComponentId, VirtualDisk, VirtualPartition } from '../types';
+import { MBR_MAX_DISK_GB } from '../data/windowsCatalog';
 import { OS_COLORS, roundRect, type VosAppDef, type VirtualOS, type VosKeyEvent, type VosWindow } from './vos';
 
 // ============ أدوات مشتركة ============
@@ -36,15 +37,24 @@ function btn(
   }
 }
 
-interface TextboxState { text: string; }
+interface TextboxState { text: string; __tbId?: number; }
+
+/** (إصلاح B3) عدّاد هويات مربعات النص — هوية ثابتة تُخزن مع حالة الصندوق بدل هوية الإغلاق */
+let textboxIdCounter = 1;
+export function nextTextboxId(): number {
+  return textboxIdCounter++;
+}
 
 function textbox(
   os: VirtualOS, ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   state: TextboxState,
-  opts: { mono?: boolean; onEnter?: () => void; placeholder?: string; autoFocus?: boolean } = {},
+  opts: { mono?: boolean; onEnter?: () => void; placeholder?: string; autoFocus?: boolean; winId?: string | null; focusId?: number } = {},
 ): void {
-  const focused = os.focusedTextbox?.get === (() => state.text);
+  // (إصلاح B3) المقارنة بهوية رقمية ثابتة — كانت `os.focusedTextbox?.get === (() => state.text)`
+  // تنشئ إغلاقًا جديدًا كل إطار فتفشل المقارنة دائمًا.
+  const focusId = opts.focusId ?? (state.__tbId ??= textboxIdCounter++);
+  const focused = os.focusedTextbox?.id === focusId;
   const hovered = os.hoverAt(x, y, w, h);
   ctx.fillStyle = OS_COLORS.inputBg;
   roundRect(ctx, x, y, w, h, 6);
@@ -67,12 +77,7 @@ function textbox(
   }
   ctx.restore();
   const focus = (): void => {
-    os.focusedTextbox = {
-      get: () => state.text,
-      set: (t) => { state.text = t; },
-      onEnter: opts.onEnter,
-    };
-    os.dirty = true;
+    os.focusTextbox({ winId: opts.winId ?? null, get: () => state.text, set: (t) => { state.text = t; }, onEnter: opts.onEnter });
   };
   os.addRect('custom', x, y, w, h, { onClick: focus }, 'text');
   if (opts.autoFocus && !os.focusedTextbox) focus();
@@ -190,8 +195,23 @@ const explorerApp: VosAppDef = {
     }
     const items = node.children ?? [];
     const rowH = 30;
-    let iy = listY + 8;
-    for (const item of items) {
+    // (ميزة B9) إطار عرض للقائمة مع تمرير بالعجلة: إزاحة من أعلى القائمة، مثبّتة ضمن الحدود
+    const listTop = listY + 8;
+    const listBottom = h - 26;
+    const visibleRows = Math.max(1, Math.floor((listBottom - listTop) / rowH));
+    const maxScroll = Math.max(0, items.length - visibleRows);
+    if (typeof win.state['scroll'] !== 'number') win.state['scroll'] = 0;
+    const scroll = Math.min(Math.max(0, Math.round(win.state['scroll'] as number)), maxScroll);
+    win.state['scroll'] = scroll;
+    const scrollBy = (dy: number): void => {
+      const cur = (win.state['scroll'] as number) ?? 0;
+      win.state['scroll'] = Math.min(Math.max(0, cur + (dy > 0 ? 1 : -1)), maxScroll);
+      os.dirty = true;
+    };
+    // مستطيل تمرير خلف الصفوف (أدنى أولوية) — العجلة فوق الفراغات تعمل أيضًا
+    os.addRect('scroll', 10, listTop, w - 20, Math.max(0, listBottom - listTop), { onScroll: scrollBy }, 'default', 19);
+    let iy = listTop;
+    for (const item of items.slice(scroll, scroll + visibleRows)) {
       const hovered = os.hoverAt(10, iy, w - 20, rowH);
       if (sel === item.name || hovered) {
         ctx.fillStyle = sel === item.name ? OS_COLORS.rowSelect : OS_COLORS.rowHover;
@@ -209,6 +229,7 @@ const explorerApp: VosAppDef = {
       const captured = item;
       os.addRect('row', 10, iy, w - 20, rowH, {
         onClick: () => { win.state['sel'] = captured.name; os.dirty = true; },
+        onScroll: scrollBy,
         onDbl: () => {
           if (captured.kind === 'folder') { path.push(captured.name); win.state['sel'] = null; os.dirty = true; }
           else {
@@ -222,6 +243,14 @@ const explorerApp: VosAppDef = {
     if (items.length === 0) {
       ctx.fillStyle = OS_COLORS.dim;
       ctx.fillText('المجلد فارغ', 20, listY + 24);
+    }
+    // (ميزة B9) مؤشر تمرير خفيف
+    if (maxScroll > 0) {
+      ctx.fillStyle = OS_COLORS.dim;
+      ctx.font = '10.5px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(`▲▼ ${scroll}/${maxScroll}`, w - 14, h - 10);
+      ctx.textAlign = 'left';
     }
   },
 };
@@ -244,7 +273,16 @@ const notepadApp: VosAppDef = {
       win.state['text'] = (win.state['content'] as string) ?? '';
       win.state['saved'] = (win.state['content'] as string) ?? '';
     }
-    const st = win.state as { text: string; saved: string };
+    const st = win.state as { text: string; saved: string; scroll: number };
+    if (typeof win.state['scroll'] !== 'number') win.state['scroll'] = 0;
+    // (ميزة B13) مزامنة عكسية: نص المفكرة داخل النظام الافتراضي ← المتجر.
+    // حارسان ضد الحلقة (store→scene→store): فقط عند التفاوت الفعلي، وفقط عندما تكون
+    // نافذة المفكرة هي الأعلى تركيزًا (نفس شرط استقبال الكتابة).
+    const syncStore = (): void => {
+      if (!(os.windows.length > 0 && win.z === Math.max(...os.windows.map((x) => x.z)))) return;
+      const s2 = useLabStore.getState();
+      if (s2.notepad !== st.text) s2.setNotepad(st.text);
+    };
     const top = panelHeader(ctx, w, 'المفكرة — الكتابة بلوحة المفاتيح الحقيقية', 'ملف: حفظ يكتب في Documents — Enter/Backspace/الأسهم تعمل داخل الشاشة المجسمة');
 
     btn(os, ctx, 14, top, 84, 26, 'حفظ في Documents', () => {
@@ -260,8 +298,8 @@ const notepadApp: VosAppDef = {
       st.saved = st.text;
       os.notify('تم الحفظ', `الحفظ تعليمي داخل المحاكاة: Documents\\${name}`);
     }, { small: true });
-    btn(os, ctx, 106, top, 56, 26, 'جديد', () => { st.text = ''; os.focusedTextbox = null; os.dirty = true; }, { small: true });
-    btn(os, ctx, 170, top, 56, 26, 'مسح', () => { st.text = ''; os.dirty = true; }, { small: true });
+    btn(os, ctx, 106, top, 56, 26, 'جديد', () => { st.text = ''; st.scroll = 0; os.focusedTextbox = null; syncStore(); os.dirty = true; }, { small: true });
+    btn(os, ctx, 170, top, 56, 26, 'مسح', () => { st.text = ''; st.scroll = 0; syncStore(); os.dirty = true; }, { small: true });
 
     // منطقة النص متعددة الأسطر
     const ty = top + 38;
@@ -274,10 +312,16 @@ const notepadApp: VosAppDef = {
     ctx.stroke();
 
     const lines = st.text.split('\n');
+    // (ميزة B9) إطار عرض متعدد الأسطر مع تمرير بالعجلة: الإزاحة عدد الأسطر المخفية من الأسفل،
+    // والكتابة تعيد العرض إلى النهاية تلقائيًا.
+    const visibleLines = Math.max(1, Math.floor((th - 16) / 19));
+    const maxScroll = Math.max(0, lines.length - visibleLines);
+    st.scroll = Math.min(Math.max(0, Math.round(st.scroll)), maxScroll);
+    const startLine = Math.max(0, lines.length - st.scroll - visibleLines);
     ctx.fillStyle = OS_COLORS.text;
     ctx.font = '13.5px sans-serif';
     let ly = ty + 22;
-    for (const line of lines.slice(-Math.floor((th - 16) / 19))) {
+    for (const line of lines.slice(startLine, startLine + visibleLines)) {
       ctx.fillText(line, 20, ly);
       ly += 19;
     }
@@ -288,19 +332,23 @@ const notepadApp: VosAppDef = {
     }
 
     // توجيه الكتابة: التطبيق النشط يلتقط المفاتيح (النقر داخل المنطقة يفعّل التركيز)
-    const areaState: TextboxState = { text: st.text };
     const keyHandler = (ev: VosKeyEvent): boolean => {
-      if (ev.key === 'Backspace') { st.text = st.text.slice(0, -1); os.dirty = true; return true; }
-      if (ev.key === 'Enter') { st.text += '\n'; os.dirty = true; return true; }
-      if (ev.key === 'Tab') { st.text += '    '; os.dirty = true; return true; }
+      if (ev.key === 'Backspace') { st.text = st.text.slice(0, -1); st.scroll = 0; syncStore(); os.dirty = true; return true; }
+      if (ev.key === 'Enter') { st.text += '\n'; st.scroll = 0; syncStore(); os.dirty = true; return true; }
+      if (ev.key === 'Tab') { st.text += '    '; st.scroll = 0; syncStore(); os.dirty = true; return true; }
       if (ev.key.length === 1 && !ev.ctrl && !ev.alt && !ev.meta) {
         st.text += ev.shift ? ev.key.toUpperCase() : ev.key;
+        st.scroll = 0;
+        syncStore();
         os.dirty = true;
         return true;
       }
       return false;
     };
-    os.addRect('custom', 10, ty, w - 20, th, { onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; } }, 'text');
+    os.addRect('custom', 10, ty, w - 20, th, {
+      onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; },
+      onScroll: (dy) => { st.scroll = Math.min(Math.max(0, st.scroll + (dy < 0 ? 1 : -1)), maxScroll); os.dirty = true; },
+    }, 'text');
     // التركيز الافتراضي: نافذة المفكرة المركزة تستقبل الكتابة مباشرة
     if (os.windows.length > 0 && win.z === Math.max(...os.windows.map((x) => x.z))) {
       os.ui.keyHandler = keyHandler;
@@ -308,6 +356,12 @@ const notepadApp: VosAppDef = {
     ctx.fillStyle = OS_COLORS.dim;
     ctx.font = '11.5px sans-serif';
     ctx.fillText(`${st.text.length} حرف${st.text !== st.saved ? ' — غير محفوظ' : ''}`, 14, h - 10);
+    // (ميزة B9) مؤشر تمرير خفيف
+    if (maxScroll > 0) {
+      ctx.textAlign = 'right';
+      ctx.fillText(`▲▼ ${maxScroll - st.scroll}/${maxScroll}`, w - 14, h - 10);
+      ctx.textAlign = 'left';
+    }
   },
 };
 
@@ -335,15 +389,21 @@ const cmdApp: VosAppDef = {
       win.state['input'] = '';
       win.state['cwd'] = 'C:\\Users\\Student';
     }
-    const st = win.state as unknown as { lines: string[]; input: string; cwd: string };
+    const st = win.state as unknown as { lines: string[]; input: string; cwd: string; scroll: number };
+    if (typeof win.state['scroll'] !== 'number') win.state['scroll'] = 0;
 
     const maxLines = Math.floor((h - 60) / 18);
+    // (ميزة B9) تمرير سجل الأوامر بالعجلة: الإزاحة عدد الأسطر المخفية من الأسفل (0 = النهاية الحية)
+    const maxScroll = Math.max(0, st.lines.length + 1 - maxLines); // ‎+1 لسطر الإدخال
+    st.scroll = Math.min(Math.max(0, Math.round(st.scroll)), maxScroll);
     ctx.fillStyle = '#0a0f14';
     roundRect(ctx, 0, 0, w, h, 0);
     ctx.fill();
     ctx.font = '13px monospace';
+    const histStart = Math.max(0, st.lines.length - st.scroll - maxLines);
+    const histEnd = st.lines.length - st.scroll;
     let y = 22;
-    for (const line of st.lines.slice(-maxLines)) {
+    for (const line of st.lines.slice(histStart, histEnd)) {
       ctx.fillStyle = line.startsWith('!!') ? '#e35d5d' : line.startsWith('OK') || line.includes('مكتمل') ? '#34d399' : '#c9d6e4';
       ctx.fillText(line, 12, y);
       y += 18;
@@ -362,6 +422,7 @@ const cmdApp: VosAppDef = {
       const cmdLine = st.input.trim();
       st.lines.push(`${st.cwd}> ${cmdLine}`);
       st.input = '';
+      st.scroll = 0; // (ميزة B9) أمر جديد يعيد العرض إلى النهاية
       if (cmdLine) runCommand(os, win!, st, cmdLine);
       os.dirty = true;
     };
@@ -376,13 +437,24 @@ const cmdApp: VosAppDef = {
       }
       return false;
     };
-    os.addRect('custom', 0, 0, w, h, { onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; } }, 'text');
+    os.addRect('custom', 0, 0, w, h, {
+      onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; },
+      onScroll: (dy) => { st.scroll = Math.min(Math.max(0, st.scroll + (dy < 0 ? 2 : -2)), maxScroll); os.dirty = true; },
+    }, 'text');
     if (win.z === Math.max(...os.windows.map((x) => x.z))) {
       os.ui.keyHandler = keyHandler;
     }
     ctx.fillStyle = '#4a5a68';
     ctx.font = '11.5px sans-serif';
     ctx.fillText('Sandbox تعليمي: help • dir • cd • ver • systeminfo • ipconfig • driverquery • diskpart • sfc • chkdsk • exit', 12, h - 10);
+    // (ميزة B9) مؤشر تمرير خفيف
+    if (maxScroll > 0) {
+      ctx.fillStyle = '#4a5a68';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`▲▼ ${maxScroll - st.scroll}/${maxScroll}`, w - 12, h - 10);
+      ctx.textAlign = 'left';
+    }
   },
 };
 
@@ -399,7 +471,7 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
         '  dir, cd <folder>, type <file.txt>',
         '  driverquery, diskpart, tasklist',
         '  sfc /scannow, chkdsk C:',
-        '  bootrec /fixmbr | /fixboot | /rebuildbcd   (فقط من بيئة الاسترداد)',
+        '  bootrec /fixmbr | /fixboot | /scanos | /rebuildbcd   (فقط من بيئة الاسترداد)',
         '  shutdown /r — إعادة تشغيل الجهاز الافتراضي, exit');
       break;
     case 'cls':
@@ -506,8 +578,21 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
         useLabStore.getState().repairBcd();
         out(`OK: ${opt} completed successfully. (محاكاة تعليمية)`,
           'أعد تشغيل الجهاز الآن — shutdown /r');
+      } else if (opt === '/scanos') {
+        // (ميزة B5) فحص أقراص المحاكاة بحثًا عن أقسام عليها نظام مثبت (hasOs)
+        let found = 0;
+        for (const d of store.sim.disks) {
+          const diskNo = d.id === 'm2-1' ? 0 : 1;
+          d.parts.forEach((p, i) => {
+            if (p.hasOs) {
+              found++;
+              out(`تم العثور على تثبيت Windows على القرص ${diskNo} القسم ${i + 1} (${store.sim.os.installed ?? 'Windows'})`);
+            }
+          });
+        }
+        if (found === 0) out('لم يتم العثور على أنظمة تشغيل');
       } else {
-        out('الاستخدام: bootrec /fixmbr | /fixboot | /rebuildbcd | /scanos');
+        out('الاستخدام: bootrec /fixmbr | /fixboot | /scanos | /rebuildbcd');
       }
       break;
     }
@@ -807,6 +892,11 @@ function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingConte
     ctx.fillStyle = '#eab308';
     ctx.font = '12px sans-serif';
     ctx.fillText(style === 'gpt' ? 'GPT: مطلوب للإقلاع UEFI (يدعم أقراصًا أكبر وأقسامًا أكثر).' : 'MBR: للإقلاع BIOS/Legacy — حد 2TB و 4 أقسام رئيسية.', dx + 16, dy + 122);
+    // (ميزة B12) تحذير حد عنونة MBR على الأقراص الكبيرة
+    if (style === 'mbr' && disk.sizeGB > MBR_MAX_DISK_GB) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.fillText(`أقراص MBR تدعم حتى ${MBR_MAX_DISK_GB} جيجابايت فقط — سيتم استخدام أول ${MBR_MAX_DISK_GB} جيجابايت.`, dx + 16, dy + 140);
+    }
     btn(os, ctx, dx + 16, dy + dh - 44, 120, 32, 'تهيئة الآن', () => {
       useLabStore.getState().initDisk(disk.id, style === 'gpt' ? 'gpt' : 'mbr');
       os.notify('تمت تهيئة القرص', `${disk.id}: نمط ${style.toUpperCase()} (محاكاة تعليمية)`);
@@ -816,15 +906,18 @@ function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingConte
   } else if (dialog.kind === 'newvol' && disk) {
     if (typeof win.state['nvSize'] !== 'string') win.state['nvSize'] = String(Math.floor(disk.sizeGB / 2));
     if (typeof win.state['nvFs'] !== 'string') win.state['nvFs'] = 'ntfs';
+    // (ميزة B12) سقف MBR: على قرص MBR لا يُعنون فعليًا فوق 2048 جيجابايت
+    const capGB = disk.style === 'mbr' ? Math.min(disk.sizeGB, MBR_MAX_DISK_GB) : disk.sizeGB;
     const total = disk.parts.reduce((a, p) => a + p.sizeGB, 0);
-    const unalloc = Math.max(0, disk.sizeGB - total);
+    const unalloc = Math.max(0, capGB - total);
     ctx.fillStyle = OS_COLORS.text;
     ctx.font = 'bold 15px sans-serif';
     ctx.fillText(`قسم جديد — المساحة المتاحة ${unalloc.toFixed(0)} GB`, dx + 16, dy + 28);
     ctx.fillStyle = OS_COLORS.dim;
     ctx.font = '12.5px sans-serif';
     ctx.fillText('الحجم (GB):', dx + 16, dy + 54);
-    textbox(os, ctx, dx + 110, dy + 38, 110, 28, { get text() { return win.state['nvSize'] as string; }, set text(t: string) { win.state['nvSize'] = t.replace(/[^0-9]/g, ''); } }, { mono: true, autoFocus: true });
+    if (typeof win.state['nvTbId'] !== 'number') win.state['nvTbId'] = nextTextboxId();
+    textbox(os, ctx, dx + 110, dy + 38, 110, 28, { get text() { return win.state['nvSize'] as string; }, set text(t: string) { win.state['nvSize'] = t.replace(/[^0-9]/g, ''); } }, { mono: true, autoFocus: true, winId: win.id, focusId: win.state['nvTbId'] as number });
     ctx.fillText('نظام الملفات:', dx + 16, dy + 88);
     const fsSel = win.state['nvFs'] as string;
     btn(os, ctx, dx + 110, dy + 74, 84, 28, 'NTFS', () => { win.state['nvFs'] = 'ntfs'; os.dirty = true; }, { color: fsSel === 'ntfs' ? OS_COLORS.accent : undefined, small: true });
@@ -832,6 +925,11 @@ function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingConte
     ctx.fillStyle = '#eab308';
     ctx.font = '12px sans-serif';
     ctx.fillText('⚠ قسم جديد على قرص يقع غير مهيأ يحتاج تهيئة القرص أولًا. هذه العملية محاكاة آمنة.', dx + 16, dy + 122);
+    // (ميزة B12) تنبيه حد MBR + تثبيت الحجم داخل السقف عند الإنشاء
+    if (disk.style === 'mbr' && disk.sizeGB > MBR_MAX_DISK_GB) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.fillText(`أقراص MBR تدعم حتى ${MBR_MAX_DISK_GB} جيجابايت فقط — سيتم استخدام أول ${MBR_MAX_DISK_GB} جيجابايت.`, dx + 16, dy + 140);
+    }
     btn(os, ctx, dx + 16, dy + dh - 44, 120, 32, 'إنشاء القسم', () => {
       const sizeGB = Math.min(unalloc, Math.max(0.1, Number(win.state['nvSize']) || 10));
       useLabStore.getState().createPartition(disk.id, sizeGB, fsSel === 'fat32' ? 'fat32' : 'ntfs');
@@ -840,6 +938,22 @@ function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingConte
     });
     btn(os, ctx, dx + dw - 136, dy + dh - 44, 120, 32, 'إلغاء', close);
   } else if (dialog.kind === 'part' && part && disk) {
+    // (ميزة B10) تأكيد من نقرتين للعمليات المدمّرة (تهيئة/حذف) — بلا نوافذ مشروطة:
+    // النقرة الأولى تُسلّح، والنقرة الثانية على الزر نفسه خلال ~4 ثوانٍ تنفّذ،
+    // وأي نقرة أخرى (الخلفية/الزر الآخر) تُلغي التسليح.
+    type ConfirmState = { kind: 'format' | 'delete'; diskId: string; partId: string; at: number } | null;
+    if (win.state['confirm'] !== null && (typeof win.state['confirm'] !== 'object')) win.state['confirm'] = null;
+    if (win.state['confirm']) {
+      const c = win.state['confirm'] as NonNullable<ConfirmState>;
+      if (Date.now() - c.at > 4000 || c.diskId !== disk.id || c.partId !== part.id) win.state['confirm'] = null;
+    }
+    const confirm = win.state['confirm'] as ConfirmState;
+    const armed = (kind: 'format' | 'delete'): boolean =>
+      !!confirm && confirm.kind === kind && confirm.diskId === disk.id && confirm.partId === part.id;
+    const arm = (kind: 'format' | 'delete'): void => {
+      win.state['confirm'] = { kind, diskId: disk.id, partId: part.id, at: Date.now() };
+      os.dirty = true;
+    };
     ctx.fillStyle = OS_COLORS.text;
     ctx.font = 'bold 15px sans-serif';
     ctx.fillText(`القسم: ${part.label}${part.letter ? ` (${part.letter}:)` : ''}`, dx + 16, dy + 28);
@@ -847,20 +961,34 @@ function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingConte
     ctx.font = '12.5px sans-serif';
     ctx.fillText(`${part.kind.toUpperCase()} • ${part.fs.toUpperCase()} • ${part.sizeGB.toFixed(2)} GB • المستخدم ${(part.usedGB).toFixed(1)} GB`, dx + 16, dy + 50);
     ctx.fillText(part.hasOs ? '⚠ يحتوي ملفات نظام مثبت — حذفه يعني فقدان النظام (محاكاة).' : 'قسم بيانات — الحذف/التهيئة محاكاة تعليمية آمنة.', dx + 16, dy + 70);
-    btn(os, ctx, dx + 16, dy + 96, 130, 30, 'تهيئة القسم…', () => {
+    // خلفية الحوار: أي نقرة خارج الأزرار تُلغي التسليح (وتغلق نفاذ النقر كان مفقودًا)
+    os.addRect('custom', 0, 0, w, h, { onClick: () => { if (win.state['confirm']) { win.state['confirm'] = null; os.dirty = true; } } }, 'default', 19);
+    const fmtArmed = armed('format');
+    btn(os, ctx, dx + 16, dy + 96, 130, 30, fmtArmed ? 'اضغط مرة أخرى للتأكيد' : 'تهيئة القسم…', () => {
       if (part.kind === 'efi' || part.kind === 'msr') {
         os.notify('غير مسموح', 'لا يمكن تهيئة أقسام EFI/MSR النظامية — سلوك موثق من سلوك إدارة الأقراص.');
+        win.state['confirm'] = null;
         return;
       }
+      if (!fmtArmed) { arm('format'); return; }
+      win.state['confirm'] = null;
       useLabStore.getState().formatPartition(disk.id, part.id);
       os.notify('تمت التهيئة', `${part.label}: أعيدت التهيئة (${part.fs.toUpperCase()}) — البيانات السابقة «فُقدت» داخل المحاكاة فقط.`);
       close();
-    }, { small: true });
-    btn(os, ctx, dx + 156, dy + 96, 130, 30, 'حذف القسم…', () => {
+    }, { small: true, color: fmtArmed ? OS_COLORS.danger : undefined });
+    const delArmed = armed('delete');
+    btn(os, ctx, dx + 156, dy + 96, 130, 30, delArmed ? 'اضغط مرة أخرى للتأكيد' : 'حذف القسم…', () => {
+      if (!delArmed) { arm('delete'); return; }
+      win.state['confirm'] = null;
       useLabStore.getState().deletePartition(disk.id, part.id);
       os.notify('تم الحذف', `${part.label}: أُزيل وأصبحت المساحة Unallocated (محاكاة — تأكيد مطلوب دائمًا في العمل الحقيقي).`);
       close();
     }, { small: true, color: OS_COLORS.danger });
+    if (confirm) {
+      ctx.fillStyle = OS_COLORS.warn;
+      ctx.font = '12px sans-serif';
+      os.wrapText(ctx, `الهدف: ${confirm.kind === 'delete' ? 'حذف' : 'تهيئة'} القسم «${part.label}» (${part.sizeGB.toFixed(1)} GB) — انقر الزر نفسه مجددًا خلال 4 ثوانٍ للتأكيد؛ أي نقرة أخرى تُلغي.`, dx + 16, dy + 142, dw - 32, 16);
+    }
     btn(os, ctx, dx + dw - 116, dy + dh - 44, 100, 32, 'إغلاق', close);
   }
 }
@@ -875,9 +1003,11 @@ const settingsApp: VosAppDef = {
   defaultW: 520,
   defaultH: 380,
   desktop: true,
-  render: (os, _win, ctx) => {
+  render: (os, win, ctx) => {
+    if (!win) return;
     const store = useLabStore.getState();
-    const w = 520;
+    // (إصلاح B7) حدود التخطيط من النافذة الفعلية — كانت العروض مكتوبة يدويًا فلا يعمل التحجيم
+    const w = win.maximized ? os.W : win.w;
     const top = panelHeader(ctx, w, 'الإعدادات — حول هذا النظام', 'كل البيانات من مصدر الحقيقة الواحد (المحاكاة)');
     let y = top + 4;
     const row = (label: string, value: string): void => {
@@ -975,11 +1105,14 @@ const aboutApp: VosAppDef = {
   iconGlyph: 'ℹ',
   defaultW: 420,
   defaultH: 250,
-  render: (os, _win, ctx) => {
-    const top = panelHeader(ctx, 420, 'PC Lab OS v6.0', 'بيئة تدريب فني الصيانة');
+  render: (os, win, ctx) => {
+    if (!win) return;
+    // (إصلاح B7) عرض النافذة الفعلي بدل 420 المكتوبة يدويًا — التحجيم يعمل الآن
+    const w = win.maximized ? os.W : win.w;
+    const top = panelHeader(ctx, w, 'PC Lab OS v6.0', 'بيئة تدريب فني الصيانة');
     ctx.fillStyle = OS_COLORS.text;
     ctx.font = '13px sans-serif';
-    os.wrapText(ctx, 'نظام افتراضي تعليمي داخل مختبر صيانة ثلاثي الأبعاد: سطح مكتب ونوافذ وأوامر Sandbox وإدارة أقراص افتراضية. لا يمس نظامك الحقيقي ولا يجمع أي بيانات.', 16, top, 420 - 32, 19);
+    os.wrapText(ctx, 'نظام افتراضي تعليمي داخل مختبر صيانة ثلاثي الأبعاد: سطح مكتب ونوافذ وأوامر Sandbox وإدارة أقراص افتراضية. لا يمس نظامك الحقيقي ولا يجمع أي بيانات.', 16, top, w - 32, 19);
   },
 };
 

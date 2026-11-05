@@ -9,7 +9,7 @@
  * ونتيجة POST/الشاشة المتوقعة قبل الإصلاح.
  */
 
-import { COMPONENT_IDS, isInstalled, type DiagnosisCode, type MonitorScreen, type SimulationState } from '../types';
+import { isInstalled, type DiagnosisCode, type MonitorScreen, type SimulationState } from '../types';
 
 export type FaultDifficulty = 'سهل' | 'متوسط' | 'صعب' | 'مركّب';
 
@@ -30,13 +30,16 @@ export interface FaultDef {
   acIsTheFault?: boolean;
 }
 
+// (إصلاح S6) نسخة عميقة متّسقة مع copySimulation في types.ts: عناصر الأقراص وأقسامها
+// وترتيب الإقلاع تُنسخ نسخًا جديدًا — كانت مصفوفة الأقراص (وbootOrder) تُشارَك مرجعيًا
+// بين النسخ القديمة والجديدة (تلوث كامن يعترض النقاء عند أي تعديل متشعب).
 const copy = (s: SimulationState): SimulationState => ({
   flags: { ...s.flags },
   parts: { ...s.parts },
   peripherals: { ...s.peripherals },
   os: { ...s.os, driversMissing: [...s.os.driversMissing] },
-  disks: s.disks,
-  firmware: { ...s.firmware },
+  disks: s.disks.map((d) => ({ ...d, parts: d.parts.map((p) => ({ ...p })) })),
+  firmware: { ...s.firmware, bootOrder: [...s.firmware.bootOrder] },
   usbMedia: s.usbMedia,
   thermal: { ...s.thermal },
 });
@@ -478,7 +481,3 @@ export function codeLabelAr(code: DiagnosisCode): string {
 export function getFault(id: string | null): FaultDef | null {
   return FAULTS.find((f) => f.id === id) ?? null;
 }
-
-/** ضمان ذكاء البناء: كل الأعطال معرّفة على مكوّنات قائمة */
-export const FAULT_IDS: string[] = FAULTS.map((f) => f.id);
-export const COMPONENT_IDS_REF = COMPONENT_IDS;

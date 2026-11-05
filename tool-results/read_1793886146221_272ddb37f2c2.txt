@@ -1,0 +1,724 @@
+     1→     1→/**
+     2→     2→ * installer.ts — معالج تثبيت Windows التعليمي (V6-D) — شاشة كاملة داخل VOS.
+     3→     3→ * ============================================================================
+     4→     4→ * تدفق تفاعلي حسب العائلة (XP/Vista/7/8/8.1/10/11) — 16 خطوة موثقة:
+     5→     5→ * (0) وسيط الإقلاع ← (1) اللغة/المنطقة ← (2) مفتاح المنتج ← (3) النسخة والبنية
+     6→     6→ * ← (4) الترخيص ← (5) نوع التثبيت ← (6) الأقراص والأقسام (مختبر GPT/MBR + بوابات TPM/SB)
+     7→     7→ * ← (7) نسخ الملفات ← (8) إعادة التشغيل الأولى من القرص ← (9) تهيئة الأجهزة وإعادات التشغيل
+     8→     8→ * ← (10) OOBE المنطقة ← (11) تخطيط الكيبورد ← (12) الشبكة (إلزامية لـ11)
+     9→     9→ * ← (13) اسم المستخدم ← (14) كلمة المرور ← (15) الخصوصية والإنهاء ← سطح المكتب.
+    10→    10→ *
+    11→    11→ * أمانة (توجيه §5.5): واجهة وتدفق خاصان بالمشروع — لا ISO ولا مفاتيح حقيقية
+    12→    12→ * ولا ادعاء أنها نسخة Windows فعلية. العمليات على أقراص المحاكاة فقط.
+    13→    13→ */
+    14→    14→import { useLabStore } from '../store/labStore';
+    15→    15→import { isInstalled } from '../types';
+    16→    16→import type { WinFamilyId } from '../types';
+    17→    17→import type { WinFamily } from '../data/windowsCatalog';
+    18→    18→import { WINDOWS_FAMILIES, getFamily, allowedPartStyles, partitionConflictMessageAr, autoPartitionPlan, MBR_MAX_DISK_GB } from '../data/windowsCatalog';
+    19→    19→import { OS_COLORS, roundRect } from './vos';
+    20→    20→import type { VirtualOS } from './vos';
+    21→    21→
+    22→    22→// ============ حالة المعالج ============
+    23→    23→
+    24→    24→export interface SetupState {
+    25→    25→  step: number;
+    26→    26→  family: WinFamilyId | null;
+    27→    27→  langIdx: number;
+    28→    28→  keyText: string;
+    29→    29→  keySkipped: boolean;
+    30→    30→  editionId: string | null;
+    31→    31→  arch: 'x86' | 'x64' | null;
+    32→    32→  licenseAccepted: boolean;
+    33→    33→  installType: 'clean' | null;
+    34→    34→  targetDiskId: string | null;
+    35→    35→  partPlan: Array<{ label: string; kind: 'efi' | 'msr' | 'recovery' | 'primary'; fs: string; sizeGB: number }> | null;
+    36→    36→  progress: number;         // 0..1 لمرحلة النسخ
+    37→    37→  progressLabelAr: string;
+    38→    38→  restartsLeft: number;
+    39→    39→  oobeStep: number;
+    40→    40→  userName: string;
+    41→    41→  privacy: boolean[];
+    42→    42→  /** حقول OOBE (V6-D — معالج 16 خطوة) */
+    43→    43→  password: string;
+    44→    44→  networkConnected: boolean;
+    45→    45→  errorAr: string | null;
+    46→    46→  done: boolean;
+    47→    47→  /** حقول زمنية داخلية */
+    48→    48→  step7DoneAt?: number;
+    49→    49→  step8At?: number;
+    50→    50→  step7LastAt?: number;
+    51→    51→  oobeAt?: number;
+    52→    52→}
+    53→    53→
+    54→    54→export function initialSetupState(): SetupState {
+    55→    55→  return {
+    56→    56→    step: 0, family: null, langIdx: 0, keyText: '', keySkipped: false,
+    57→    57→    editionId: null, arch: null, licenseAccepted: false, installType: null,
+    58→    58→    targetDiskId: null, partPlan: null, progress: 0, progressLabelAr: '',
+    59→    59→    restartsLeft: 0, oobeStep: 0, userName: '', privacy: [],
+    60→    60→    password: '', networkConnected: false, errorAr: null, done: false,
+    61→    61→  };
+    62→    62→}
+    63→    63→
+    64→    64→let setup: SetupState = initialSetupState();
+    65→    65→
+    66→    66→export function getSetupState(): SetupState {
+    67→    67→  return setup;
+    68→    68→}
+    69→    69→
+    70→    70→export function resetSetup(): void {
+    71→    71→  setup = initialSetupState();
+    72→    72→}
+    73→    73→
+    74→    74→// ============ الرسم ============
+    75→    75→
+    76→    76→function chrome(os: VirtualOS, ctx: CanvasRenderingContext2D, family: WinFamily | null, titleAr: string): number {
+    77→    77→  const themeBg: Record<string, [string, string]> = {
+    78→    78→    blueText: ['#0a1a56', '#0a1030'],
+    79→    79→    aero: ['#123a63', '#0a1c33'],
+    80→    80→    metro: ['#0b2b3d', '#081826'],
+    81→    81→    modern: ['#12303a', '#081a20'],
+    82→    82→    modern11: ['#1a2c3a', '#0b141c'],
+    83→    83→  };
+    84→    84→  const [c1, c2] = themeBg[family?.theme ?? 'modern'];
+    85→    85→  const g = ctx.createLinearGradient(0, 0, os.W, os.H);
+    86→    86→  g.addColorStop(0, c1);
+    87→    87→  g.addColorStop(1, c2);
+    88→    88→  ctx.fillStyle = g;
+    89→    89→  ctx.fillRect(0, 0, os.W, os.H);
+    90→    90→
+    91→    91→  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    92→    92→  ctx.font = 'bold 22px sans-serif';
+    93→    93→  ctx.fillText(titleAr, 36, 46);
+    94→    94→  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    95→    95→  ctx.font = '13px sans-serif';
+    96→    96→  ctx.fillText('مثبّت محاكاة تعليمية — PC Lab (ليس وسائط Windows حقيقية ولا يطلب مفاتيح فعلية)', 36, 68);
+    97→    97→  return 96;
+    98→    98→}
+    99→    99→
+   100→   100→function bigButton(os: VirtualOS, ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, label: string, onClick: () => void, primary = true): void {
+   101→   101→  const hovered = os.hoverAt(x, y, w, h);
+   102→   102→  ctx.fillStyle = primary ? (hovered ? '#57d9c9' : '#2aa89a') : hovered ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)';
+   103→   103→  roundRect(ctx, x, y, w, h, 7);
+   104→   104→  ctx.fill();
+   105→   105→  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+   106→   106→  roundRect(ctx, x, y, w, h, 7);
+   107→   107→  ctx.stroke();
+   108→   108→  ctx.fillStyle = primary ? '#04231f' : '#e8eef5';
+   109→   109→  ctx.font = 'bold 14px sans-serif';
+   110→   110→  ctx.textAlign = 'center';
+   111→   111→  ctx.fillText(label, x + w / 2, y + h / 2 + 5);
+   112→   112→  ctx.textAlign = 'left';
+   113→   113→  os.addRect('button', x, y, w, h, { onClick });
+   114→   114→}
+   115→   115→
+   116→   116→function selectable(os: VirtualOS, ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, label: string, subAr: string | null, selected: boolean, onSelect: () => void): void {
+   117→   117→  const hovered = os.hoverAt(x, y, w, h);
+   118→   118→  ctx.fillStyle = selected ? 'rgba(57,199,184,0.20)' : hovered ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.035)';
+   119→   119→  roundRect(ctx, x, y, w, h, 7);
+   120→   120→  ctx.fill();
+   121→   121→  ctx.strokeStyle = selected ? '#39c7b8' : 'rgba(255,255,255,0.18)';
+   122→   122→  roundRect(ctx, x, y, w, h, 7);
+   123→   123→  ctx.stroke();
+   124→   124→  ctx.fillStyle = '#e8eef5';
+   125→   125→  ctx.font = 'bold 14.5px sans-serif';
+   126→   126→  ctx.fillText(label, x + 16, y + 25);
+   127→   127→  if (subAr) {
+   128→   128→    ctx.fillStyle = 'rgba(232,238,245,0.65)';
+   129→   129→    ctx.font = '12.5px sans-serif';
+   130→   130→    ctx.fillText(subAr, x + 16, y + h - 12);
+   131→   131→  }
+   132→   132→  if (selected) {
+   133→   133→    ctx.fillStyle = '#39c7b8';
+   134→   134→    ctx.fillText('✓', x + w - 26, y + 26);
+   135→   135→  }
+   136→   136→  os.addRect('row', x, y, w, h, { onClick: onSelect });
+   137→   137→}
+   138→   138→
+   139→   139→/** يحول الثيم للعائلة عند رسم الشاشات القديمة (XP نصية أزرق / 7 Aero ...) */
+   140→   140→
+   141→   141→export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now: number): void {
+   142→   142→  const store = useLabStore.getState();
+   143→   143→  const family = setup.family ? getFamily(setup.family) : null;
+   144→   144→
+   145→   145→  // اختيار العائلة أولًا (قائمة وسائط الإقلاع)
+   146→   146→  if (!setup.family) {
+   147→   147→    const top = chrome(os, ctx, null, 'اختر وسيط التثبيت — Installation Media');
+   148→   148→    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+   149→   149→    ctx.font = '14px sans-serif';
+   150→   150→    ctx.fillText('الوسيط المُدخل يحدد عائلة النظام — كل عائلة لها تدفقها ومتطلباتها الموثقة:', 36, top + 16);
+   151→   151→    let y = top + 36;
+   152→   152→    const cols = 2;
+   153→   153→    const bw = Math.min(430, (os.W - 90) / cols);
+   154→   154→    let i = 0;
+   155→   155→    for (const fam of WINDOWS_FAMILIES) {
+   156→   156→      const cx = 36 + (i % cols) * (bw + 18);
+   157→   157→      const cy = y + Math.floor(i / cols) * 62;
+   158→   158→      selectable(os, ctx, cx, cy, bw, 52, `${fam.nameEn} (${fam.year})`, fam.editions.map((e) => e.nameAr).join(' • ').slice(0, 64), false, () => {
+   159→   159→        setup.family = fam.id;
+   160→   160→        setup.step = 1;
+   161→   161→        setup.errorAr = null;
+   162→   162→        os.dirty = true;
+   163→   163→      });
+   164→   164→      i++;
+   165→   165→    }
+   166→   166→    y += Math.ceil(WINDOWS_FAMILIES.length / cols) * 62 + 6;
+   167→   167→    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+   168→   168→    ctx.font = '12.5px sans-serif';
+   169→   169→    os.wrapText(ctx, 'ملاحظة أمانة: هذا معالج محاكاة داخل مختبر افتراضي — لا يوزع ملفات Windows ولا يطلب مفاتيح حقيقية ولا يمس أقراص جهازك.', 36, y, os.W - 72, 17);
+   170→   170→    return;
+   171→   171→  }
+   172→   172→  if (!family) return;
+   173→   173→
+   174→   174→  const closeBtn = (): void => {
+   175→   175→    // إنهاء المثبّت والعودة (إعادة تشغيل بدون وسيط)
+   176→   176→    resetSetup();
+   177→   177→    store.exitSetup();
+   178→   178→    os.dirty = true;
+   179→   179→  };
+   180→   180→
+   181→   181→  // ===== 1) اللغة والمنطقة =====
+   182→   182→  if (setup.step === 1) {
+   183→   183→    const top = chrome(os, ctx, family, `${family.nameEn} Setup — Language / Region`);
+   184→   184→    const langs: Array<[string, string]> = [['العربية (فلسطين) — عربي 101', 'ar-PS'], ['English (United States)', 'en-US']];
+   185→   185→    let y = top + 8;
+   186→   186→    for (let i = 0; i < langs.length; i++) {
+   187→   187→      selectable(os, ctx, 36, y, 430, 52, langs[i][0], `Keyboard: ${i === 0 ? 'Arabic 101' : 'US QWERTY'} • Time zone: ${i === 0 ? '(UTC+02:00)' : '(UTC-08:00)'}`, setup.langIdx === i, () => { setup.langIdx = i; os.dirty = true; });
+   188→   188→      y += 62;
+   189→   189→    }
+   190→   190→    bigButton(os, ctx, 36, y + 10, 140, 38, 'Next ←', () => { setup.step = 2; os.dirty = true; });
+   191→   191→    bigButton(os, ctx, 190, y + 10, 110, 38, 'إلغاء', closeBtn, false);
+   192→   192→    return;
+   193→   193→  }
+   194→   194→
+   195→   195→  // ===== 2) مفتاح المنتج =====
+   196→   196→  if (setup.step === 2) {
+   197→   197→    const top = chrome(os, ctx, family, 'Product Key — مفتاح المنتج');
+   198→   198→    const canSkip = family.editions.some((e) => e.keyOptional);
+   199→   199→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   200→   200→    ctx.font = '14px sans-serif';
+   201→   201→    ctx.fillText(family.oobe.productKeyMandatory ? 'هذه العائلة تتطلب مفتاح منتج في المسار النظفي (تعليميًا أدخل أي صيغة XXXXX-XXXXX).' : 'يمكن تخطي المفتاح الآن واختيار النسخة يدويًا (سلوك موثق لهذه العائلة).', 36, top + 14);
+   202→   202→    // صندوق المفتاح
+   203→   203→    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+   204→   204→    roundRect(ctx, 36, top + 30, 380, 40, 7);
+   205→   205→    ctx.fill();
+   206→   206→    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+   207→   207→    roundRect(ctx, 36, top + 30, 380, 40, 7);
+   208→   208→    ctx.stroke();
+   209→   209→    ctx.fillStyle = '#e8eef5';
+   210→   210→    ctx.font = '16px monospace';
+   211→   211→    ctx.fillText(setup.keyText + (os.blink ? '|' : ''), 48, top + 56);
+   212→   212→    os.addRect('custom', 36, top + 30, 380, 40, {
+   213→   213→      onClick: () => {
+   214→   214→        os.focusedTextbox = {
+   215→   215→          get: () => setup.keyText,
+   216→   216→          set: (t) => { setup.keyText = t.toUpperCase().slice(0, 29); },
+   217→   217→        };
+   218→   218→        os.dirty = true;
+   219→   219→      },
+   220→   220→    }, 'text');
+   221→   221→
+   222→   222→    let y = top + 90;
+   223→   223→    if (canSkip) {
+   224→   224→      bigButton(os, ctx, 36, y, 220, 38, setup.keySkipped ? '✓ ليس لدي مفتاح (مُخطى)' : 'ليس لدي مفتاح منتج', () => { setup.keySkipped = !setup.keySkipped; setup.keyText = ''; os.dirty = true; });
+   225→   225→      y += 50;
+   226→   226→    }
+   227→   227→    const keyValid = setup.keySkipped || /^[A-Z0-9]{5}(-[A-Z0-9]{5}){0,4}$/.test(setup.keyText) || setup.keyText.length >= 5;
+   228→   228→    bigButton(os, ctx, 36, y, 140, 38, 'Next ←', () => {
+   229→   229→      if (!keyValid) { setup.errorAr = 'أدخل مفتاحًا بصيغة تعليمية صحيحة أو اختر التخطي إن كان متاحًا لهذه العائلة.'; os.dirty = true; return; }
+   230→   230→      setup.errorAr = null;
+   231→   231→      setup.step = 3;
+   232→   232→      os.dirty = true;
+   233→   233→    }, keyValid);
+   234→   234→    bigButton(os, ctx, 190, y, 110, 38, 'رجوع →', () => { setup.step = 1; os.dirty = true; }, false);
+   235→   235→    if (setup.errorAr) {
+   236→   236→      ctx.fillStyle = '#ffb4b4';
+   237→   237→      ctx.font = '13px sans-serif';
+   238→   238→      os.wrapText(ctx, '!! ' + setup.errorAr, 36, y + 60, os.W - 72, 17);
+   239→   239→    }
+   240→   240→    return;
+   241→   241→  }
+   242→   242→
+   243→   243→  // ===== 3) اختيار النسخة والبنية (عمودان — العائلات الكبيرة كـ7/10 تملك 8–9 صفوف ولا تتسع بعمود واحد) =====
+   244→   244→  if (setup.step === 3) {
+   245→   245→    const top = chrome(os, ctx, family, 'Select Edition — اختر النسخة والبنية');
+   246→   246→    const bw = Math.min(430, (os.W - 90) / 2);
+   247→   247→    let idx = 0;
+   248→   248→    for (const ed of family.editions) {
+   249→   249→      for (const arch of ed.arch) {
+   250→   250→        const cx = 36 + (idx % 2) * (bw + 18);
+   251→   251→        const cy = top + 4 + Math.floor(idx / 2) * 58;
+   252→   252→        selectable(os, ctx, cx, cy, bw, 48, `${ed.nameAr} ${arch === 'x64' ? '64-bit' : '32-bit'}`, `معمارية ${arch.toUpperCase()}`, setup.editionId === ed.id && setup.arch === arch, () => {
+   253→   253→          setup.editionId = ed.id;
+   254→   254→          setup.arch = arch;
+   255→   255→          setup.errorAr = null;
+   256→   256→          os.dirty = true;
+   257→   257→        });
+   258→   258→        idx++;
+   259→   259→      }
+   260→   260→    }
+   261→   261→    const rows = Math.ceil(idx / 2);
+   262→   262→    const y = top + 4 + rows * 58;
+   263→   263→    bigButton(os, ctx, 36, y + 8, 140, 38, 'Next ←', () => {
+   264→   264→      if (!setup.editionId || !setup.arch) { setup.errorAr = 'اختر نسخة وبنية أولًا.'; os.dirty = true; return; }
+   265→   265→      setup.errorAr = null;
+   266→   266→      setup.step = 4;
+   267→   267→      os.dirty = true;
+   268→   268→    });
+   269→   269→    bigButton(os, ctx, 190, y + 8, 110, 38, 'رجوع →', () => { setup.step = 2; os.dirty = true; }, false);
+   270→   270→    if (setup.errorAr) {
+   271→   271→      ctx.fillStyle = '#ffb4b4';
+   272→   272→      ctx.font = '13px sans-serif';
+   273→   273→      ctx.fillText('!! ' + setup.errorAr, 36, y + 66);
+   274→   274→    }
+   275→   275→    return;
+   276→   276→  }
+   277→   277→
+   278→   278→  // ===== 4) الترخيص =====
+   279→   279→  if (setup.step === 4) {
+   280→   280→    const top = chrome(os, ctx, family, 'License Terms — اتفاقية الترخيص (تعليمية)');
+   281→   281→    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+   282→   282→    roundRect(ctx, 36, top, os.W - 72, 150, 8);
+   283→   283→    ctx.fill();
+   284→   284→    ctx.fillStyle = 'rgba(232,238,245,0.85)';
+   285→   285→    ctx.font = '13px sans-serif';
+   286→   286→    const lines = [
+   287→   287→      'هذه محاكاة تدريب داخل PC Repair 3D Studio: معالج تثبيت تعليمي يحاكي تدفق',
+   288→   288→      'التثبيت لأغراض التعلم فقط — لا يثبت أي نظام حقيقي ولا يعدل جهازك.',
+   289→   289→      `معلومات العائلة: ${family.notesAr}`,
+   290→   290→      'قبل أي عملية مدمرة في العمل الحقيقي: خذ نسخة احتياطية ووثّق مفاتيح الترخيص.',
+   291→   291→    ];
+   292→   292→    let ly = top + 26;
+   293→   293→    for (const l of lines) { ctx.fillText(l, 52, ly); ly += 22; }
+   294→   294→    const checked = setup.licenseAccepted;
+   295→   295→    selectable(os, ctx, 36, top + 166, 420, 44, 'I accept the license terms — أوافق', null, checked, () => { setup.licenseAccepted = !checked; os.dirty = true; });
+   296→   296→    bigButton(os, ctx, 36, top + 224, 140, 38, 'Next ←', () => {
+   297→   297→      if (!setup.licenseAccepted) { setup.errorAr = 'يجب قبول الترخيص للمتابعة.'; os.dirty = true; return; }
+   298→   298→      setup.errorAr = null;
+   299→   299→      setup.step = 5;
+   300→   300→      os.dirty = true;
+   301→   301→    }, setup.licenseAccepted);
+   302→   302→    bigButton(os, ctx, 190, top + 224, 110, 38, 'رجوع →', () => { setup.step = 3; os.dirty = true; }, false);
+   303→   303→    return;
+   304→   304→  }
+   305→   305→
+   306→   306→  // ===== 5) نوع التثبيت =====
+   307→   307→  if (setup.step === 5) {
+   308→   308→    const top = chrome(os, ctx, family, 'Which type of installation?');
+   309→   309→    const canUpgrade = family.editions.find((e) => e.id === setup.editionId)?.upgradeFromAr !== null;
+   310→   310→    selectable(os, ctx, 36, top + 6, 470, 60, 'Upgrade — ترقية (يبقي الملفات)', canUpgrade ? `مدعوم عند الترقية من: ${(family.editions.find((e) => e.id === setup.editionId)?.upgradeFromAr ?? []).join(', ')}` : 'غير مدعوم في هذا المسار التعليمي لهذه النسخة', false, () => {
+   311→   311→      setup.errorAr = 'مسار الترقية في المحاكاة يقتصر على التعليم المفاهيمي — استخدم Custom للاستمرار (سلوك تربوي مقصود).';
+   312→   312→      os.dirty = true;
+   313→   313→    });
+   314→   314→    selectable(os, ctx, 36, top + 78, 470, 60, 'Custom (Clean) — تثبيت نظيف', 'تقسيم الأقراص وتحديد قسم التثبيت يدويًا', false, () => {
+   315→   315→      setup.installType = 'clean';
+   316→   316→      setup.errorAr = null;
+   317→   317→      setup.step = 6;
+   318→   318→      os.dirty = true;
+   319→   319→    });
+   320→   320→    if (setup.errorAr) {
+   321→   321→      ctx.fillStyle = '#ffd9a0';
+   322→   322→      ctx.font = '13px sans-serif';
+   323→   323→      os.wrapText(ctx, '!! ' + setup.errorAr, 36, top + 156, os.W - 72, 17);
+   324→   324→    }
+   325→   325→    bigButton(os, ctx, 36, os.H - 70, 110, 38, 'رجوع →', () => { setup.step = 4; os.dirty = true; }, false);
+   326→   326→    return;
+   327→   327→  }
+   328→   328→
+   329→   329→  // ===== 6) الأقراص والأقسام + التحقق =====
+   330→   330→  if (setup.step === 6) {
+   331→   331→    const top = chrome(os, ctx, family, 'Where do you want to install?');
+   332→   332→    // (إصلاح تدقيق V6) وضع الإقلاع من مصدر الحقيقة — كان مفروضًا UEFI فيُحجب XP/Vista نهائيًا
+   333→   333→    const boot = store.sim.firmware.bootMode;
+   334→   334→    const allowed = family ? allowedPartStyles(family, boot) : [];
+   335→   335→    const platformBootsFamily = family.bootModes.includes(boot);
+   336→   336→    let y = top + 4;
+   337→   337→
+   338→   338→    // فحص متطلبات Windows 11 الموثقة
+   339→   339→    if (family.requiresTpm2 && !store.sim.firmware.tpm) {
+   340→   340→      ctx.fillStyle = '#ffb4b4';
+   341→   341→      ctx.font = 'bold 14px sans-serif';
+   342→   342→      ctx.fillText('!! هذا الجهاز لا يمكن تشغيل ' + family.nameEn + ' — TPM 2.0 غير مفعّل/موجود.', 36, y);
+   343→   343→      y += 22;
+   344→   344→    }
+   345→   345→    if (family.requiresSecureBoot && !store.sim.firmware.secureBoot) {
+   346→   346→      ctx.fillStyle = '#ffb4b4';
+   347→   347→      ctx.font = 'bold 14px sans-serif';
+   348→   348→      ctx.fillText('!! ' + family.nameEn + ' يتطلب Secure Boot — فعّله من إعدادات UEFI.', 36, y);
+   349→   349→      y += 22;
+   350→   350→    }
+   351→   351→    if (!platformBootsFamily) {
+   352→   352→      ctx.fillStyle = '#ffb4b4';
+   353→   353→      ctx.font = 'bold 14px sans-serif';
+   354→   354→      ctx.fillText(`!! ${family.nameEn} تقلع بوضع ${family.bootModes.join('/').toUpperCase()} فقط — المنصة حاليًا ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}: بدّل الوضع من إعدادات البرنامج الثابت (تبويب Boot).`, 36, y);
+   355→   355→      y += 22;
+   356→   356→    }
+   357→   357→    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+   358→   358→    ctx.font = '12.5px sans-serif';
+   359→   359→    ctx.fillText(`وضع إقلاع الجهاز: ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'} — الأنماط المسموحة لهذه العائلة في هذا الوضع: ${allowed.join(' / ').toUpperCase() || 'لا شيء (تعارض وضع الإقلاع)'}`, 36, y);
+   360→   360→    y += 26;
+   361→   361→
+   362→   362→    // (إصلاح تدقيق V6) الأقراص المعروضة = المركّبة فعليًا فقط (كانت قائمة شكلية تعرض الكل)
+   363→   363→    const installedDisks = store.sim.disks.filter((d) =>
+   364→   364→      d.id === 'm2-1' ? isInstalled(store.sim.parts.ssd)
+   365→   365→      : d.id === 'hdd-1' ? isInstalled(store.sim.parts.hdd) && isInstalled(store.sim.parts.sataData) && isInstalled(store.sim.parts.sataPower)
+   366→   366→      : false,
+   367→   367→    );
+   368→   368→    if (installedDisks.length === 0) {
+   369→   369→      ctx.fillStyle = '#ffd9a0';
+   370→   370→      ctx.font = 'bold 13.5px sans-serif';
+   371→   371→      ctx.fillText('لا يوجد قرص مركّب وموصول في الجهاز — أطفئه وركّب قرصًا (M.2 أو ميكانيكي مع كابليه) ثم أعد المحاولة.', 36, y);
+   372→   372→      return;
+   373→   373→    }
+   374→   374→    for (const disk of installedDisks) {
+   375→   375→      const total = disk.parts.reduce((a, p) => a + p.sizeGB, 0);
+   376→   376→      const label = `Disk ${disk.id === 'm2-1' ? '0' : '1'} — ${disk.sizeGB} GB ${disk.style ? (disk.style === 'gpt' ? '(GPT)' : '(MBR)') : '(Unallocated Space)'}`;
+   377→   377→      selectable(os, ctx, 36, y, 470, 46, label,
+   378→   378→        disk.style ? `أقسام: ${disk.parts.length} — متاح ${Math.max(0, disk.sizeGB - total).toFixed(0)} GB` : 'قرص غير مهيأ بالكامل',
+   379→   379→        setup.targetDiskId === disk.id, () => {
+   380→   380→          setup.targetDiskId = disk.id;
+   381→   381→          setup.partPlan = null;
+   382→   382→          setup.errorAr = null;
+   383→   383→          os.dirty = true;
+   384→   384→        });
+   385→   385→      y += 56;
+   386→   386→    }
+   387→   387→
+   388→   388→    // (إصلاح تدقيق V6) فحص الذاكرة الموثق: بلا وحدات ذاكرة لا يمكن تثبيت أي نظام
+   389→   389→    const ramOk = isInstalled(store.sim.parts.ram);
+   390→   390→    ctx.fillStyle = ramOk ? 'rgba(255,255,255,0.55)' : '#ffb4b4';
+   391→   391→    ctx.font = '12px sans-serif';
+   392→   392→    ctx.fillText(ramOk
+   393→   393→      ? `الذاكرة: 32 GB — الحد الأدنى الموثق للعائلة: ${Math.ceil(family.minRamMB / 1024)} GB ✓   |   ملاحظة: MBR يحد التقسيم عند ${MBR_MAX_DISK_GB} GB — GPT لا يحد عمليًا.`
+   394→   394→      : `!! لا توجد وحدات ذاكرة مركّبة — ${family.nameEn} تحتاج ${Math.ceil(family.minRamMB / 1024)} GB على الأقل.`, 36, y);
+   395→   395→    y += 24;
+   396→   396→
+   397→   397→    const disk = store.sim.disks.find((d) => d.id === setup.targetDiskId);
+   398→   398→    if (disk) {
+   399→   399→      if (disk.style && !allowed.includes(disk.style)) {
+   400→   400→        ctx.fillStyle = '#ffb4b4';
+   401→   401→        ctx.font = 'bold 13.5px sans-serif';
+   402→   402→        os.wrapText(ctx, '!! ' + partitionConflictMessageAr(boot, disk.style), 36, y, os.W - 72, 17);
+   403→   403→        y += 40;
+   404→   404→      } else if (!disk.style) {
+   405→   405→        ctx.fillStyle = '#ffd9a0';
+   406→   406→        ctx.font = '13px sans-serif';
+   407→   407→        ctx.fillText('القرص غير مهيأ — «New» سينشئ أقسام النظام تلقائيًا وفق النمط المسموح.', 36, y);
+   408→   408→        y += 22;
+   409→   409→      }
+   410→   410→      bigButton(os, ctx, 36, y, 130, 36, 'New (قسم جديد)', () => {
+   411→   411→        if (!allowed.length) { setup.errorAr = partitionConflictMessageAr(boot, disk.style ?? 'mbr'); os.dirty = true; return; }
+   412→   412→        const style = allowed[0];
+   413→   413→        setup.partPlan = autoPartitionPlan(style, disk.sizeGB).map((p) => ({ label: p.label, kind: p.kind, fs: p.fs, sizeGB: p.sizeGB }));
+   414→   414→        setup.errorAr = null;
+   415→   415→        os.dirty = true;
+   416→   416→      });
+   417→   417→      bigButton(os, ctx, 178, y, 110, 36, 'Delete', () => {
+   418→   418→        if (disk.parts.length === 0) { setup.errorAr = 'لا أقسام لحذفها على هذا القرص.'; os.dirty = true; return; }
+   419→   419→        setup.partPlan = null;
+   420→   420→        useLabStore.getState().clearDisk(disk.id);
+   421→   421→        os.dirty = true;
+   422→   422→      }, false);
+   423→   423→      y += 48;
+   424→   424→
+   425→   425→      if (setup.partPlan) {
+   426→   426→        ctx.fillStyle = 'rgba(232,238,245,0.85)';
+   427→   427→        ctx.font = '13px sans-serif';
+   428→   428→        ctx.fillText('خطة الأقسام التي ستنشأ (حسب النمط):', 36, y);
+   429→   429→        y += 20;
+   430→   430→        for (const p of setup.partPlan) {
+   431→   431→          ctx.fillText(`  • ${p.label} — ${p.sizeGB.toFixed(2)} GB — ${p.fs.toUpperCase()}`, 48, y);
+   432→   432→          y += 20;
+   433→   433→        }
+   434→   434→      }
+   435→   435→      bigButton(os, ctx, 36, y + 8, 170, 38, 'Next — ابدأ التثبيت', () => {
+   436→   436→        if (!setup.targetDiskId) { setup.errorAr = 'اختر القرص الهدف أولًا.'; os.dirty = true; return; }
+   437→   437→        if (!platformBootsFamily) { setup.errorAr = `التثبيت محجوب: ${family.nameEn} لا تقبل الإقلاع بوضع ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'} — بدّل وضع الإقلاع من إعدادات البرنامج الثابت.`; os.dirty = true; return; }
+   438→   438→        if (family.requiresTpm2 && !store.sim.firmware.tpm) { setup.errorAr = 'التثبيت محجوب: TPM 2.0 مطلوب (فعّله من UEFI Setup ثم أعد المحاولة).'; os.dirty = true; return; }
+   439→   439→        if (family.requiresSecureBoot && !store.sim.firmware.secureBoot) { setup.errorAr = 'التثبيت محجوب: Secure Boot مطلوب لهذه العائلة.'; os.dirty = true; return; }
+   440→   440→        if (disk.style && !allowed.includes(disk.style)) { setup.errorAr = partitionConflictMessageAr(boot, disk.style); os.dirty = true; return; }
+   441→   441→        // فحص الحد الأدنى الموثق (قرص + ذاكرة)
+   442→   442→        if (disk.sizeGB < family.minDiskGB) { setup.errorAr = `القرص أصغر من الحد الأدنى الموثق (${family.minDiskGB} GB).`; os.dirty = true; return; }
+   443→   443→        if (!isInstalled(store.sim.parts.ram)) { setup.errorAr = `التثبيت محجوب: لا ذاكرة مركّبة — هذه العائلة تحتاج ${Math.ceil(family.minRamMB / 1024)} GB على الأقل.`; os.dirty = true; return; }
+   444→   444→        if (!setup.partPlan && disk.parts.length === 0) { setup.errorAr = 'أنشئ قسمًا (New) أولًا — لا مساحة مهيأة للنظام.'; os.dirty = true; return; }
+   445→   445→        setup.errorAr = null;
+   446→   446→        setup.step = 7;
+   447→   447→        setup.progress = 0;
+   448→   448→        setup.progressLabelAr = 'Copying Windows files…';
+   449→   449→        os.dirty = true;
+   450→   450→      });
+   451→   451→      bigButton(os, ctx, 220, y + 8, 110, 38, 'رجوع →', () => { setup.step = 5; os.dirty = true; }, false);
+   452→   452→      if (setup.errorAr) {
+   453→   453→        ctx.fillStyle = '#ffb4b4';
+   454→   454→        ctx.font = '13px sans-serif';
+   455→   455→        os.wrapText(ctx, '!! ' + setup.errorAr, 36, y + 62, os.W - 72, 17);
+   456→   456→      }
+   457→   457→    }
+   458→   458→    return;
+   459→   459→  }
+   460→   460→
+   461→   461→  // ===== 7) النسخ والتوسيع والتثبيت =====
+   462→   462→  if (setup.step === 7) {
+   463→   463→    const top = chrome(os, ctx, family, 'Installing ' + family.nameEn + '…');
+   464→   464→    const stages: Array<[string, number]> = [
+   465→   465→      ['Copying Windows files…', 0.25],
+   466→   466→      ['Getting files ready for installation…', 0.55],
+   467→   467→      ['Installing features…', 0.75],
+   468→   468→      ['Installing updates…', 0.92],
+   469→   469→      ['Finishing up…', 1],
+   470→   470→    ];
+   471→   471→    let stageAr = setup.progressLabelAr;
+   472→   472→    for (const [label, upto] of stages) {
+   473→   473→      if (setup.progress <= upto) { stageAr = label; break; }
+   474→   474→    }
+   475→   475→    setup.progressLabelAr = stageAr;
+   476→   476→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   477→   477→    ctx.font = '15px sans-serif';
+   478→   478→    ctx.fillText(`${stageAr} — ${(setup.progress * 100).toFixed(0)}%`, 36, top + 24);
+   479→   479→    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+   480→   480→    roundRect(ctx, 36, top + 40, os.W - 72, 22, 6);
+   481→   481→    ctx.fill();
+   482→   482→    ctx.fillStyle = '#39c7b8';
+   483→   483→    roundRect(ctx, 36, top + 40, Math.max(10, (os.W - 72) * setup.progress), 22, 6);
+   484→   484→    ctx.fill();
+   485→   485→    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+   486→   486→    ctx.font = '12.5px sans-serif';
+   487→   487→    ctx.fillText('قد يستغرق التثبيت بعض الوقت — الجهاز سيعيد التشغيل عدة مرات (محاكاة زمنية معجّلة).', 36, top + 86);
+   488→   488→
+   489→   489→    // تقدم زمني حقيقي (زمن مُعجّل: ~30 ثانية للمرحلة كاملة بغض النظر عن معدل الرسم)
+   490→   490→    if (setup.progress < 1) {
+   491→   491→      const last = setup.step7LastAt ?? now;
+   492→   492→      setup.progress = Math.min(1, setup.progress + Math.min(0.05, (now - last) / 1000 / 30));
+   493→   493→      setup.step7LastAt = now;
+   494→   494→      if (setup.progress >= 1) setup.step7DoneAt = now;
+   495→   495→      os.dirty = true;
+   496→   496→    } else if (setup.step7DoneAt && now - setup.step7DoneAt > 900) {
+   497→   497→      setup.step = 8;
+   498→   498→      setup.step8At = now;
+   499→   499→      setup.step7DoneAt = undefined;
+   500→   500→      os.dirty = true;
+   501→   501→    }
+   502→   502→    return;
+   503→   503→  }
+   504→   504→
+   505→   505→  // ===== 8) إعادة التشغيل الأولى (من القرص) — ثم الدخول إلى OOBE =====
+   506→   506→  if (setup.step === 8) {
+   507→   507→    chrome(os, ctx, family, 'Restarting…');
+   508→   508→    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+   509→   509→    ctx.font = 'bold 18px sans-serif';
+   510→   510→    ctx.fillText('سيُعاد تشغيل الجهاز الآن — الإقلاع من القرص (وليس الوسيط) لمواصلة الإعداد.', 36, 140);
+   511→   511→    ctx.font = '13px sans-serif';
+   512→   512→    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+   513→   513→    ctx.fillText('مرحلة أولى من إعادات التشغيل الموثقة لهذه العائلة — التثبيت لم يكتمل بعد.', 36, 168);
+   514→   514→    if (setup.step8At && now - setup.step8At > 1600) {
+   515→   515→      setup.restartsLeft = Math.max(0, family.oobe.restarts - 1);
+   516→   516→      setup.step = 9;
+   517→   517→      setup.oobeAt = now;
+   518→   518→      os.dirty = true;
+   519→   519→    }
+   520→   520→    return;
+   521→   521→  }
+   522→   522→
+   523→   523→  // ===== 9) تهيئة الأجهزة وإعادات التشغيل المتبقية (حسب oobe.restarts للعائلة) =====
+   524→   524→  if (setup.step === 9) {
+   525→   525→    chrome(os, ctx, family, 'Getting devices ready…');
+   526→   526→    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+   527→   527→    ctx.font = 'bold 20px sans-serif';
+   528→   528→    ctx.fillText('جارٍ تهيئة الأجهزة — لا تُطفئ الجهاز', 36, 150);
+   529→   529→    ctx.font = '13px sans-serif';
+   530→   530→    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+   531→   531→    ctx.fillText(`إعادات تشغيل موثقة لهذه العائلة: ${family.oobe.restarts} — المتبقي: ${setup.restartsLeft}`, 36, 178);
+   532→   532→    const t = setup.oobeAt ?? now;
+   533→   533→    const pct = Math.min(1, (now - t) / 1800);
+   534→   534→    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+   535→   535→    roundRect(ctx, 36, 200, os.W - 72, 18, 6);
+   536→   536→    ctx.fill();
+   537→   537→    ctx.fillStyle = '#39c7b8';
+   538→   538→    roundRect(ctx, 36, 200, Math.max(8, (os.W - 72) * pct), 18, 6);
+   539→   539→    ctx.fill();
+   540→   540→    if (now - t > 1800) {
+   541→   541→      if (setup.restartsLeft > 0) {
+   542→   542→        setup.restartsLeft -= 1;
+   543→   543→        setup.oobeAt = now; // لفّة إعادة تشغيل أخرى (محاكاة معجّلة)
+   544→   544→      } else {
+   545→   545→        setup.step = 10;
+   546→   546→        setup.oobeAt = now;
+   547→   547→      }
+   548→   548→      os.dirty = true;
+   549→   549→    }
+   550→   550→    return;
+   551→   551→  }
+   552→   552→
+   553→   553→  // ===== 10) OOBE — المنطقة =====
+   554→   554→  if (setup.step === 10) {
+   555→   555→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Region`);
+   556→   556→    const langs: Array<[string, string]> = [['العربية (فلسطين)', 'ar-PS'], ['English (United States)', 'en-US']];
+   557→   557→    let y = top + 8;
+   558→   558→    for (let i = 0; i < langs.length; i++) {
+   559→   559→      selectable(os, ctx, 36, y, 430, 50, langs[i][0], `المنطقة/التنسيق: ${langs[i][1]}`, setup.langIdx === i, () => { setup.langIdx = i; os.dirty = true; });
+   560→   560→      y += 60;
+   561→   561→    }
+   562→   562→    bigButton(os, ctx, 36, y + 10, 140, 38, 'Yes ←', () => { setup.step = 11; os.dirty = true; });
+   563→   563→    bigButton(os, ctx, 190, y + 10, 110, 38, 'إلغاء الإعداد', closeBtn, false);
+   564→   564→    return;
+   565→   565→  }
+   566→   566→
+   567→   567→  // ===== 11) OOBE — تخطيط الكيبورد =====
+   568→   568→  if (setup.step === 11) {
+   569→   569→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Keyboard Layout`);
+   570→   570→    const layouts: Array<[string, string]> = [['Arabic 101', 'عربي 101'], ['US QWERTY', 'إنجليزي أمريكي']];
+   571→   571→    let y = top + 8;
+   572→   572→    for (let i = 0; i < layouts.length; i++) {
+   573→   573→      selectable(os, ctx, 36, y, 430, 50, layouts[i][0], layouts[i][1], setup.langIdx === i, () => { setup.langIdx = i; os.dirty = true; });
+   574→   574→      y += 60;
+   575→   575→    }
+   576→   576→    bigButton(os, ctx, 36, y + 10, 140, 38, 'Yes ←', () => { setup.step = 12; os.dirty = true; });
+   577→   577→    bigButton(os, ctx, 190, y + 10, 110, 38, 'رجوع →', () => { setup.step = 10; os.dirty = true; }, false);
+   578→   578→    return;
+   579→   579→  }
+   580→   580→
+   581→   581→  // ===== 12) OOBE — الشبكة (إلزامية لويندوز 11 في المسار التعليمي) =====
+   582→   582→  if (setup.step === 12) {
+   583→   583→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Network`);
+   584→   584→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   585→   585→    ctx.font = '14px sans-serif';
+   586→   586→    ctx.fillText(family.oobe.networkRequired
+   587→   587→      ? 'هذه العائلة تتطلب اتصالًا بالشبكة للمتابعة (سلوك موثق لويندوز 11 في مسار الحساب عبر الإنترنت).'
+   588→   588→      : 'الاتصال اختياري لهذه العائلة — يمكن المتابعة دون شبكة (سلوك موثق للعائلات الأقدم).', 36, top + 14);
+   589→   589→    selectable(os, ctx, 36, top + 34, 430, 54, 'Ethernet — متصل (محاكاة)', 'اتصال شبكة محاكى داخل المختبر — لا وصول فعلي لأي شبكة', setup.networkConnected, () => { setup.networkConnected = true; os.dirty = true; });
+   590→   590→    selectable(os, ctx, 36, top + 98, 430, 54, 'I don’t have internet — بلا اتصال', family.oobe.networkRequired ? 'سيمنعك غياب الاتصال من المتابعة لهذه العائلة' : 'متابعة بلا شبكة — متاح لهذه العائلة', !setup.networkConnected, () => { setup.networkConnected = false; os.dirty = true; });
+   591→   591→    bigButton(os, ctx, 36, top + 170, 140, 38, 'Yes ←', () => {
+   592→   592→      if (family.oobe.networkRequired && !setup.networkConnected) {
+   593→   593→        setup.errorAr = 'المتابعة محجوبة: هذه العائلة تتطلب اتصالًا بالشبكة (وصل Ethernet المحاكى أو تخطّي عبر التثبيت لنسخ أقدم).';
+   594→   594→        os.dirty = true; return;
+   595→   595→      }
+   596→   596→      setup.errorAr = null;
+   597→   597→      setup.step = 13;
+   598→   598→      os.dirty = true;
+   599→   599→    });
+   600→   600→    bigButton(os, ctx, 190, top + 170, 110, 38, 'رجوع →', () => { setup.step = 11; os.dirty = true; }, false);
+   601→   601→    if (setup.errorAr) {
+   602→   602→      ctx.fillStyle = '#ffb4b4';
+   603→   603→      ctx.font = '13px sans-serif';
+   604→   604→      os.wrapText(ctx, '!! ' + setup.errorAr, 36, top + 222, os.W - 72, 17);
+   605→   605→    }
+   606→   606→    return;
+   607→   607→  }
+   608→   608→
+   609→   609→  // ===== 13) OOBE — اسم المستخدم =====
+   610→   610→  if (setup.step === 13) {
+   611→   611→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Who's going to use this PC?`);
+   612→   612→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   613→   613→    ctx.font = '14px sans-serif';
+   614→   614→    ctx.fillText('اسم المستخدم لحساب الجهاز الافتراضي (محاكاة — لا يُرسل ولا يُخزن خارج متصفحك).', 36, top + 12);
+   615→   615→    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+   616→   616→    roundRect(ctx, 36, top + 28, 380, 40, 7);
+   617→   617→    ctx.fill();
+   618→   618→    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+   619→   619→    roundRect(ctx, 36, top + 28, 380, 40, 7);
+   620→   620→    ctx.stroke();
+   621→   621→    ctx.fillStyle = '#e8eef5';
+   622→   622→    ctx.font = '16px sans-serif';
+   623→   623→    ctx.fillText(setup.userName + (os.blink ? '|' : ''), 48, top + 54);
+   624→   624→    os.addRect('custom', 36, top + 28, 380, 40, {
+   625→   625→      onClick: () => {
+   626→   626→        os.focusedTextbox = {
+   627→   627→          get: () => setup.userName,
+   628→   628→          set: (t) => { setup.userName = t.slice(0, 20); },
+   629→   629→        };
+   630→   630→        os.dirty = true;
+   631→   631→      },
+   632→   632→    }, 'text');
+   633→   633→    bigButton(os, ctx, 36, top + 88, 140, 38, 'Next ←', () => {
+   634→   634→      if (setup.userName.trim().length < 2) { setup.errorAr = 'أدخل اسم مستخدم (حرفان على الأقل).'; os.dirty = true; return; }
+   635→   635→      setup.errorAr = null;
+   636→   636→      setup.step = 14;
+   637→   637→      os.dirty = true;
+   638→   638→    });
+   639→   639→    bigButton(os, ctx, 190, top + 88, 110, 38, 'رجوع →', () => { setup.step = 12; os.dirty = true; }, false);
+   640→   640→    bigButton(os, ctx, 312, top + 88, 110, 38, 'إلغاء الإعداد', closeBtn, false);
+   641→   641→    if (setup.errorAr) {
+   642→   642→      ctx.fillStyle = '#ffb4b4';
+   643→   643→      ctx.font = '13px sans-serif';
+   644→   644→      ctx.fillText('!! ' + setup.errorAr, 36, top + 146);
+   645→   645→    }
+   646→   646→    return;
+   647→   647→  }
+   648→   648→
+   649→   649→  // ===== 14) OOBE — كلمة المرور (اختيارية) =====
+   650→   650→  if (setup.step === 14) {
+   651→   651→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Create a password`);
+   652→   652→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   653→   653→    ctx.font = '14px sans-serif';
+   654→   654→    ctx.fillText('كلمة مرور للحساب (اختيارية — يمكن المتابعة بلا كلمة مرور، سلوك موثق).', 36, top + 12);
+   655→   655→    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+   656→   656→    roundRect(ctx, 36, top + 28, 380, 40, 7);
+   657→   657→    ctx.fill();
+   658→   658→    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+   659→   659→    roundRect(ctx, 36, top + 28, 380, 40, 7);
+   660→   660→    ctx.stroke();
+   661→   661→    ctx.fillStyle = '#e8eef5';
+   662→   662→    ctx.font = '16px monospace';
+   663→   663→    ctx.fillText('•'.repeat(setup.password.length) + (os.blink ? '|' : ''), 48, top + 54);
+   664→   664→    os.addRect('custom', 36, top + 28, 380, 40, {
+   665→   665→      onClick: () => {
+   666→   666→        os.focusedTextbox = {
+   667→   667→          get: () => setup.password,
+   668→   668→          set: (t) => { setup.password = t.slice(0, 24); },
+   669→   669→        };
+   670→   670→        os.dirty = true;
+   671→   671→      },
+   672→   672→    }, 'text');
+   673→   673→    bigButton(os, ctx, 436, top + 28, 150, 40, 'مسح كلمة المرور', () => { setup.password = ''; os.dirty = true; }, false);
+   674→   674→    bigButton(os, ctx, 36, top + 88, 140, 38, 'Next ←', () => {
+   675→   675→      setup.privacy = [false, false, false, false];
+   676→   676→      setup.step = 15;
+   677→   677→      os.dirty = true;
+   678→   678→    });
+   679→   679→    bigButton(os, ctx, 190, top + 88, 110, 38, 'رجوع →', () => { setup.step = 13; os.dirty = true; }, false);
+   680→   680→    return;
+   681→   681→  }
+   682→   682→
+   683→   683→  // ===== 15) OOBE — الخصوصية والإنهاء (حسب privacyToggles للعائلة) =====
+   684→   684→  if (setup.step === 15) {
+   685→   685→    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Privacy settings`);
+   686→   686→    let y = top + 4;
+   687→   687→    if (family.oobe.privacyToggles) {
+   688→   688→      const opts: Array<[string, string]> = [
+   689→   689→        ['Location — الموقع', 'السماح للتطبيقات بالوصول إلى الموقع (محاكاة)'],
+   690→   690→        ['Find my device — اعثر على جهازي', 'تتبع الجهاز عند فقدانه (محاكاة)'],
+   691→   691→        ['Diagnostic data — بيانات التشخيص', 'إرسال بيانات تشخيصية (محاكاة — لا شيء يُرسل فعليًا)'],
+   692→   692→        ['Tailored experiences — تجارب مخصصة', 'استخدام بيانات التشخيص لتخصيص الاقتراحات (محاكاة)'],
+   693→   693→      ];
+   694→   694→      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   695→   695→      ctx.font = '14px sans-serif';
+   696→   696→      ctx.fillText('اختر إعدادات الخصوصية — يمكن تغييرها لاحقًا من إعدادات النظام (تعليميًا).', 36, y);
+   697→   697→      y += 22;
+   698→   698→      for (let i = 0; i < opts.length; i++) {
+   699→   699→        selectable(os, ctx, 36, y, 470, 46, opts[i][0], opts[i][1], setup.privacy[i] === true, () => {
+   700→   700→          setup.privacy[i] = !setup.privacy[i];
+   701→   701→          os.dirty = true;
+   702→   702→        });
+   703→   703→        y += 54;
+   704→   704→      }
+   705→   705→    } else {
+   706→   706→      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   707→   707→      ctx.font = '14px sans-serif';
+   708→   708→      ctx.fillText('لا شاشة خصوصية في مسار هذه العائلة (سلوك موثق — شاشة الخصوصية بدأت مع ويندوز 10).', 36, y);
+   709→   709→      y += 22;
+   710→   710→    }
+   711→   711→    bigButton(os, ctx, 36, y + 10, 220, 40, 'Finish — إنهاء الإعداد ← سطح المكتب', () => {
+   712→   712→      const ed = family.editions.find((e) => e.id === setup.editionId);
+   713→   713→      useLabStore.getState().completeInstall(setup.family!, `${ed?.nameAr ?? ''} ${setup.arch === 'x64' ? '64-bit' : '32-bit'}`, setup.targetDiskId ?? 'm2-1', setup.partPlan);
+   714→   714→      resetSetup();
+   715→   715→      // إعادة تشغيل أخيرة → الإقلاع من القرص إلى سطح المكتب الافتراضي
+   716→   716→      useLabStore.getState().warmRestart();
+   717→   717→      os.dirty = true;
+   718→   718→    });
+   719→   719→    bigButton(os, ctx, 270, y + 10, 110, 40, 'رجوع →', () => { setup.step = 14; os.dirty = true; }, false);
+   720→   720→    bigButton(os, ctx, 392, y + 10, 110, 40, 'إلغاء الإعداد', closeBtn, false);
+   721→   721→    return;
+   722→   722→  }
+   723→   723→}
+   724→   724→

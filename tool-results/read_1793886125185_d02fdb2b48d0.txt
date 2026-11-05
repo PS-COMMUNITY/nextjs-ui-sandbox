@@ -1,0 +1,1670 @@
+     1→/**
+     2→ * مصنع مجسمات الجهاز الإجرائية (Procedural PC Parts Factory) — النسخة التفصيلية
+     3→ * ----------------------------------------------------------------------------
+     4→ * يبني كل المجسمات برمجيًا (بلا نماذج خارجية) وفق تخطيط layout.ts:
+     5→ *  - المحاور: X∈[0,2.1] (0=زجاج، 2.1=جدار اللوحة)، Y∈[0,4.5]، Z∈[0,4.6] (0=خلف، 4.6=أمام).
+     6→ *  - اللوحة الأم عمودية، وجهها نحو -X. كل مجموعات dynamic تُبنى متمركزة حول الأصل
+     7→ *    ثم توضع على MOUNTS[id] (المدير يحرّكها لاحقًا إلى صينية TRAY مع TRAY.rotations).
+     8→ *  - المواد: MeshStandardMaterial فقط (الزجاج MeshPhysicalMaterial) عبر cache
+     9→ *    **بنطاق لكل قطعة** — إبراز قطعة لا يُضيء خامات قطعة أخرى.
+    10→ *  - الخامات: خرائط إجرائية من textures.ts (PCB، معدن مصقول، شبك تهوية، ملصقات عامة).
+    11→ *
+    12→ * المصدَّرات: setComponentId / buildEnvironment / buildAllParts
+    13→ * المخرجات المرجعية: مراوح مسماة (rotors) لمنظومة V6 و~40 مرجع flags.
+    14→ */
+    15→import * as THREE from 'three';
+    16→import type { ComponentId } from '../types';
+    17→import type { SceneQuality, FlagVisuals, PartVisuals } from './visualTypes';
+    18→import { BOARD, CASE, COLORS, DESK, MOUNTS, PERIPH, TRAY } from './layout';
+    19→import { applyGlbParts } from './glbParts';
+    20→import {
+    21→  brushedTexture,
+    22→  fanGrillTexture,
+    23→  frontBadgeTexture,
+    24→  gpuPlateTexture,
+    25→  hddLabelTexture,
+    26→  m2LabelTexture,
+    27→  pcbTexture,
+    28→  psuLabelTexture,
+    29→  ramLabelTexture,
+    30→  socketPinsTexture,
+    31→  ventMeshTexture,
+    32→} from './textures';
+    33→
+    34→// ============================================================
+    35→// حالة المصنع والمواد المشتركة
+    36→// ============================================================
+    37→
+    38→/** تُفعَّل داخل buildAllParts حسب الجودة (الظلال على القطع الرئيسية) */
+    39→let castEnabled = false;
+    40→
+    41→/**
+    42→ * نطاق القطعة الحالي: يجعل مفاتيح cache المواد خاصة بكل قطعة، فلا يلمس
+    43→ * تعديل emissive أثناء الإبراز خامات قطعة أخرى تشترك في اللون.
+    44→ */
+    45→let partScope = 'g';
+    46→function scope(s: string): void {
+    47→  partScope = s;
+    48→}
+    49→
+    50→interface MatOpts {
+    51→  map?: THREE.Texture | null;
+    52→  emissive?: number;
+    53→  emissiveIntensity?: number;
+    54→  transparent?: boolean;
+    55→  opacity?: number;
+    56→  side?: THREE.Side;
+    57→}
+    58→
+    59→/** cache للمواد القياسية — مفاتيح بنطاق القطعة */
+    60→const matCache = new Map<string, THREE.MeshStandardMaterial>();
+    61→
+    62→function mat(color: number, metalness: number, roughness: number, opts?: MatOpts): THREE.MeshStandardMaterial {
+    63→  const mapId = opts?.map ? opts.map.uuid : 'n';
+    64→  const key = `${partScope}|${color}|${metalness}|${roughness}|${mapId}|${opts?.emissive ?? ''}|${opts?.emissiveIntensity ?? ''}|${opts?.transparent ?? ''}|${opts?.opacity ?? ''}|${opts?.side ?? ''}`;
+    65→  const cached = matCache.get(key);
+    66→  if (cached) return cached;
+    67→  const m = new THREE.MeshStandardMaterial({
+    68→    color,
+    69→    metalness,
+    70→    roughness,
+    71→    map: opts?.map ?? null,
+    72→    emissive: opts?.emissive ?? 0x000000,
+    73→    emissiveIntensity: opts?.emissiveIntensity ?? 1,
+    74→    transparent: opts?.transparent ?? false,
+    75→    opacity: opts?.opacity ?? 1,
+    76→    side: opts?.side ?? THREE.FrontSide,
+    77→    flatShading: false,
+    78→  });
+    79→  matCache.set(key, m);
+    80→  return m;
+    81→}
+    82→
+    83→/** زجاج الغطاء الجانبي — مادة فيزيائية واحدة مشتركة */
+    84→let glassMat: THREE.MeshPhysicalMaterial | null = null;
+    85→function glass(): THREE.MeshPhysicalMaterial {
+    86→  if (!glassMat) {
+    87→    glassMat = new THREE.MeshPhysicalMaterial({
+    88→      color: COLORS.glass,
+    89→      metalness: 0.1,
+    90→      roughness: 0.08,
+    91→      transparent: true,
+    92→      opacity: 0.16,
+    93→      side: THREE.DoubleSide,
+    94→      flatShading: false,
+    95→    });
+    96→  }
+    97→  return glassMat;
+    98→}
+    99→
+   100→// ============================================================
+   101→// مساعدات هندسية
+   102→// ============================================================
+   103→
+   104→/** صندوق سريع مع ضبط الظلال حسب الجودة */
+   105→function box(
+   106→  w: number, h: number, d: number, material: THREE.Material,
+   107→  x = 0, y = 0, z = 0, cast = true, receive = false,
+   108→): THREE.Mesh {
+   109→  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+   110→  m.position.set(x, y, z);
+   111→  if (castEnabled && cast) m.castShadow = true;
+   112→  if (receive) m.receiveShadow = true;
+   113→  return m;
+   114→}
+   115→
+   116→type Axis = 'x' | 'y' | 'z';
+   117→
+   118→/** أسطوانة سريعة بمحور محدد (12 قطعة قطاعية — اقتصادية) */
+   119→function cyl(radius: number, length: number, material: THREE.Material, axis: Axis, x = 0, y = 0, z = 0, cast = true): THREE.Mesh {
+   120→  const m = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, length, 12), material);
+   121→  if (axis === 'x') m.rotation.z = Math.PI / 2;
+   122→  else if (axis === 'z') m.rotation.x = Math.PI / 2;
+   123→  m.position.set(x, y, z);
+   124→  if (castEnabled && cast) m.castShadow = true;
+   125→  return m;
+   126→}
+   127→
+   128→/** برغي معدني صغير — محور حسب الاستخدام (رأس سداسي + فتحة تصالب) */
+   129→function makeScrew(r: number, length: number, axis: Axis = 'y'): THREE.Mesh {
+   130→  return cyl(r, length, mat(COLORS.aluminum, 0.85, 0.35), axis);
+   131→}
+   132→
+   133→/** كابل أنبوبي على منحنى CatmullRom (نقاط محلية داخل مجموعة القطعة) */
+   134→function makeCable(points: THREE.Vector3[], radius: number, color = 0x181d24): THREE.Mesh {
+   135→  const curve = new THREE.CatmullRomCurve3(points);
+   136→  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, radius, 8, false), mat(color, 0.3, 0.6));
+   137→  if (castEnabled) m.castShadow = true;
+   138→  return m;
+   139→}
+   140→
+   141→/** تحويل نقاط كابل عالمية إلى محلية بالنسبة لموضع تثبيت القطعة */
+   142→function cablePoints(mount: readonly [number, number, number], pts: Array<readonly [number, number, number]>): THREE.Vector3[] {
+   143→  return pts.map((p) => new THREE.Vector3(p[0] - mount[0], p[1] - mount[1], p[2] - mount[2]));
+   144→}
+   145→
+   146→/** مستطيل مستوٍ مواجه لمحور محدد (للملصقات والشبكات) */
+   147→function plane(w: number, h: number, material: THREE.Material, axis: 'x' | 'y' | 'z', x: number, y: number, z: number): THREE.Mesh {
+   148→  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
+   149→  if (axis === 'x') m.rotation.y = -Math.PI / 2; // مواجه -X
+   150→  else if (axis === 'y') m.rotation.x = -Math.PI / 2;
+   151→  m.position.set(x, y, z);
+   152→  return m;
+   153→}
+   154→
+   155→interface FanParts { frame: THREE.Group; blades: THREE.Group; }
+   156→
+   157→/**
+   158→ * مروحة واقعية: إطار مربع كامل بحواف وأركان دائرية + فتحات براغي + حلقة داخلية
+   159→ * + 9 شفرات مائلة + محور بغطاء. محور الدوران الافتراضي = Y المحلي.
+   160→ */
+   161→function makeFan(radius: number): FanParts {
+   162→  const depth = Math.max(0.14, radius * 0.5);
+   163→  const half = radius * 1.32;
+   164→
+   165→  // الإطار: 4 حواف كاملة + 4 أركان أسطوانية
+   166→  const frame = new THREE.Group();
+   167→  const frameMat = mat(COLORS.plastic, 0.3, 0.62);
+   168→  const barGeoX = new THREE.BoxGeometry(half * 2, depth, 0.1);
+   169→  const barGeoZ = new THREE.BoxGeometry(0.1, depth, half * 2);
+   170→  for (const s of [-1, 1]) {
+   171→    const barX = new THREE.Mesh(barGeoX, frameMat);
+   172→    barX.position.set(0, 0, s * half);
+   173→    const barZ = new THREE.Mesh(barGeoZ, frameMat);
+   174→    barZ.position.set(s * half, 0, 0);
+   175→    if (castEnabled) { barX.castShadow = true; barZ.castShadow = true; }
+   176→    frame.add(barX, barZ);
+   177→  }
+   178→  const cornerGeo = new THREE.CylinderGeometry(0.055, 0.055, depth, 10);
+   179→  const holeGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.02, 8);
+   180→  const holeMat = mat(COLORS.black, 0.2, 0.6);
+   181→  for (const sx of [-1, 1]) {
+   182→    for (const sz of [-1, 1]) {
+   183→      const corner = new THREE.Mesh(cornerGeo, frameMat);
+   184→      corner.position.set(sx * (half - 0.05), 0, sz * (half - 0.05));
+   185→      if (castEnabled) corner.castShadow = true;
+   186→      frame.add(corner);
+   187→      // فتحة برغي مظلمة على الوجه العلوي
+   188→      const hole = new THREE.Mesh(holeGeo, holeMat);
+   189→      hole.position.set(sx * half, depth / 2, sz * half);
+   190→      frame.add(hole);
+   191→    }
+   192→  }
+   193→  // حلقة داخلية محيطية
+   194→  const ring = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.99, 0.016, 6, 28), mat(COLORS.metalDark, 0.5, 0.5));
+   195→  ring.rotation.x = Math.PI / 2;
+   196→  if (castEnabled) ring.castShadow = true;
+   197→  frame.add(ring);
+   198→  // دعامات خلفية (ستراهنة بين الحواف خلف الشفرات)
+   199→  const strutGeo = new THREE.BoxGeometry(0.05, 0.02, radius * 1.7);
+   200→  for (const sz of [-1, 1]) {
+   201→    const strut = new THREE.Mesh(strutGeo, frameMat);
+   202→    strut.position.set(sz * radius * 0.72, -depth * 0.28, 0);
+   203→    strut.rotation.y = Math.PI / 2;
+   204→    frame.add(strut);
+   205→  }
+   206→
+   207→  // الشفرات: 9 شفرات مائلة 35° داخل مجموعة blades (تُدفع إلى spinners)
+   208→  const blades = new THREE.Group();
+   209→  const bladeGeo = new THREE.BoxGeometry(0.016, radius * 0.8, radius * 0.32);
+   210→  const bladeMat = mat(0x242c36, 0.25, 0.45);
+   211→  for (let i = 0; i < 9; i++) {
+   212→    const arm = new THREE.Object3D();
+   213→    arm.rotation.y = (i / 9) * Math.PI * 2;
+   214→    const pitch = new THREE.Object3D();
+   215→    pitch.position.set(radius * 0.52, 0, 0);
+   216→    pitch.rotation.x = 0.62; // ميلان الشفرة ≈ 35°
+   217→    const blade = new THREE.Mesh(bladeGeo, bladeMat);
+   218→    blade.rotation.z = Math.PI / 2;
+   219→    if (castEnabled) blade.castShadow = true;
+   220→    pitch.add(blade);
+   221→    arm.add(pitch);
+   222→    blades.add(arm);
+   223→  }
+   224→  const hub = new THREE.Mesh(
+   225→    new THREE.CylinderGeometry(radius * 0.17, radius * 0.17, depth * 0.72, 14),
+   226→    mat(COLORS.metalDark, 0.5, 0.4),
+   227→  );
+   228→  if (castEnabled) hub.castShadow = true;
+   229→  blades.add(hub);
+   230→  // غطاء محور بحلقة داكنة
+   231→  const cap = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.1, radius * 0.1, depth * 0.76, 12), mat(0x11161c, 0.3, 0.5));
+   232→  blades.add(cap);
+   233→  const capRing = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.11, 0.008, 6, 16), mat(COLORS.metalMid, 0.6, 0.4));
+   234→  capRing.rotation.x = Math.PI / 2;
+   235→  capRing.position.y = depth * 0.38;
+   236→  blades.add(capRing);
+   237→
+   238→  return { frame, blades };
+   239→}
+   240→
+   241→/** ألوان أسلاك داكنة متنوعة (توهم أسلاك كابل الطاقة) */
+   242→const WIRE_COLORS: readonly number[] = [0x141414, 0x1d1414, 0x14201a, 0x141424, 0x241f10, 0x101418];
+   243→
+   244→// ============================================================
+   245→// تعريف المكوّن لأغراض الالتقاط (Raycast)
+   246→// ============================================================
+   247→
+   248→/** يضع userData.componentId على الجذر وعلى كل أبناء الشجرة */
+   249→export function setComponentId(g: THREE.Object3D, id: ComponentId): void {
+   250→  g.traverse((o) => {
+   251→    o.userData.componentId = id;
+   252→  });
+   253→}
+   254→
+   255→// ============================================================
+   256→// بيئة المشهد (خلفية/ضباب/أرضية/شبكة/إضاءة)
+   257→// ============================================================
+   258→
+   259→export function buildEnvironment(scene: THREE.Scene, quality: SceneQuality): void {
+   260→  scene.background = new THREE.Color(COLORS.bg);
+   261→  scene.fog = new THREE.Fog(COLORS.bg, 20, 52);
+   262→
+   263→  // أرضية المختبر — 75سم أسفل سطح مكتب الورشة (توجيه v4 أ.1)
+   264→  const ground = new THREE.Mesh(
+   265→    new THREE.CircleGeometry(30, 28),
+   266→    new THREE.MeshStandardMaterial({ color: 0x131820, metalness: 0, roughness: 0.94, flatShading: false }),
+   267→  );
+   268→  ground.rotation.x = -Math.PI / 2;
+   269→  ground.position.y = DESK.floorY;
+   270→  ground.receiveShadow = true;
+   271→  scene.add(ground);
+   272→
+   273→  // شبكة أرضية خفيفة
+   274→  const grid = new THREE.GridHelper(40, 40, 0x232c38, 0x171d26);
+   275→  grid.position.y = DESK.floorY + 0.01;
+   276→  const gridMat: THREE.Material | THREE.Material[] = grid.material;
+   277→  const gridMats = Array.isArray(gridMat) ? gridMat : [gridMat];
+   278→  for (const gm of gridMats) {
+   279→    gm.transparent = true;
+   280→    gm.opacity = 0.35;
+   281→  }
+   282→  scene.add(grid);
+   283→
+   284→  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+   285→  scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1b2028, 0.6));
+   286→
+   287→  // شمس دافئة مع ظلال (حسب الجودة) — تغطي المكتب كاملًا
+   288→  const dir = new THREE.DirectionalLight(0xfff2e0, 2.6);
+   289→  dir.position.set(-7, 10, 8);
+   290→  if (quality !== 'low') {
+   291→    dir.castShadow = true;
+   292→    const size = quality === 'high' ? 2048 : 1024;
+   293→    dir.shadow.mapSize.set(size, size);
+   294→    dir.shadow.camera.left = -12;
+   295→    dir.shadow.camera.right = 12;
+   296→    dir.shadow.camera.top = 12;
+   297→    dir.shadow.camera.bottom = -12;
+   298→    dir.shadow.camera.near = 2;
+   299→    dir.shadow.camera.far = 45;
+   300→    dir.shadow.camera.updateProjectionMatrix();
+   301→    dir.shadow.bias = -0.0004;
+   302→    dir.shadow.normalBias = 0.02;
+   303→  }
+   304→  scene.add(dir);
+   305→
+   306→  const fill = new THREE.PointLight(0xffffff, 0.6, 0, 0);
+   307→  fill.position.set(4, 7, -2);
+   308→  scene.add(fill);
+   309→  const front = new THREE.PointLight(0xfff4e0, 1.6, 0, 0);
+   310→  front.position.set(-5, 4.5, 6);
+   311→  scene.add(front);
+   312→
+   313→  // محطة العمل: مكتب + جدار ورشة + إضاءة سقفية + مشترك كهرباء
+   314→  scene.add(buildWorkstation());
+   315→}
+   316→
+   317→// ============================================================
+   318→// محطة عمل الورشة (توجيه v4 أ.1 — مكتب واحد يجمع الجهاز والشاشة والصينية)
+   319→// ============================================================
+   320→
+   321→function buildWorkstation(): THREE.Group {
+   322→  scope('desk');
+   323→  const g = new THREE.Group();
+   324→  g.name = 'workstation';
+   325→
+   326→  const w = DESK.maxX - DESK.minX; // 15
+   327→  const d = DESK.maxZ - DESK.minZ; // 10.6
+   328→  const cx = (DESK.minX + DESK.maxX) / 2;
+   329→  const cz = (DESK.minZ + DESK.maxZ) / 2;
+   330→
+   331→  // --- سطح المكتب: لوح سميك بحافة ألمنيوم على الأطراف ---
+   332→  const topMat = mat(0x4a525c, 0.25, 0.65, { map: brushedTexture('#525a64') });
+   333→  const top = box(w, DESK.thickness, d, topMat, cx, DESK.topY - DESK.thickness / 2, cz, true, true);
+   334→  top.name = 'desk-top';
+   335→  g.add(top);
+   336→  const trimMat = mat(0x565f6a, 0.7, 0.4);
+   337→  // أربعة أشرطة حواف معدنية رفيعة (تفصل السطح عن الأطراف كطاولات الورش الحقيقية)
+   338→  g.add(box(w, 0.06, 0.06, trimMat, cx, DESK.topY - 0.03, DESK.minZ + 0.03, false));
+   339→  g.add(box(w, 0.06, 0.06, trimMat, cx, DESK.topY - 0.03, DESK.maxZ - 0.03, false));
+   340→  g.add(box(0.06, 0.06, d, trimMat, DESK.minX + 0.03, DESK.topY - 0.03, cz, false));
+   341→  g.add(box(0.06, 0.06, d, trimMat, DESK.maxX - 0.03, DESK.topY - 0.03, cz, false));
+   342→
+   343→  // --- أرجل فولاذية على شكل حرف L + عارضات عرضية + رف سفلي ---
+   344→  const legMat = mat(COLORS.deskSteel, 0.6, 0.45, { map: brushedTexture('#2f3740') });
+   345→  const legH = DESK.topY - DESK.thickness - DESK.floorY; // 7
+   346→  const legCy = DESK.floorY + legH / 2;
+   347→  for (const lx of [DESK.minX + DESK.legInset, DESK.maxX - DESK.legInset]) {
+   348→    for (const lz of [DESK.minZ + DESK.legInset, DESK.maxZ - DESK.legInset]) {
+   349→      g.add(box(0.24, legH, 0.24, legMat, lx, legCy, lz, true));
+   350→      // قدم مطاطية سوداء
+   351→      g.add(box(0.3, 0.08, 0.3, mat(0x0c0f14, 0.2, 0.7), lx, DESK.floorY + 0.04, lz, false));
+   352→    }
+   353→  }
+   354→  // عارضتان طوليتان تربطان الأرجل + رف سفلي كامل
+   355→  for (const lz of [DESK.minZ + DESK.legInset, DESK.maxZ - DESK.legInset]) {
+   356→    g.add(box(w - DESK.legInset * 2, 0.14, 0.1, legMat, cx, DESK.floorY + 1.1, lz, false));
+   357→  }
+   358→  g.add(box(w - 1.4, 0.1, d - 1.4, mat(0x232a32, 0.5, 0.55), cx, DESK.floorY + 3.6, cz, true, true));
+   359→
+   360→  // --- جدار الورشة خلف المكتب + لوح تعليق أدوات + رفان ---
+   361→  const wallMat = mat(COLORS.wall, 0.15, 0.85);
+   362→  const wall = box(34, 26, 0.4, wallMat, cx, DESK.floorY + 13, DESK.minZ - 0.8, false, true);
+   363→  wall.name = 'workshop-wall';
+   364→  g.add(wall);
+   365→  // إيزود السقف/الجدار: شريط داكن أفقياً + لوح تعليق خلف الجهاز
+   366→  g.add(box(34, 0.5, 0.06, mat(0x11161d, 0.2, 0.8), cx, DESK.floorY + 6.4, DESK.minZ - 0.58, false));
+   367→  const pegboard = box(6.4, 5.2, 0.06, mat(0x171d26, 0.3, 0.75, { map: ventMeshTexture('#1c242e', '#10161d') }), 1.05, DESK.floorY + 9.4, DESK.minZ - 0.56, false);
+   368→  pegboard.name = 'pegboard';
+   369→  g.add(pegboard);
+   370→  // رفان معدنيان على الجدار مع علب صغيرة
+   371→  for (const sy of [DESK.floorY + 10.6, DESK.floorY + 12.2]) {
+   372→    g.add(box(5.2, 0.1, 1.2, legMat, -3.6, sy, DESK.minZ - 0.2, false));
+   373→    g.add(box(5.2, 0.1, 1.2, legMat, 6.8, sy, DESK.minZ - 0.2, false));
+   374→    for (let i = 0; i < 3; i++) {
+   375→      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x2c3641 : 0x39434e, 0.2, 0.7), -4.8 + i * 1.2, sy + 0.45, DESK.minZ - 0.2, false));
+   376→      g.add(box(0.9, 0.8, 0.9, mat(i % 2 ? 0x39434e : 0x2c3641, 0.2, 0.7), 5.9 + i * 1.1, sy + 0.45, DESK.minZ - 0.2, false));
+   377→    }
+   378→  }
+   379→
+   380→  // --- مصابيح سقفية معلقة (زينة + إضاءة) ---
+   381→  const barMat = mat(0x39424d, 0.5, 0.45);
+   382→  const glowMat = new THREE.MeshStandardMaterial({ color: 0xf5f8ff, emissive: 0xeef4ff, emissiveIntensity: 0.9, roughness: 0.4, metalness: 0, flatShading: false });
+   383→  for (const bx of [-2.4, 4.6]) {
+   384→    const bz = bx < 0 ? 2.2 : 6.2; // توزيع المصباحين على عمق المكتب
+   385→    g.add(cyl(0.02, 3.4, mat(0x1a2028, 0.4, 0.5), 'y', bx, DESK.floorY + 16.2, bz, false)); // سلك التعليق
+   386→    g.add(box(0.5, 0.12, 4.4, barMat, bx, DESK.floorY + 14.4, bz, false));
+   387→    g.add(box(0.42, 0.03, 4.2, glowMat, bx, DESK.floorY + 14.32, bz, false));
+   388→    const lamp = new THREE.PointLight(0xf2f6ff, 1.5, 26, 1.4);
+   389→    lamp.position.set(bx, DESK.floorY + 14.0, bz);
+   390→    g.add(lamp);
+   391→  }
+   392→
+   393→  // --- مشترك كهرباء على المكتب خلف الشاشة (تفصيل واقعي غير تفاعلي) ---
+   394→  const strip = new THREE.Group();
+   395→  strip.name = 'power-strip';
+   396→  const sx = 6.4, sz = 7.5;
+   397→  strip.add(box(1.9, 0.14, 0.42, mat(0x252c34, 0.35, 0.6), sx, 0.07, sz, true));
+   398→  for (let i = 0; i < 4; i++) {
+   399→    strip.add(box(0.26, 0.02, 0.24, mat(0x0d1116, 0.2, 0.7), sx - 0.66 + i * 0.44, 0.145, sz, false));
+   400→  }
+   401→  strip.add(box(0.14, 0.05, 0.1, mat(0x8c1d1d, 0.3, 0.5, { emissive: 0x8c1d1d, emissiveIntensity: 0.5 }), sx + 0.82, 0.16, sz, false)); // لمبة حمراء
+   402→  // كابلا مخرجان: نحو الجدار خلف المكتب
+   403→  strip.add(makeCable([
+   404→    new THREE.Vector3(sx - 0.85, 0.09, sz),
+   405→    new THREE.Vector3(sx - 1.4, 0.05, sz + 0.5),
+   406→    new THREE.Vector3(sx - 1.7, 0.05, DESK.maxZ - 0.4),
+   407→    new THREE.Vector3(sx - 1.75, 0.05, DESK.maxZ + 0.15),
+   408→  ], 0.045));
+   409→  g.add(strip);
+   410→
+   411→  return g;
+   412→}
+   413→
+   414→// ============================================================
+   415→// الهيكل الثابت (caseShell) — توجيه v4 (أولوية 2):
+   416→//  - حوض فولاذي حقيقي مبثوق من مقطع C بسماكة جدران (ExtrudeGeometry)
+   417→//    بدل خمسة صناديق ملسقة — الحواف والأركان لها سماكة وحدود واضحة.
+   418→//  - جدار صينية اللوحة الأم مع مساند نحاسية (standoffs) وتجويفات تمرير كابلات.
+   419→//  - واجهة أمامية صناعية: إطار بارز + محيط محفور + شبك سحب سداسي + لوح علوي مصقول.
+   420→//  - خلفية بمنافذ توسعة وقصورة I/O وشبك عسلوي لمزود الطاقة.
+   421→//  - قفص تخزين 3.5" بأرضية ومساند ومطاطات + أقدام مطاطية.
+   422→// ============================================================
+   423→
+   424→function buildCaseShell(flags: FlagVisuals): THREE.Group {
+   425→  scope('case');
+   426→  const g = new THREE.Group();
+   427→  g.name = 'case-shell';
+   428→
+   429→  const cx = (CASE.minX + CASE.maxX) / 2; // 1.05
+   430→  const cy = (CASE.minY + CASE.maxY) / 2; // 2.25
+   431→  const cz = (CASE.minZ + CASE.maxZ) / 2; // 2.3
+   432→  const wX = CASE.maxX - CASE.minX;       // 2.1
+   433→  const hY = CASE.maxY - CASE.minY;       // 4.5
+   434→  const dZ = CASE.maxZ - CASE.minZ;       // 4.6
+   435→  const T = 0.09;                         // سماكة جدار الحوض
+   436→
+   437→  // ===== 1) حوض الهيكل: مقطع C (خلف + سقف + أرضية) مبثوق على طول X =====
+   438→  // المقطع في مستوى (u=Z of case, v=Y of case)، البثق على عمق wX ثم يدور إلى محور X.
+   439→  const shellShape = new THREE.Shape();
+   440→  shellShape.moveTo(0, 0);
+   441→  shellShape.lineTo(dZ, 0);
+   442→  shellShape.lineTo(dZ, T);
+   443→  shellShape.lineTo(T, T);
+   444→  shellShape.lineTo(T, hY - T);
+   445→  shellShape.lineTo(dZ, hY - T);
+   446→  shellShape.lineTo(dZ, hY);
+   447→  shellShape.lineTo(0, hY);
+   448→  shellShape.closePath();
+   449→  const shellGeo = new THREE.ExtrudeGeometry(shellShape, { depth: wX, bevelEnabled: false, curveSegments: 4 });
+   450→  const shellMat = mat(COLORS.metalDark, 0.62, 0.46, { map: brushedTexture('#2b333d') });
+   451→  const tub = new THREE.Mesh(shellGeo, shellMat);
+   452→  tub.rotation.y = -Math.PI / 2; // عمق البثق (+Z الشكلي) → -X العالمي
+   453→  tub.position.x = CASE.maxX;    // يمتد البثق من X=2.1 نحو X=0
+   454→  tub.castShadow = castEnabled;
+   455→  tub.receiveShadow = true;
+   456→  tub.name = 'case-tub';
+   457→  g.add(tub);
+   458→
+   459→  // ===== 2) جدار صينية اللوحة الأم (يمين) بمساند نحاسية وتجويفات كابلات =====
+   460→  const trayWallMat = mat(0x2c343e, 0.55, 0.48, { map: brushedTexture('#333c46') });
+   461→  g.add(box(0.06, hY - 2 * T, dZ - T, trayWallMat, CASE.maxX - 0.03, cy, cz + T / 2, true, true));
+   462→  // 6 مساند نحاسية تحت مسامير اللوحة
+   463→  const standoffMat = mat(0xb08d3e, 0.85, 0.35);
+   464→  const ys = [BOARD.yMin + 0.1, (BOARD.yMin + BOARD.yMax) / 2, BOARD.yMax - 0.1];
+   465→  const zs = [BOARD.zMin + 0.1, BOARD.zMax - 0.1];
+   466→  for (const wy of ys) {
+   467→    for (const wz of zs) {
+   468→      g.add(cyl(0.032, 0.1, standoffMat, 'x', BOARD.x + 0.02, wy, wz, false));
+   469→      const s = makeScrew(0.035, 0.3, 'x');
+   470→      s.position.set(BOARD.x + 0.05, wy, wz);
+   471→      flags.moboScrews.push(s);
+   472→      g.add(s);
+   473→    }
+   474→  }
+   475→  // تجويفات تمرير الكابلات (grommets) بثلاثة مستويات
+   476→  const grommetMat = mat(0x0d1116, 0.2, 0.7);
+   477→  for (const gy of [1.5, 2.8, 4.0]) {
+   478→    g.add(box(0.045, 0.6, 0.32, grommetMat, CASE.maxX - 0.045, gy, 3.7, false));
+   479→    g.add(box(0.02, 0.66, 0.38, mat(0x39434e, 0.5, 0.5), CASE.maxX - 0.03, gy, 3.7, false));
+   480→  }
+   481→
+   482→  // ===== 3) الواجهة الأمامية — تصميم صناعي بثلاث طبقات =====
+   483→  const bezelBodyMat = mat(0x1c222a, 0.4, 0.55);
+   484→  const bezelFrameMat = mat(0x2a323c, 0.55, 0.45, { map: brushedTexture('#333c46') });
+   485→  // لوح خلفي يلامس حوض الهيكل
+   486→  g.add(box(wX + 0.1, hY, 0.1, bezelBodyMat, cx, cy, CASE.maxZ + 0.05, true, true));
+   487→  // إطار بارز يحيط بمحيط الشبك (4 أشرطة بسماكة ظاهرة)
+   488→  const fx0 = 0.16, fx1 = wX - 0.16, fy0 = 0.3, fy1 = 3.05; // فتحة الشبك
+   489→  const fw = fx1 - fx0, fh = fy1 - fy0;
+   490→  const fz = CASE.maxZ + 0.13;
+   491→  g.add(box(fw + 0.16, 0.09, 0.12, bezelFrameMat, cx, fy1 + 0.045, fz, false));
+   492→  g.add(box(fw + 0.16, 0.09, 0.12, bezelFrameMat, cx, fy0 - 0.045, fz, false));
+   493→  g.add(box(0.09, fh + 0.18, 0.12, bezelFrameMat, fx0 - 0.045, (fy0 + fy1) / 2, fz, false));
+   494→  g.add(box(0.09, fh + 0.18, 0.12, bezelFrameMat, fx1 + 0.045, (fy0 + fy1) / 2, fz, false));
+   495→  // شبك السحب السداسي داخل المحيط (غائر للداخل — عمق حقيقي)
+   496→  const ventPlateMat = mat(0x11151b, 0.35, 0.6, { map: ventMeshTexture('#1a2129', '#07090c') });
+   497→  g.add(box(fw, fh, 0.04, ventPlateMat, cx, (fy0 + fy1) / 2, CASE.maxZ + 0.09, false));
+   498→  // لوح علوي مصقول بشعار عام وشريط LED سماوي
+   499→  g.add(box(wX + 0.1, hY - fy1 - 0.06, 0.14, mat(0x262d36, 0.5, 0.5, { map: brushedTexture('#2e3640') }), cx, (fy1 + hY) / 2, CASE.maxZ + 0.07, true));
+   500→  g.add(plane(0.8, 0.2, mat(0xffffff, 0.2, 0.5, { map: frontBadgeTexture(), transparent: true }), 'z', cx, 4.02, CASE.maxZ + 0.145));
+   501→  g.add(box(1.5, 0.035, 0.02, mat(COLORS.accent, 0.3, 0.4, { emissive: COLORS.accent, emissiveIntensity: 0.7 }), cx, fy1 + 0.115, CASE.maxZ + 0.145, false));
+   502→  // شريط سفلي صلب أسفل الشبك
+   503→  g.add(box(wX + 0.1, fy0, 0.12, bezelBodyMat, cx, fy0 / 2, CASE.maxZ + 0.06, false));
+   504→
+   505→  // ===== 4) الخلف: قصورة I/O + منافذ + 7 مقابس توسعة + شبك عسلوي =====
+   506→  g.add(box(0.55, 1.1, 0.03, mat(COLORS.black, 0.3, 0.6), 1.35, 3.35, CASE.minZ - 0.005, false));
+   507→  const portMat = mat(0x0d1116, 0.3, 0.6);
+   508→  const ethMat = mat(0x1c242c, 0.4, 0.5, { map: null });
+   509→  for (const py of [3.62, 3.5]) {
+   510→    g.add(box(0.09, 0.07, 0.02, portMat, 1.18, py, CASE.minZ - 0.018, false));
+   511→    g.add(box(0.09, 0.07, 0.02, portMat, 1.32, py, CASE.minZ - 0.018, false));
+   512→  }
+   513→  g.add(box(0.15, 0.12, 0.02, ethMat, 1.5, 3.56, CASE.minZ - 0.018, false));
+   514→  g.add(box(0.16, 0.05, 0.02, portMat, 1.24, 3.3, CASE.minZ - 0.018, false));
+   515→  // شبك عسلوي عمودي بجوار قصورة I/O + شبك ألمنيوم مزود الطاقة أسفل
+   516→  g.add(box(0.42, 1.15, 0.02, ventPlateMat, 0.42, 3.35, CASE.minZ - 0.005, false));
+   517→  g.add(box(1.2, 0.85, 0.02, ventPlateMat, 1.35, 0.48, CASE.minZ - 0.005, false));
+   518→
+   519→  const slotStripMat = mat(COLORS.metalMid, 0.6, 0.45, { map: brushedTexture('#424d59') });
+   520→  for (let i = 0; i < 7; i++) {
+   521→    g.add(box(0.72, 0.05, 0.03, slotStripMat, 1.35, 2.55 - i * 0.13, CASE.minZ - 0.005, false));
+   522→    g.add(cyl(0.024, 0.02, mat(COLORS.aluminum, 0.8, 0.35), 'z', 1.66, 2.615 - i * 0.13, CASE.minZ - 0.012, false));
+   523→  }
+   524→
+   525→  // ===== 5) قفص التخزين 3.5" (يبقى بالهيكل عند فك القرص) =====
+   526→  const cageMat = mat(0x272f38, 0.55, 0.5, { map: brushedTexture('#2f3842') });
+   527→  const hx = MOUNTS.hdd; // [1.05, 0.78, 3.55]
+   528→  g.add(box(1.34, 0.04, 1.56, cageMat, hx[0], hx[1] - 0.15, hx[2], true, true)); // أرضية القفص
+   529→  g.add(box(1.34, 0.55, 0.05, cageMat, hx[0], hx[1] + 0.12, hx[2] - 0.76, true)); // جدار خلفي
+   530→  for (const px of [hx[0] - 0.62, hx[0] + 0.62]) {
+   531→    g.add(box(0.05, 0.55, 1.56, cageMat, px, hx[1] + 0.12, hx[2], true));       // قضيبان جانبيان
+   532→    // مطاطات تثبيت دائرية على الجانبين
+   533→    for (const qz of [hx[2] - 0.55, hx[2] + 0.55]) {
+   534→      g.add(cyl(0.045, 0.07, mat(0x15191f, 0.2, 0.75), 'x', px, hx[1], qz, false));
+   535→    }
+   536→  }
+   537→  // 4 مسامير قفص أمامية
+   538→  for (const px of [hx[0] - 0.55, hx[0] + 0.55]) {
+   539→    for (const py of [hx[1] - 0.08, hx[1] + 0.08]) {
+   540→      g.add(cyl(0.02, 0.02, mat(COLORS.aluminum, 0.8, 0.35), 'z', px, py, hx[2] + 0.77, false));
+   541→    }
+   542→  }
+   543→
+   544→  // ===== 6) السقف: فلتر غبار شبكي + منطقة التحكم العلوية (زر/LED/USB) =====
+   545→  g.add(box(1.7, 0.012, 3.4, ventPlateMat, cx, CASE.maxY + 0.006, cz - 0.1, false));
+   546→  g.add(cyl(0.07, 0.06, mat(COLORS.metalMid, 0.5, 0.4), 'y', 0.5, CASE.maxY + 0.005, CASE.maxZ - 0.45, false));
+   547→  g.add(cyl(0.042, 0.045, mat(0x1a2027, 0.4, 0.5), 'y', 0.28, CASE.maxY + 0.003, CASE.maxZ - 0.45, false));
+   548→  g.add(cyl(0.02, 0.012, mat(0xd8dade, 0.2, 0.5), 'y', 0.28, CASE.maxY + 0.028, CASE.maxZ - 0.45, false));
+   549→  const ledMat = new THREE.MeshStandardMaterial({
+   550→    color: 0x10151b, emissive: 0x000000, emissiveIntensity: 1.2, roughness: 0.35, metalness: 0.1, flatShading: false,
+   551→  });
+   552→  const powerLed = new THREE.Mesh(new THREE.SphereGeometry(0.03, 12, 8), ledMat); // مادة فريدة يتحكم بها علم powerOn
+   553→  powerLed.position.set(0.78, CASE.maxY + 0.01, CASE.maxZ - 0.45);
+   554→  flags.powerLed = powerLed;
+   555→  g.add(powerLed);
+   556→  const usbMat = mat(COLORS.black, 0.3, 0.55);
+   557→  const tongueMat = mat(0x3f4a55, 0.3, 0.5);
+   558→  for (const ux of [0.62, 0.86]) {
+   559→    g.add(box(0.15, 0.016, 0.09, usbMat, ux, CASE.maxY - 0.002, CASE.maxZ - 0.45, false));
+   560→    g.add(box(0.11, 0.006, 0.06, tongueMat, ux, CASE.maxY + 0.004, CASE.maxZ - 0.45, false));
+   561→  }
+   562→  g.add(cyl(0.028, 0.014, mat(0x2f6b4f, 0.4, 0.45), 'y', 1.08, CASE.maxY + 0.002, CASE.maxZ - 0.45, false));
+   563→  g.add(cyl(0.028, 0.014, mat(0x7a4040, 0.4, 0.45), 'y', 1.2, CASE.maxY + 0.002, CASE.maxZ - 0.45, false));
+   564→
+   565→  // فلتر غبار سفلي تحت منطقة مزود الطاقة
+   566→  g.add(box(1.5, 0.012, 1.35, ventPlateMat, 1.32, CASE.minY + 0.012, 0.72, false));
+   567→
+   568→  // ===== 7) أقدام مطاطية أربعة (الجهاز يقف على المكتب) =====
+   569→  const footMat = mat(0x0c0f14, 0.2, 0.75);
+   570→  for (const fxp of [0.28, wX - 0.28]) {
+   571→    for (const fzp of [0.5, dZ - 0.5]) {
+   572→      g.add(box(0.42, 0.06, 0.5, footMat, fxp, CASE.minY + 0.03, fzp, false));
+   573→    }
+   574→  }
+   575→
+   576→  setComponentId(g, 'case');
+   577→  return g;
+   578→}
+   579→
+   580→// ============================================================
+   581→// الغطاء الجانبي الزجاجي المفصلي (sidePanel)
+   582→// ============================================================
+   583→
+   584→function buildSidePanel(): THREE.Group {
+   585→  scope('panel');
+   586→  const g = new THREE.Group();
+   587→  g.name = 'part-side-panel';
+   588→  g.position.set(0, 2.25, 0.06); // محور المفصلة Y عند الحافة الخلفية
+   589→
+   590→  // الزجاج: عند الدوران 0 يكون مستويًا على x=0
+   591→  const glassMesh = box(0.04, 4.4, 4.5, glass(), 0, 0, 2.24, false);
+   592→  glassMesh.name = 'panel-glass';
+   593→  g.add(glassMesh);
+   594→
+   595→  // إطار معدني رفيع + تجويف مقبض أمامي
+   596→  const frameMat = mat(COLORS.metalMid, 0.6, 0.4, { map: brushedTexture('#3d4753') });
+   597→  g.add(box(0.07, 0.06, 4.56, frameMat, 0, 2.23, 2.24, true));  // علوي
+   598→  g.add(box(0.07, 0.06, 4.56, frameMat, 0, -2.23, 2.24, true)); // سفلي
+   599→  g.add(box(0.07, 4.52, 0.07, frameMat, 0, 0, 0, true));        // خلفي (عند المفصلة)
+   600→  g.add(box(0.07, 4.52, 0.07, frameMat, 0, 0, 4.49, true));     // أمامي
+   601→  g.add(box(0.03, 1.1, 0.04, mat(0x10151b, 0.3, 0.6), 0.02, 0, 4.47, false)); // تجويف المقبض
+   602→
+   603→  setComponentId(g, 'case');
+   604→  return g;
+   605→}
+   606→
+   607→// ============================================================
+   608→// اللوحة الأم (dynamic.motherboard) — متمركزة عند MOUNTS.motherboard
+   609→// محليًا: الوجه الأمامي نحو -X عند x = -thickness/2
+   610→// ============================================================
+   611→
+   612→function buildMotherboard(flags: FlagVisuals): THREE.Group {
+   613→  scope('motherboard');
+   614→  const g = new THREE.Group();
+   615→  g.name = 'part-motherboard';
+   616→  const face = -BOARD.thickness / 2;                  // -0.03
+   617→  const onFace = (t: number): number => face - t / 2; // مركز قطعة سماكتها t على الوجه
+   618→
+   619→  const pcbPlain = mat(COLORS.pcb, 0.35, 0.6);
+   620→  const pcbFront = mat(0xffffff, 0.35, 0.58, { map: pcbTexture('#14503a', '#2e8f63') });
+   621→
+   622→  // 1) جسم PCB — الوجه الأمامي (-X) بخامة مسارات مطبوعة
+   623→  // (اسم ثابت mobo-pcb ليستبدله PCScene بمسح لوحة حقيقي CC0 عند نجاح التحميل)
+   624→  const pcbMats = [pcbPlain, pcbFront, pcbPlain, pcbPlain, pcbPlain, pcbPlain];
+   625→  const pcbBody = new THREE.Mesh(new THREE.BoxGeometry(BOARD.thickness, BOARD.yMax - BOARD.yMin, BOARD.zMax - BOARD.zMin), pcbMats);
+   626→  pcbBody.name = 'mobo-pcb';
+   627→  if (castEnabled) pcbBody.castShadow = true;
+   628→  pcbBody.receiveShadow = true;
+   629→  g.add(pcbBody);
+   630→
+   631→  // 1ب) تفاصيل SMD: رقائق صغيرة + مكثفات VRM
+   632→  const chipMat = mat(0x11171e, 0.25, 0.5);
+   633→  const capMat = mat(0x3a4a58, 0.55, 0.4);
+   634→  const chipSpots: Array<readonly [number, number]> = [
+   635→    [1.0, -0.8], [1.0, -0.65], [1.0, -0.5], [1.04, -0.35],
+   636→    [0.45, 0.5], [0.55, 0.68], [0.4, 0.82], [0.7, 0.55], [0.85, 0.75],
+   637→    [-0.3, 0.82], [-0.42, 0.88],
+   638→    [-1.38, -0.62], [-1.38, -0.34],
+   639→  ];
+   640→  for (const [sy, sz] of chipSpots) {
+   641→    g.add(box(0.045, 0.09, 0.15, chipMat, onFace(0.045), sy, sz, false));
+   642→  }
+   643→  const capGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.09, 10);
+   644→  for (const cz of [-0.98, -0.84, -0.7, -0.56]) {
+   645→    const c = new THREE.Mesh(capGeo, capMat);
+   646→    c.rotation.z = Math.PI / 2;
+   647→    c.position.set(onFace(0.09), 0.86, cz);
+   648→    g.add(c);
+   649→  }
+   650→
+   651→  // 2) مقبس المعالج: إطار ألمنيوم + لوح إبر ذهبي + رافعة بمقبض
+   652→  const alu = mat(COLORS.aluminum, 0.85, 0.4, { map: brushedTexture('#a7b0ba') });
+   653→  const sx = 0.7, sz = -0.62; // مركز المقبس المحلي
+   654→  g.add(box(0.06, 0.46, 0.05, alu, onFace(0.06), sx + 0.205, sz, true)); // إطار: 4 أضلاع
+   655→  g.add(box(0.06, 0.46, 0.05, alu, onFace(0.06), sx - 0.205, sz, true));
+   656→  g.add(box(0.06, 0.05, 0.36, alu, onFace(0.06), sx, sz + 0.205, true));
+   657→  g.add(box(0.06, 0.05, 0.36, alu, onFace(0.06), sx, sz - 0.205, true));
+   658→  g.add(box(0.04, 0.37, 0.37, mat(0xffffff, 0.5, 0.45, { map: socketPinsTexture() }), onFace(0.04) - 0.005, sx, sz, false)); // لوح الإبر
+   659→
+   660→  // رافعة المقبس: pivot عند حافة المقبس (يدور حول X المحلي عند الفتح) + مقبض عرضي
+   661→  const lever = new THREE.Object3D();
+   662→  lever.name = 'flag-cpu-lever';
+   663→  lever.position.set(onFace(0.06) - 0.04, 0.45, -0.87);
+   664→  lever.add(box(0.025, 0.42, 0.045, mat(COLORS.plastic, 0.2, 0.5), 0, 0.21, 0.02, false));
+   665→  lever.add(box(0.025, 0.03, 0.14, mat(COLORS.plastic, 0.2, 0.5), 0, 0.42, 0.02, false)); // مقبض
+   666→  flags.cpuLever = lever;
+   667→  g.add(lever);
+   668→
+   669→  // 2ب) مشتتا VRM بأزعاج — فوق المقبس وعلى يساره (خارج حدود المقبس بلا تداخل)
+   670→  const vrmFinH = new THREE.BoxGeometry(0.05, 0.03, 0.44);   // أزعاج أفقية مكدسة على Y
+   671→  const vrmFinV = new THREE.BoxGeometry(0.05, 0.44, 0.03);   // أزعاج رأسية موزعة على Z
+   672→  for (let i = 0; i < 7; i++) {
+   673→    const finTop = new THREE.Mesh(vrmFinH, alu);
+   674→    finTop.position.set(onFace(0.03) - 0.05, 0.99 + i * 0.062, -0.62);
+   675→    g.add(finTop);
+   676→    if (i < 6) {
+   677→      const finLeft = new THREE.Mesh(vrmFinV, alu);
+   678→      finLeft.position.set(onFace(0.03) - 0.05, 0.72, -1.14 + i * 0.052);
+   679→      g.add(finLeft);
+   680→    }
+   681→  }
+   682→  g.add(box(0.03, 0.5, 0.48, alu, onFace(0.03), 1.19, -0.62, false));  // قاعدة VRM العلوي (فوق المقبس)
+   683→  g.add(box(0.03, 0.44, 0.3, alu, onFace(0.03), 0.72, -1.03, false));  // قاعدة VRM الأيسر (يسار المقبس)
+   684→
+   685→  // 3) أربع فتحات RAM عمودية + مزلاجان لكل فتحة (8 pivots تدور حول X)
+   686→  const ramSlotGeo = new THREE.BoxGeometry(0.05, 1.35, 0.08);
+   687→  const ramSlotMat = mat(0x1b1f26, 0.2, 0.55);
+   688→  const ramRidgeMat = mat(0x2b333d, 0.3, 0.5);
+   689→  const clipGeo = new THREE.BoxGeometry(0.07, 0.07, 0.1);
+   690→  const clipMat = mat(0x39414c, 0.3, 0.5);
+   691→  for (const z of [-0.27, -0.07, 0.13, 0.33]) { // عالمي z = 1.30 .. 1.90
+   692→    const slot = new THREE.Mesh(ramSlotGeo, ramSlotMat);
+   693→    slot.position.set(onFace(0.05), 0.55, z);
+   694→    g.add(slot);
+   695→    g.add(box(0.052, 1.3, 0.015, ramRidgeMat, onFace(0.052) - 0.002, 0.55, z - 0.032, false)); // حدّ فتحة
+   696→    for (const end of [1, -1]) {
+   697→      const clip = new THREE.Object3D();
+   698→      clip.name = 'flag-ram-clip';
+   699→      clip.position.set(onFace(0.05) - 0.005, 0.55 + end * 0.675, z);
+   700→      const cm = new THREE.Mesh(clipGeo, clipMat);
+   701→      cm.position.set(0, end * 0.05, 0);
+   702→      clip.add(cm);
+   703→      flags.ramClips.push(clip);
+   704→      g.add(clip);
+   705→    }
+   706→  }
+   707→
+   708→  // 4) فتحتا PCIe أفقيتان + أطراف ذهبية داخلية + مزلاج أبيض
+   709→  const pcieMat = mat(0x242a33, 0.2, 0.55);
+   710→  const gold = mat(0xc9a23f, 0.85, 0.35);
+   711→  g.add(box(0.05, 0.07, 1.85, pcieMat, onFace(0.05), -0.75, -0.15, true));
+   712→  g.add(box(0.05, 0.07, 1.85, pcieMat, onFace(0.05), -1.1, -0.15, true));
+   713→  g.add(box(0.02, 0.015, 1.6, gold, onFace(0.02) - 0.012, -0.775, -0.15, false));
+   714→  g.add(box(0.02, 0.015, 1.6, gold, onFace(0.02) - 0.012, -1.125, -0.15, false));
+   715→
+   716→  const latch = new THREE.Object3D();
+   717→  latch.name = 'flag-pcie-latch';
+   718→  latch.position.set(onFace(0.05) - 0.035, -0.75, -1.10);
+   719→  latch.add(box(0.05, 0.16, 0.06, mat(0xd8dade, 0.1, 0.5), 0, 0.06, 0, false));
+   720→  flags.pcieLatch = latch;
+   721→  g.add(latch);
+   722→
+   723→  // 5) مشتت chipset: قاعدة + 7 زعانف + لوح علوي بتجويف داكن
+   724→  g.add(box(0.03, 0.38, 0.38, alu, onFace(0.03), -0.35, 0.5, true));
+   725→  const chipFinGeo = new THREE.BoxGeometry(0.09, 0.028, 0.36);
+   726→  for (let i = 0; i < 7; i++) {
+   727→    const fin = new THREE.Mesh(chipFinGeo, alu);
+   728→    fin.position.set(onFace(0.03) - 0.06, -0.5 + i * 0.062, 0.5);
+   729→    g.add(fin);
+   730→  }
+   731→  g.add(box(0.02, 0.4, 0.4, mat(0x1a2027, 0.4, 0.5), onFace(0.02) - 0.105, -0.35, 0.5, false));
+   732→
+   733→  // 6) منطقة M.2: مقبس + برغي تثبيت + واقٍ
+   734→  g.add(box(0.06, 0.06, 0.1, mat(COLORS.black, 0.3, 0.5), onFace(0.06), -0.2, -0.14, false));
+   735→  const m2Screw = cyl(0.028, 0.06, mat(COLORS.aluminum, 0.85, 0.35), 'x', onFace(0.06) + 0.005, -0.2, -0.52, false);
+   736→  m2Screw.name = 'flag-m2-screw';
+   737→  flags.m2Screw = m2Screw;
+   738→  g.add(m2Screw);
+   739→  g.add(box(0.015, 0.05, 0.75, mat(0x39434e, 0.5, 0.5), onFace(0.015) - 0.005, -0.2, -0.13, false)); // واقٍ طويل
+   740→
+   741→  // 7) بطارية CMOS الفضية + حاملها
+   742→  g.add(cyl(0.09, 0.045, mat(0xc9ced6, 0.9, 0.3), 'x', onFace(0.045), -0.42, 0.15, false));
+   743→  g.add(box(0.02, 0.2, 0.2, mat(0x2a323c, 0.4, 0.5), onFace(0.02), -0.42, 0.15, false));
+   744→
+   745→  // 8) رأسا طاقة ATX24 و EPS مع تجويف داخلي داكن
+   746→  const black = mat(COLORS.black, 0.3, 0.5);
+   747→  g.add(box(0.08, 0.5, 0.25, black, onFace(0.08), 1.0, 1.05, true));   // ATX24 (عالمي 3.75, 2.62)
+   748→  g.add(box(0.05, 0.42, 0.19, mat(0x0a0e12, 0.25, 0.6), onFace(0.05) - 0.045, 1.0, 1.05, false));
+   749→  g.add(box(0.08, 0.26, 0.2, black, onFace(0.08), 1.27, -1.02, true)); // EPS (عالمي 4.02, 0.55)
+   750→  g.add(box(0.05, 0.2, 0.15, mat(0x0a0e12, 0.25, 0.6), onFace(0.05) - 0.045, 1.27, -1.02, false));
+   751→
+   752→  // 9) عنقود المنافذ الخلفية I/O مع منافذ بارزة نحو -Z
+   753→  const ioMat = mat(0x151a20, 0.4, 0.55);
+   754→  const ioPorts = mat(0x0d1116, 0.3, 0.6);
+   755→  g.add(box(0.14, 0.55, 0.45, ioMat, onFace(0.14), 0.75, -0.99, true)); // الكتلة (عالمي y 3.5, z 0.355..0.805)
+   756→  g.add(box(0.1, 0.08, 0.02, ioPorts, onFace(0.1) - 0.045, 0.85, -1.222, false)); // USB
+   757→  g.add(box(0.1, 0.08, 0.02, ioPorts, onFace(0.1) - 0.045, 0.75, -1.222, false));
+   758→  g.add(box(0.12, 0.1, 0.02, ioPorts, onFace(0.1) - 0.045, 0.6, -1.222, false));  // إيثرنت
+   759→  g.add(box(0.12, 0.04, 0.02, ioPorts, onFace(0.1) - 0.045, 0.45, -1.222, false)); // صوت
+   760→
+   761→  // 10) منفذا SATA بحرف L عند الحافة العلوية
+   762→  for (const stz of [0.05, 0.24]) {
+   763→    g.add(box(0.05, 0.07, 0.13, black, onFace(0.05), 1.32, stz, false));
+   764→    g.add(box(0.04, 0.025, 0.05, gold, onFace(0.04) - 0.03, 1.32, stz - 0.02, false));
+   765→  }
+   766→
+   767→  // 11) 4 رؤوس مراوح pin headers + قابسها
+   768→  const headerMat = mat(0x1b1f26, 0.2, 0.55);
+   769→  const headerGeo = new THREE.BoxGeometry(0.05, 0.06, 0.1);
+   770→  for (const hz of [0.7, 0.85, 1.0, 1.15]) {
+   771→    const h = new THREE.Mesh(headerGeo, headerMat);
+   772→    h.position.set(onFace(0.05), 1.44, hz);
+   773→    g.add(h);
+   774→  }
+   775→  const fanPlug = box(0.08, 0.08, 0.18, mat(0x101418, 0.2, 0.6), onFace(0.08) - 0.03, 1.44, 0.775, false);
+   776→  fanPlug.name = 'flag-fan-header-plug';
+   777→  flags.fanHeaderPlug = fanPlug;
+   778→  g.add(fanPlug);
+   779→
+   780→  // 12) كتلة front-panel + قابسها
+   781→  g.add(box(0.06, 0.14, 0.22, headerMat, onFace(0.06), -1.2, 0.9, false));
+   782→  const fpPlug = box(0.05, 0.14, 0.22, mat(0x101418, 0.2, 0.6), onFace(0.06) - 0.055, -1.2, 0.9, false);
+   783→  fpPlug.name = 'flag-front-panel-plug';
+   784→  flags.frontPanelPlug = fpPlug;
+   785→  g.add(fpPlug);
+   786→
+   787→  // 13) توجيه v4: تجمع الصوت — رقاقة الكودك + مكثفات + عزل ذهبي (زاوية سفلية)
+   788→  g.add(box(0.03, 0.14, 0.14, mat(0x11171e, 0.25, 0.5), onFace(0.03), -1.32, -0.55, false));
+   789→  const capAudioGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.08, 10);
+   790→  for (const az of [-0.78, -0.86, -0.94, -1.02]) {
+   791→    const c = new THREE.Mesh(capAudioGeo, mat(0x3a4a58, 0.55, 0.4));
+   792→    c.rotation.z = Math.PI / 2;
+   793→    c.position.set(onFace(0.08), -1.28, az);
+   794→    g.add(c);
+   795→  }
+   796→  g.add(box(0.02, 0.5, 0.015, gold, onFace(0.02) - 0.012, -1.28, -0.68, false)); // خط عزل الصوت
+   797→
+   798→  // 14) توجيه v4: فتحة PCIe x1 قصيرة تحت فتحتي x16
+   799→  g.add(box(0.05, 0.05, 0.5, pcieMat, onFace(0.05), -1.38, 0.3, false));
+   800→
+   801→  // 15) توجيه v4: رأس USB 3.0 أزرق داخلي (يسار أعلى اللوحة)
+   802→  g.add(box(0.09, 0.16, 0.26, mat(0x1d4ed8, 0.35, 0.5), onFace(0.09), 1.05, -0.42, false));
+   803→  g.add(box(0.06, 0.1, 0.18, mat(0x0d1116, 0.25, 0.6), onFace(0.06) - 0.05, 1.05, -0.42, false));
+   804→
+   805→  // 16) توجيه v4: ملفات VRM (chokes) مربعة داكنة يسار المقبس
+   806→  for (const chy of [0.32, 0.16, 0.0]) {
+   807→    for (const chz of [-0.92, -0.78]) {
+   808→      const choke = box(0.05, 0.13, 0.13, mat(0x181e26, 0.3, 0.55), onFace(0.05), chy, chz, false);
+   809→      g.add(choke);
+   810→      g.add(box(0.02, 0.05, 0.05, mat(0x39434e, 0.4, 0.5), onFace(0.02) - 0.04, chy, chz, false));
+   811→    }
+   812→  }
+   813→
+   814→  setComponentId(g, 'motherboard');
+   815→  return g;
+   816→}
+   817→
+   818→// ============================================================
+   819→// المعالج (dynamic.cpu) — متمركز عند MOUNTS.cpu، الوجه نحو -X
+   820→// ============================================================
+   821→
+   822→function buildCpu(): THREE.Group {
+   823→  scope('cpu');
+   824→  const g = new THREE.Group();
+   825→  g.name = 'part-cpu';
+   826→
+   827→  // قاعدة خضراء (substrate)
+   828→  g.add(box(0.05, 0.4, 0.4, mat(0x1e6b3a, 0.3, 0.55), 0, 0, 0, true, true));
+   829→  // أطراف ذهبية محيطية على الوجه الأمامي (إشارة إلى تلامسات LGA)
+   830→  const goldEdge = mat(0xc9a23f, 0.9, 0.3);
+   831→  g.add(box(0.008, 0.4, 0.014, goldEdge, -0.026, 0, -0.193, false));
+   832→  g.add(box(0.008, 0.4, 0.014, goldEdge, -0.026, 0, 0.193, false));
+   833→  g.add(box(0.008, 0.014, 0.4, goldEdge, -0.026, -0.193, 0, false));
+   834→  g.add(box(0.008, 0.014, 0.4, goldEdge, -0.026, 0.193, 0, false));
+   835→
+   836→  // غطاء IHS بأركان مشطوفة (مستطيل مشطوف عبر Cylinder ثماني مسطح؟) — نستخدم Extrude
+   837→  const ihsShape = new THREE.Shape();
+   838→  const s = 0.17;
+   839→  const r = 0.045;
+   840→  ihsShape.moveTo(-s + r, -s);
+   841→  ihsShape.lineTo(s - r, -s);
+   842→  ihsShape.quadraticCurveTo(s, -s, s, -s + r);
+   843→  ihsShape.lineTo(s, s - r);
+   844→  ihsShape.quadraticCurveTo(s, s, s - r, s);
+   845→  ihsShape.lineTo(-s + r, s);
+   846→  ihsShape.quadraticCurveTo(-s, s, -s, s - r);
+   847→  ihsShape.lineTo(-s, -s + r);
+   848→  ihsShape.quadraticCurveTo(-s, -s, -s + r, -s);
+   849→  const ihsGeo = new THREE.ExtrudeGeometry(ihsShape, { depth: 0.035, bevelEnabled: false });
+   850→  const ihs = new THREE.Mesh(ihsGeo, mat(0xc2c9d1, 0.9, 0.3));
+   851→  ihs.rotation.y = -Math.PI / 2; // البثق على المحور X نحو -X
+   852→  ihs.position.set(-0.045, 0, 0);
+   853→  if (castEnabled) ihs.castShadow = true;
+   854→  g.add(ihs);
+   855→
+   856→  // شقّا اتجاه على حافتين (توجيه المعالج) — على وجه IHS الأمامي
+   857→  const notchMat = mat(0x6b7280, 0.6, 0.4);
+   858→  g.add(box(0.02, 0.03, 0.07, notchMat, -0.082, 0.155, 0.05, false));
+   859→  g.add(box(0.02, 0.03, 0.07, notchMat, -0.082, -0.155, -0.05, false));
+   860→
+   861→  // مثلث اتجاه ذهبي مسطح (prism ثلاثي) على وجه IHS
+   862→  const tri = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.008, 3), mat(0xd4af37, 0.85, 0.3));
+   863→  tri.rotation.z = Math.PI / 2;
+   864→  tri.position.set(-0.086, 0.1, -0.1);
+   865→  g.add(tri);
+   866→
+   867→  setComponentId(g, 'cpu');
+   868→  return g;
+   869→}
+   870→
+   871→// ============================================================
+   872→// المبرّد البرجي (dynamic.cooler) — يبرز نحو -X من المقبس
+   873→// ============================================================
+   874→
+   875→function buildCooler(): THREE.Group {
+   876→  scope('cooler');
+   877→  const g = new THREE.Group();
+   878→  g.name = 'part-cooler';
+   879→  const copper = mat(COLORS.copper, 0.9, 0.3);
+   880→  const alu = mat(COLORS.aluminum, 0.85, 0.4, { map: brushedTexture('#a7b0ba') });
+   881→
+   882→  // قاعدة نحاسية على وجه المعالج
+   883→  g.add(box(0.05, 0.3, 0.3, copper, 0.33, 0, 0, true));
+   884→
+   885→  // قائمتا تثبيت جانبيتان (من القاعدة إلى كتلة الزعانف)
+   886→  g.add(box(0.24, 0.6, 0.015, alu, 0.2, 0, 0.3, false));
+   887→  g.add(box(0.24, 0.6, 0.015, alu, 0.2, 0, -0.3, false));
+   888→
+   889→  // 4 أنابيب حرارية نحاسية بقوس علوي (TubeGeometry على منحنى)
+   890→  const pipeOffsets: Array<readonly [number, number]> = [[0.09, 0.09], [0.09, -0.09], [-0.09, 0.09], [-0.09, -0.09]];
+   891→  for (const [py, pz] of pipeOffsets) {
+   892→    const pts = [
+   893→      new THREE.Vector3(0.31, py, pz),
+   894→      new THREE.Vector3(0.05, py, pz),
+   895→      new THREE.Vector3(-0.18, py, pz),
+   896→      new THREE.Vector3(-0.24, py + 0.15, pz),
+   897→      new THREE.Vector3(-0.24, py + 0.42, pz),
+   898→      new THREE.Vector3(-0.18, py + 0.52, pz),
+   899→      new THREE.Vector3(-0.08, py + 0.56, pz),
+   900→    ];
+   901→    const curve = new THREE.CatmullRomCurve3(pts);
+   902→    const pipe = new THREE.Mesh(new THREE.TubeGeometry(curve, 22, 0.028, 7, false), copper);
+   903→    if (castEnabled) pipe.castShadow = true;
+   904→    g.add(pipe);
+   905→    // قبعتا نهاية لبداية ونهاية الأنبوب
+   906→    const startCap = new THREE.Mesh(new THREE.SphereGeometry(0.028, 8, 8), copper);
+   907→    startCap.position.copy(pts[0]);
+   908→    const endCap = new THREE.Mesh(new THREE.SphereGeometry(0.028, 8, 8), copper);
+   909→    endCap.position.copy(pts[pts.length - 1]);
+   910→    g.add(startCap, endCap);
+   911→  }
+   912→
+   913→  // كتلة زعانف: 14 لوحًا رفيعًا متقاربًا
+   914→  const finGeo = new THREE.BoxGeometry(0.016, 0.62, 0.5);
+   915→  for (let i = 0; i < 14; i++) {
+   916→    const fin = new THREE.Mesh(finGeo, alu);
+   917→    fin.position.set(0.12 - i * 0.026, 0, 0);
+   918→    if (castEnabled) fin.castShadow = true;
+   919→    g.add(fin);
+   920→  }
+   921→  // لوح علوي يغطي أطراف الزعانف
+   922→  g.add(box(0.38, 0.02, 0.52, alu, -0.05, 0.325, 0, false));
+   923→
+   924→  // مروحة البرج الأمامية (تنظر نحو -X) + قابسان معدنيان
+   925→  const wrapper = new THREE.Group();
+   926→  wrapper.position.set(-0.38, 0, 0);
+   927→  wrapper.rotation.z = Math.PI / 2;
+   928→  const fan = makeFan(0.25);
+   929→  wrapper.add(fan.frame, fan.blades);
+   930→  // (إصلاح تدقيق V6) تسمية الـRotor + محور الدوران المحلي — مرجع منظومة المراوح عند غياب GLB
+   931→  fan.blades.name = 'cooler_fan_rotor';
+   932→  fan.blades.userData.spinAxis = 'y'; // الريش الإجرائي يدور حول Y المحلي للغلاف
+   933→  g.add(wrapper);
+   934→  g.add(box(0.015, 0.03, 0.6, mat(COLORS.metalMid, 0.6, 0.4), -0.38, 0.385, 0, false));
+   935→  g.add(box(0.015, 0.03, 0.6, mat(COLORS.metalMid, 0.6, 0.4), -0.38, -0.385, 0, false));
+   936→
+   937→  setComponentId(g, 'cooler');
+   938→  return g;
+   939→}
+   940→
+   941→// ============================================================
+   942→// الذاكرة (dynamic.ram) — عصاتان متجاورتان (عالمي z 1.30 و 1.50)
+   943→// ============================================================
+   944→
+   945→function buildRam(): THREE.Group {
+   946→  scope('ram');
+   947→  const g = new THREE.Group();
+   948→  g.name = 'part-ram';
+   949→  const pcbMat = mat(0x1e6b3a, 0.3, 0.55);
+   950→  const alu = mat(COLORS.aluminum, 0.8, 0.38, { map: brushedTexture('#a7b0ba') });
+   951→  const gold = mat(0xc9a23f, 0.9, 0.3);
+   952→  const glowMat = new THREE.MeshStandardMaterial({
+   953→    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.85, roughness: 0.35, metalness: 0.1, flatShading: false,
+   954→  });
+   955→
+   956→  for (const z of [-0.1, 0.1]) { // محليًا: عالمي 1.30 و 1.50
+   957→    const stick = new THREE.Group();
+   958→    // نواة PCB
+   959→    stick.add(box(0.34, 1.3, 0.045, pcbMat, 0.03, 0, 0, true, true));
+   960→    // لوحا ناشر حراري على الوجهين بميل V خفيف
+   961→    const plateL = box(0.36, 1.06, 0.018, alu, 0, 0.04, -0.034, true);
+   962→    plateL.rotation.x = -0.16;
+   963→    const plateR = box(0.36, 1.06, 0.018, alu, 0, 0.04, 0.034, true);
+   964→    plateR.rotation.x = 0.16;
+   965→    stick.add(plateL, plateR);
+   966→    // موزّع علوي + شريط إضاءة + ملصق عام
+   967→    stick.add(box(0.36, 0.13, 0.1, mat(0x2a323c, 0.5, 0.45, { map: brushedTexture('#39434e') }), 0.02, 0.585, 0, true));
+   968→    stick.add(box(0.37, 0.045, 0.104, glowMat, 0.02, 0.665, 0, false));
+   969→    const label = plane(0.26, 0.1, mat(0xffffff, 0.2, 0.55, { map: ramLabelTexture() }), 'x', -0.163, 0.2, 0);
+   970→    stick.add(label);
+   971→    // أطراف ذهبية سفلية مع شق توجيه (key)
+   972→    stick.add(box(0.34, 0.15, 0.047, gold, 0.03, -0.575, 0, false));
+   973→    stick.add(box(0.35, 0.022, 0.05, mat(0x101418, 0.2, 0.6), 0.03, -0.535, 0, false));
+   974→    stick.position.set(0, 0, z);
+   975→    g.add(stick);
+   976→  }
+   977→  setComponentId(g, 'ram');
+   978→  return g;
+   979→}
+   980→
+   981→// ============================================================
+   982→// بطاقة الرسوميات (dynamic.gpu) — أفقية، PCB عند مستوى فتحة x16
+   983→// ============================================================
+   984→
+   985→function buildGpu(flags: FlagVisuals): THREE.Group {
+   986→  scope('gpu');
+   987→  const g = new THREE.Group();
+   988→  g.name = 'part-gpu';
+   989→  const shroudMat = mat(0x232b34, 0.4, 0.55, { map: brushedTexture('#2a333d') });
+   990→
+   991→  // PCB أفقي + غطاء + backplate
+   992→  g.add(box(1.07, 0.04, 2.35, mat(COLORS.pcb, 0.35, 0.6, { map: pcbTexture('#14503a', '#2e8f63') }), 0, -0.03, 0, true, true));
+   993→  g.add(box(1.05, 0.42, 2.3, shroudMat, 0, -0.26, 0, true));
+   994→  // حافتا جانبيتان دائريتان للغطاء (داخل عرض الغطاء نفسه)
+   995→  g.add(cyl(0.21, 2.24, shroudMat, 'z', 0.315, -0.26, 0, true));
+   996→  g.add(cyl(0.21, 2.24, shroudMat, 'z', -0.315, -0.26, 0, true));
+   997→  // شريط إضاءة سماوي + لوحة اسم عامة
+   998→  const gpuGlow = new THREE.MeshStandardMaterial({
+   999→    color: 0x0c4a5e, emissive: COLORS.accent, emissiveIntensity: 0.55, roughness: 0.35, metalness: 0.1, flatShading: false,
+  1000→  });
+  1001→  g.add(box(0.02, 0.07, 2.05, gpuGlow, -0.535, -0.26, 0.05, false));
+  1002→  g.add(plane(0.5, 0.13, mat(0xffffff, 0.2, 0.5, { map: gpuPlateTexture() }), 'x', -0.545, -0.13, 0));
+  1003→  // backplate + 4 فتحات تهوية
+  1004→  g.add(box(1.07, 0.02, 2.35, mat(COLORS.metalMid, 0.7, 0.4, { map: brushedTexture('#4a545f') }), 0, 0.03, 0, true));
+  1005→  for (const vz of [-0.55, 0.55]) {
+  1006→    for (const vx of [-0.22, 0.22]) {
+  1007→      g.add(box(0.32, 0.012, 0.07, mat(0x10151b, 0.3, 0.6), vx, 0.045, vz, false));
+  1008→    }
+  1009→  }
+  1010→
+  1011→  // bracket خلفي: منافذ عرض (2×DP + HDMI) + فتحات
+  1012→  g.add(box(0.06, 0.5, 0.12, mat(COLORS.aluminum, 0.8, 0.4), 0, -0.03, -1.3, true));
+  1013→  const portMat = mat(0x0d1116, 0.3, 0.6);
+  1014→  for (const py of [0.06, -0.06]) {
+  1015→    g.add(box(0.05, 0.1, 0.02, portMat, 0, py - 0.03, -1.372, false));
+  1016→  }
+  1017→  g.add(box(0.07, 0.09, 0.02, portMat, 0, -0.03, -1.372, false));
+  1018→  g.add(box(0.05, 0.14, 0.015, portMat, 0.02, -0.2, -1.368, false));
+  1019→
+  1020→  // حلقتا غورز حول المراوح + مروحتان (تنظران للأسفل — محور Y)
+  1021→  const ringMat = mat(0x151b22, 0.4, 0.55);
+  1022→  let fanIdx = 0;
+  1023→  for (const fz of [-0.55, 0.55]) {
+  1024→    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.295, 0.014, 6, 28), ringMat);
+  1025→    ring.rotation.x = Math.PI / 2;
+  1026→    ring.position.set(-0.53, -0.47, fz);
+  1027→    g.add(ring);
+  1028→    const wrapper = new THREE.Group();
+  1029→    wrapper.position.set(0, -0.55, fz);
+  1030→    const fan = makeFan(0.28);
+  1031→    wrapper.add(fan.frame, fan.blades);
+  1032→    // (إصلاح تدقيق V6) تسمية ريش البطاقة للنسخة الاحتياطية الإجرائية
+  1033→    fan.blades.name = `gpu_fan_rotor_${++fanIdx}`;
+  1034→    fan.blades.userData.spinAxis = 'y';
+  1035→    g.add(wrapper);
+  1036→  }
+  1037→
+  1038→  // أطراف PCIe الذهبية أسفل PCB (بشق توجيه) عند حافة اللوحة الأم
+  1039→  const gold = mat(0xc9a23f, 0.9, 0.3);
+  1040→  g.add(box(0.02, 0.05, 0.5, gold, 0.53, -0.07, -0.45, false));
+  1041→  g.add(box(0.02, 0.05, 0.49, gold, 0.53, -0.07, 0.105, false));
+  1042→
+  1043→  // موصل طاقة 8pin مرفوع على قاعدة رافعة + نقاط إبر ذهبية
+  1044→  g.add(box(0.2, 0.26, 0.22, shroudMat, -0.28, 0.14, 0.63, false));
+  1045→  const conn = box(0.16, 0.1, 0.18, mat(COLORS.black, 0.3, 0.5), -0.28, 0.31, 0.63, false);
+  1046→  g.add(conn);
+  1047→  for (let i = 0; i < 4; i++) {
+  1048→    g.add(box(0.02, 0.015, 0.02, gold, -0.34 + i * 0.04, 0.363, 0.63, false));
+  1049→  }
+  1050→
+  1051→  // براغي bracket (تنتقل مع البطاقة إلى الصينية)
+  1052→  for (const sy of [0.12, -0.18]) {
+  1053→    for (const sx of [-0.18, 0.18]) {
+  1054→      const s = makeScrew(0.03, 0.05, 'z');
+  1055→      s.position.set(sx, sy, -1.375);
+  1056→      s.name = 'flag-gpu-screw';
+  1057→      flags.gpuScrews.push(s);
+  1058→      g.add(s);
+  1059→    }
+  1060→  }
+  1061→
+  1062→  setComponentId(g, 'gpu');
+  1063→  return g;
+  1064→}
+  1065→
+  1066→// ============================================================
+  1067→// مزود الطاقة (dynamic.psu) — صندوق بتفاصيل خارجية كاملة
+  1068→// ============================================================
+  1069→
+  1070→function buildPsu(flags: FlagVisuals): THREE.Group {
+  1071→  scope('psu');
+  1072→  const g = new THREE.Group();
+  1073→  g.name = 'part-psu';
+  1074→
+  1075→  // جسم مصقول — العمق 1.3 ليبقى بعيدًا عن الجدار الخلفي (لا اختراق)
+  1076→  g.add(box(1.45, 0.85, 1.3, mat(0x48525e, 0.6, 0.42, { map: brushedTexture('#4d5864') }), 0, 0, 0, true, true));
+  1077→
+  1078→  // شبكة مروحة دائرية على الوجه العلوي
+  1079→  const grillT = fanGrillTexture('#2b333d');
+  1080→  if (grillT) {
+  1081→    g.add(plane(0.95, 0.95, mat(0xffffff, 0.35, 0.5, { map: grillT }), 'y', 0, 0.427, 0.28));
+  1082→  }
+  1083→  g.add(box(1.3, 0.02, 0.08, mat(0x2b333d, 0.4, 0.5), 0, 0.432, -0.45, false));
+  1084→
+  1085→  // الوجه الخلفي: مأوى AC بثلاثة أقطاب + مفتاح روكر + شريط تهوية
+  1086→  g.add(box(0.24, 0.18, 0.03, mat(COLORS.black, 0.3, 0.55), 0.42, -0.08, -0.665, false));
+  1087→  for (let i = 0; i < 3; i++) {
+  1088→    g.add(box(0.02, 0.02, 0.015, mat(0xc9a23f, 0.85, 0.35), 0.36 + i * 0.06, -0.08, -0.685, false));
+  1089→  }
+  1090→  g.add(box(0.11, 0.13, 0.028, mat(0x6e2a2a, 0.3, 0.5), 0.02, -0.08, -0.668, false));
+  1091→  g.add(box(0.08, 0.016, 0.01, mat(0xe8eaed, 0.1, 0.5), 0.02, -0.08, -0.685, false));
+  1092→  const grilleGeo = new THREE.BoxGeometry(1.15, 0.035, 0.03);
+  1093→  const grilleMat = mat(0x272f38, 0.5, 0.5);
+  1094→  for (let i = 0; i < 5; i++) {
+  1095→    const strip = new THREE.Mesh(grilleGeo, grilleMat);
+  1096→    strip.position.set(-0.1, -0.34 + i * 0.1, -0.66);
+  1097→    g.add(strip);
+  1098→  }
+  1099→
+  1100→  // الوجه الأمامي: 3 مقابس موديولارية بنقاط إبر
+  1101→  const sockMat = mat(COLORS.black, 0.3, 0.55);
+  1102→  const gold = mat(0xc9a23f, 0.85, 0.35);
+  1103→  const socks: Array<readonly [number, number]> = [[-0.4, 0.12], [-0.4, -0.14], [0.08, -0.14]];
+  1104→  for (const [px, py] of socks) {
+  1105→    g.add(box(0.3, 0.18, 0.02, sockMat, px, py, 0.655, false));
+  1106→    for (let i = 0; i < 4; i++) {
+  1107→      g.add(box(0.025, 0.025, 0.012, gold, px - 0.09 + i * 0.06, py + 0.03, 0.668, false));
+  1108→    }
+  1109→  }
+  1110→
+  1111→  // ملصق عام على الوجه -X + شريط accent
+  1112→  const labelT = psuLabelTexture();
+  1113→  if (labelT) {
+  1114→    g.add(plane(0.95, 0.6, mat(0xffffff, 0.2, 0.65, { map: labelT }), 'x', -0.728, 0.02, 0.05));
+  1115→  }
+  1116→  g.add(box(0.015, 0.09, 0.7, mat(COLORS.accent, 0.4, 0.5), -0.732, 0.33, 0.05, false));
+  1117→
+  1118→  // 4 قوائم مطاطية سفلية (تلامس الأرضية بلا اختراق)
+  1119→  for (const px of [-1, 1]) {
+  1120→    for (const pz of [-1, 1]) {
+  1121→      g.add(box(0.14, 0.03, 0.14, mat(0x0d1116, 0.2, 0.7), px * 0.55, -0.415, pz * 0.45, false));
+  1122→    }
+  1123→  }
+  1124→
+  1125→  // (إصلاح تدقيق V6) ريش مروحة المزود في النسخة الإجرائية — كانت شبكة ساكنة فقط
+  1126→  // فتغيب المروحة من منظومة المراوح عند غياب GLB. الريش الأصلي يدور حول Y المحلي = Y العالمي (مروحة علوية مسطحة)
+  1127→  const psuFan = makeFan(0.4);
+  1128→  psuFan.blades.name = 'psu_fan_rotor';
+  1129→  psuFan.blades.userData.spinAxis = 'y';
+  1130→  const psuFanWrap = new THREE.Group();
+  1131→  psuFanWrap.position.set(0, 0.3, 0.1);
+  1132→  psuFanWrap.add(psuFan.frame, psuFan.blades);
+  1133→  g.add(psuFanWrap);
+  1134→
+  1135→  // 4 براغي الخلف (تبقى مع مزود الطاقة) — على السطح البعيد الجديد
+  1136→  for (const sx of [-1, 1]) {
+  1137→    for (const sy of [-1, 1]) {
+  1138→      const s = makeScrew(0.028, 0.05, 'z');
+  1139→      s.position.set(sx * 0.62, sy * 0.35, -0.67);
+  1140→      s.name = 'flag-psu-screw';
+  1141→      flags.psuScrews.push(s);
+  1142→      g.add(s);
+  1143→    }
+  1144→  }
+  1145→
+  1146→  setComponentId(g, 'psu');
+  1147→  return g;
+  1148→}
+  1149→
+  1150→// ============================================================
+  1151→// قرص M.2 (dynamic.ssd) — رقاقة على اللوحة بمشتت وملصق وأطراف ذهبية
+  1152→// ============================================================
+  1153→
+  1154→function buildSsd(): THREE.Group {
+  1155→  scope('ssd');
+  1156→  const g = new THREE.Group();
+  1157→  g.name = 'part-ssd';
+  1158→  g.add(box(0.05, 0.16, 0.8, mat(0x1e6b3a, 0.3, 0.55), 0, 0, 0, true, true)); // الرقاقة الخضراء
+  1159→  const chipMat = mat(COLORS.black, 0.3, 0.5);
+  1160→  g.add(box(0.03, 0.1, 0.14, chipMat, -0.04, 0, -0.22, false)); // رقاقة سوداء 1
+  1161→  g.add(box(0.03, 0.1, 0.14, chipMat, -0.04, 0, 0.22, false));  // رقاقة سوداء 2
+  1162→
+  1163→  // مشتت حراري ألمنيوم على النصف الأمامي + ملصق عام
+  1164→  g.add(box(0.03, 0.145, 0.42, mat(COLORS.aluminum, 0.8, 0.4, { map: brushedTexture('#a7b0ba') }), -0.045, 0, 0.06, false));
+  1165→  const labelT = m2LabelTexture();
+  1166→  if (labelT) {
+  1167→    g.add(plane(0.26, 0.095, mat(0xffffff, 0.2, 0.55, { map: labelT }), 'x', -0.062, 0, 0.06));
+  1168→  }
+  1169→
+  1170→  // أطراف ذهبية عند الطرف +Z (نحو مقبس M.2) بشق توجيه
+  1171→  const gold = mat(0xc9a23f, 0.9, 0.3);
+  1172→  g.add(box(0.045, 0.052, 0.05, gold, 0, -0.038, 0.405, false));
+  1173→  g.add(box(0.045, 0.052, 0.05, gold, 0, 0.038, 0.405, false));
+  1174→  // ثقب برغي الطرف الآخر
+  1175→  g.add(cyl(0.02, 0.015, mat(0x0d1116, 0.3, 0.6), 'x', -0.028, 0, -0.4, false));
+  1176→
+  1177→  setComponentId(g, 'ssd');
+  1178→  return g;
+  1179→}
+  1180→
+  1181→// ============================================================
+  1182→// مراوح الهيكل (dynamic.fans) — أماميتان + خلفية علوية
+  1183→// ============================================================
+  1184→
+  1185→function buildFans(flags: FlagVisuals): THREE.Group {
+  1186→  scope('fans');
+  1187→  const g = new THREE.Group();
+  1188→  g.name = 'part-fans';
+  1189→  const mount = MOUNTS.fans;
+  1190→  // (إصلاح تدقيق V6) المواضع موحّدة مع مسار GLB (كانت تختلف 0.1–0.2 بين المسارين)
+  1191→  const defs: Array<{ pos: readonly [number, number, number]; rotX: number; rotor: string }> = [
+  1192→    { pos: [1.05, 2.8, 4.42], rotX: Math.PI / 2, rotor: 'fan_rotor_front-1' },   // أمامية علوية
+  1193→    { pos: [1.05, 1.4, 4.42], rotX: Math.PI / 2, rotor: 'fan_rotor_front-2' },   // أمامية سفلية
+  1194→    { pos: [1.05, 3.7, 0.33], rotX: -Math.PI / 2, rotor: 'fan_rotor_rear' },     // خلفية علوية (طرد)
+  1195→  ];
+  1196→  for (const d of defs) {
+  1197→    const wrapper = new THREE.Group();
+  1198→    wrapper.position.set(d.pos[0] - mount[0], d.pos[1] - mount[1], d.pos[2] - mount[2]);
+  1199→    wrapper.rotation.x = d.rotX; // محور الدوران Y المحلي → Z عالمي
+  1200→    const fan = makeFan(0.42);
+  1201→    wrapper.add(fan.frame, fan.blades);
+  1202→    // (إصلاح تدقيق V6) تسمية ريش مراوح الهيكل — كانت بلا أسماء فتتعطل المراوح عند غياب GLB
+  1203→    fan.blades.name = d.rotor;
+  1204→    fan.blades.userData.spinAxis = 'y';
+  1205→    // 4 براغي زوايا لكل مروحة (على المحور المحلي Y = محور المروحة)
+  1206→    const half = 0.42 * 1.32;
+  1207→    const sy = 0.42 * 0.5 / 2 + 0.015;
+  1208→    for (const sx of [-1, 1]) {
+  1209→      for (const sz of [-1, 1]) {
+  1210→        const s = makeScrew(0.03, 0.06, 'y');
+  1211→        s.position.set(sx * half, sy, sz * half);
+  1212→        s.name = 'flag-fan-screw';
+  1213→        flags.fanScrews.push(s);
+  1214→        wrapper.add(s);
+  1215→      }
+  1216→    }
+  1217→    g.add(wrapper);
+  1218→  }
+  1219→  setComponentId(g, 'fans');
+  1220→  return g;
+  1221→}
+  1222→
+  1223→// ============================================================
+  1224→// موصل ATX24 (dynamic.atx24) + كابل من PSU
+  1225→// ============================================================
+  1226→
+  1227→function buildAtx24(): THREE.Group {
+  1228→  scope('atx24');
+  1229→  const g = new THREE.Group();
+  1230→  g.name = 'part-atx24';
+  1231→  g.add(box(0.12, 0.5, 0.25, mat(COLORS.black, 0.3, 0.5), 0, 0, 0, true, true)); // الموصل
+  1232→  g.add(box(0.125, 0.44, 0.04, mat(0x0a0e12, 0.25, 0.6), 0, 0, 0.11, false));     // عارضة تجزئة
+  1233→  g.add(box(0.125, 0.035, 0.26, mat(0x39434e, 0.4, 0.5), 0, 0.0, -0.1, false));   // حدّ تسنين
+  1234→
+  1235→  // 24 سلكًا مصغرة: صفان على Z (12 موضعًا على Y لكل صف)
+  1236→  const wireGeo = new THREE.BoxGeometry(0.04, 0.035, 0.035);
+  1237→  let idx = 0;
+  1238→  for (let i = 0; i < 12; i++) {
+  1239→    for (const zr of [-0.06, 0.06]) {
+  1240→      const wire = new THREE.Mesh(wireGeo, mat(WIRE_COLORS[idx % WIRE_COLORS.length], 0.2, 0.6));
+  1241→      wire.position.set(-0.08, -0.22 + i * 0.04, zr);
+  1242→      g.add(wire);
+  1243→      idx++;
+  1244→    }
+  1245→  }
+  1246→
+  1247→  // كابل من قرب PSU عالمي (1.3,0.75,1.2) عبر (0.9,2.0,1.9) و(1.4,3.0,2.5) إلى الموصل
+  1248→  g.add(makeCable(cablePoints(MOUNTS.atx24, [
+  1249→    [1.3, 0.75, 1.2],
+  1250→    [0.9, 2.0, 1.9],
+  1251→    [1.4, 3.0, 2.5],
+  1252→    [1.7, 3.75, 2.62],
+  1253→  ]), 0.045));
+  1254→
+  1255→  setComponentId(g, 'atx24');
+  1256→  return g;
+  1257→}
+  1258→
+  1259→// ============================================================
+  1260→// موصل EPS (dynamic.eps) + كابل من PSU
+  1261→// ============================================================
+  1262→
+  1263→function buildEps(): THREE.Group {
+  1264→  scope('eps');
+  1265→  const g = new THREE.Group();
+  1266→  g.name = 'part-eps';
+  1267→  g.add(box(0.12, 0.26, 0.2, mat(COLORS.black, 0.3, 0.5), 0, 0, 0, true, true));
+  1268→  g.add(box(0.125, 0.22, 0.03, mat(0x0a0e12, 0.25, 0.6), 0, 0, 0.09, false));
+  1269→
+  1270→  // 8 أسلاك: صفان على Z × 4 على Y
+  1271→  const wireGeo = new THREE.BoxGeometry(0.04, 0.035, 0.035);
+  1272→  let idx = 1;
+  1273→  for (let i = 0; i < 4; i++) {
+  1274→    for (const zr of [-0.05, 0.05]) {
+  1275→      const wire = new THREE.Mesh(wireGeo, mat(WIRE_COLORS[idx % WIRE_COLORS.length], 0.2, 0.6));
+  1276→      wire.position.set(-0.08, -0.09 + i * 0.06, zr);
+  1277→      g.add(wire);
+  1278→      idx += 2;
+  1279→    }
+  1280→  }
+  1281→
+  1282→  g.add(makeCable(cablePoints(MOUNTS.eps, [
+  1283→    [1.3, 0.8, 1.0],
+  1284→    [1.0, 3.2, 0.5],
+  1285→    [1.72, 4.02, 0.55],
+  1286→  ]), 0.04));
+  1287→
+  1288→  setComponentId(g, 'eps');
+  1289→  return g;
+  1290→}
+  1291→
+  1292→// ============================================================
+  1293→// موصل طاقة البطاقة (dynamic.gpuPower) + كابل من PSU
+  1294→// ============================================================
+  1295→
+  1296→function buildGpuPower(): THREE.Group {
+  1297→  scope('gpuPower');
+  1298→  const g = new THREE.Group();
+  1299→  g.name = 'part-gpu-power';
+  1300→  g.add(box(0.16, 0.1, 0.18, mat(COLORS.black, 0.3, 0.5), 0, 0, 0, true, true)); // يتطابق فوق موصل البطاقة
+  1301→  g.add(box(0.165, 0.02, 0.06, mat(0x39434e, 0.4, 0.5), 0, 0.055, 0, false));     // حدّ تسنين
+  1302→
+  1303→  // 4 أسلاك قصيرة على الوجه -X
+  1304→  const wireGeo = new THREE.BoxGeometry(0.035, 0.03, 0.03);
+  1305→  for (let i = 0; i < 4; i++) {
+  1306→    const wire = new THREE.Mesh(wireGeo, mat(WIRE_COLORS[i % WIRE_COLORS.length], 0.2, 0.6));
+  1307→    wire.position.set(-0.095, 0, -0.06 + i * 0.04);
+  1308→    g.add(wire);
+  1309→  }
+  1310→
+  1311→  g.add(makeCable(cablePoints(MOUNTS.gpuPower, [
+  1312→    [1.2, 0.7, 1.1],
+  1313→    [0.7, 1.4, 2.2],
+  1314→    [1.05, 2.32, 2.05],
+  1315→  ]), 0.04));
+  1316→
+  1317→  setComponentId(g, 'gpuPower');
+  1318→  return g;
+  1319→}
+  1320→
+  1321→// ============================================================
+  1322→// سجادة القطع المفكوكة (داخل root مباشرة — بلا componentId)
+  1323→// توجيه v4: سجادة مضادة للكهرباء الساكنة موضوعة على سطح مكتب الورشة
+  1324→// يسار الجهاز — كل قطعة تفك تستلقي عليها عند TRAY.slots.
+  1325→// ============================================================
+  1326→
+  1327→function buildTrayTable(): THREE.Group {
+  1328→  scope('tray');
+  1329→  const g = new THREE.Group();
+  1330→  g.name = 'tray-table'; // غير قابلة للاختيار عمدًا
+  1331→
+  1332→  const cx = (TRAY.minX + TRAY.maxX) / 2; // -3.35
+  1333→  const cz = (TRAY.minZ + TRAY.maxZ) / 2; // 2.4
+  1334→  const top = TRAY.tableTopY;             // 0.06 — أعلى السجادة فوق سطح المكتب
+  1335→
+  1336→  // السجادة المضادة للكهرباء الساكنة بحدين سماويين
+  1337→  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.012, TRAY.maxZ - TRAY.minZ + 0.3, mat(0x1c2830, 0.2, 0.8), cx, top - 0.006, cz, false, true));
+  1338→  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx, top + 0.002, cz - (TRAY.maxZ - TRAY.minZ) / 2 - 0.135, false));
+  1339→  g.add(box(TRAY.maxX - TRAY.minX + 0.3, 0.004, 0.03, mat(0x22d3ee, 0.3, 0.6), cx, top + 0.002, cz + (TRAY.maxZ - TRAY.minZ) / 2 + 0.135, false));
+  1340→
+  1341→  // خطوط خانات باهتة لكل مكوّن (عدا case) — داخل حدود السجادة
+  1342→  const markers: Array<{ id: ComponentId; size: readonly [number, number] }> = [
+  1343→    { id: 'ram', size: [0.55, 1.55] },
+  1344→    { id: 'gpu', size: [1.15, 2.45] },
+  1345→    { id: 'cpu', size: [0.55, 0.55] },
+  1346→    { id: 'gpuPower', size: [0.4, 0.45] },
+  1347→    { id: 'cooler', size: [0.7, 0.95] },
+  1348→    { id: 'ssd', size: [0.3, 0.9] },
+  1349→    { id: 'hdd', size: [1.1, 1.5] },
+  1350→    { id: 'fans', size: [1.0, 1.0] },
+  1351→    { id: 'psu', size: [1.5, 1.5] },
+  1352→    { id: 'motherboard', size: [2.05, 2.4] },
+  1353→    { id: 'atx24', size: [0.4, 0.6] },
+  1354→    { id: 'eps', size: [0.35, 0.5] },
+  1355→    { id: 'sataData', size: [0.4, 0.5] },
+  1356→    { id: 'sataPower', size: [0.45, 0.5] },
+  1357→  ];
+  1358→  const markerMat = mat(0x24303a, 0.2, 0.8);
+  1359→  for (const mk of markers) {
+  1360→    const p = TRAY.slots[mk.id];
+  1361→    const px = Math.min(Math.max(p[0], TRAY.minX + mk.size[0] / 2 + 0.02), TRAY.maxX - mk.size[0] / 2 - 0.02);
+  1362→    const pz = Math.min(Math.max(p[2], TRAY.minZ + mk.size[1] / 2 + 0.02), TRAY.maxZ - mk.size[1] / 2 - 0.02);
+  1363→    g.add(box(mk.size[0], 0.006, mk.size[1], markerMat, px, top + 0.003, pz, false));
+  1364→  }
+  1365→
+  1366→  // ===== عدة عمل (زينة تعليمية غير تفاعلية — الالتقاط يتوقف عندها كفراغ) =====
+  1367→  // صينية مسامير صغيرة مع 6 مسامير متناثرة
+  1368→  const trayBox = new THREE.Group();
+  1369→  trayBox.name = 'deco-screw-tray';
+  1370→  const tbx = TRAY.maxX - 0.3, tbz = TRAY.minZ + 0.4;
+  1371→  trayBox.add(box(0.5, 0.05, 0.35, mat(0x39434e, 0.4, 0.55), tbx, top + 0.025, tbz, false));
+  1372→  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, top + 0.055, tbz - 0.175, false));
+  1373→  trayBox.add(box(0.5, 0.035, 0.04, mat(0x4a5560, 0.4, 0.5), tbx, top + 0.055, tbz + 0.175, false));
+  1374→  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx - 0.25, top + 0.055, tbz, false));
+  1375→  trayBox.add(box(0.04, 0.035, 0.35, mat(0x4a5560, 0.4, 0.5), tbx + 0.25, top + 0.055, tbz, false));
+  1376→  const decoScrewMat = mat(COLORS.aluminum, 0.85, 0.35);
+  1377→  for (let i = 0; i < 6; i++) {
+  1378→    const sc = cyl(0.02, 0.035, decoScrewMat, 'y', tbx - 0.15 + (i % 3) * 0.15, top + 0.07, tbz - 0.08 + Math.floor(i / 3) * 0.16, false);
+  1379→    sc.rotation.y = i * 0.7;
+  1380→    trayBox.add(sc);
+  1381→  }
+  1382→  g.add(trayBox);
+  1383→
+  1384→  // سوار مضاد للكهرباء الساكنة (سوار دائري صغير)
+  1385→  const esd = new THREE.Mesh(
+  1386→    new THREE.TorusGeometry(0.11, 0.02, 8, 24),
+  1387→    mat(0x22484f, 0.2, 0.7),
+  1388→  );
+  1389→  esd.name = 'deco-esd-bracelet';
+  1390→  esd.rotation.x = -Math.PI / 2;
+  1391→  esd.position.set(TRAY.minX + 0.55, top + 0.02, TRAY.maxZ - 0.4);
+  1392→  g.add(esd);
+  1393→
+  1394→  return g;
+  1395→}
+  1396→
+  1397→// ============================================================
+  1398→// القرص الميكانيكي 3.5" (dynamic.hdd) — علبة معدنية وملصق ومنفذا SATA خلفيان
+  1399→// ============================================================
+  1400→
+  1401→function buildHdd(): THREE.Group {
+  1402→  scope('hdd');
+  1403→  const g = new THREE.Group();
+  1404→  g.name = 'part-hdd';
+  1405→  const bodyMat = mat(COLORS.aluminum, 0.75, 0.38, { map: brushedTexture('#9aa3ad') });
+  1406→  g.add(box(1.02, 0.26, 1.47, bodyMat, 0, 0, 0, true, true)); // الجسم
+  1407→  // إطار داخلي أغمق أعلى/أسفل (تفصيل مسطح)
+  1408→  g.add(box(0.94, 0.02, 1.39, mat(0x6f7780, 0.7, 0.45), 0, 0.135, 0, false));
+  1409→  g.add(box(0.94, 0.02, 1.39, mat(0x6f7780, 0.7, 0.45), 0, -0.135, 0, false));
+  1410→  // ملصق علوي
+  1411→  const labelT = hddLabelTexture();
+  1412→  if (labelT) {
+  1413→    g.add(plane(0.86, 1.2, mat(0xffffff, 0.25, 0.6, { map: labelT }), 'y', 0, 0.15, 0.02));
+  1414→  }
+  1415→  // منفدا SATA على الوجه الخلفي (-Z): بيانات (صغير) + طاقة (أعرض) بأطراف ذهبية
+  1416→  const gold = mat(0xc9a23f, 0.9, 0.3);
+  1417→  g.add(box(0.06, 0.1, 0.06, mat(0x0d1116, 0.3, 0.55), -0.25, 0, -0.745, false));
+  1418→  g.add(box(0.05, 0.09, 0.04, gold, -0.25, 0, -0.772, false)); // بيانات
+  1419→  g.add(box(0.14, 0.1, 0.06, mat(0x0d1116, 0.3, 0.55), -0.02, 0, -0.745, false));
+  1420→  g.add(box(0.13, 0.09, 0.04, gold, -0.02, 0, -0.772, false)); // طاقة
+  1421→  // ثقوب براغي الأركان الأربعة
+  1422→  for (const sx of [-1, 1]) {
+  1423→    for (const sz of [-1, 1]) {
+  1424→      g.add(cyl(0.024, 0.012, mat(0x0d1116, 0.3, 0.6), 'y', sx * 0.45, 0.135, sz * 0.67, false));
+  1425→    }
+  1426→  }
+  1427→  setComponentId(g, 'hdd');
+  1428→  return g;
+  1429→}
+  1430→
+  1431→// ============================================================
+  1432→// كابل SATA للبيانات (dynamic.sataData) — أحمر رفيع من اللوحة إلى خلفية القرص
+  1433→// ============================================================
+  1434→
+  1435→function buildSataData(): THREE.Group {
+  1436→  scope('sataData');
+  1437→  const g = new THREE.Group();
+  1438→  g.name = 'part-sata-data';
+  1439→  // موصل الطرف عند منفذ اللوحة
+  1440→  g.add(box(0.05, 0.09, 0.1, mat(0x8c1d1d, 0.3, 0.55), 0, 0, 0, true, true));
+  1441→  g.add(box(0.035, 0.07, 0.02, mat(0xc9a23f, 0.9, 0.3), -0.04, 0, -0.02, false));
+  1442→  // كابل أحمر رفيع: منفذ اللوحة (1.78,2.2,2.35) → انحناء لطيف → خلفية القرص (1.05,0.8,2.8)
+  1443→  g.add(makeCable(cablePoints(MOUNTS.sataData, [
+  1444→    [1.78, 2.2, 2.35],
+  1445→    [1.6, 1.45, 2.62],
+  1446→    [1.3, 0.95, 2.66],
+  1447→    [1.12, 0.8, 2.72],
+  1448→  ]), 0.022, 0x8c1d1d));
+  1449→  setComponentId(g, 'sataData');
+  1450→  return g;
+  1451→}
+  1452→
+  1453→// ============================================================
+  1454→// كابل SATA للطاقة (dynamic.sataPower) — أسود أعرض من PSU إلى خلفية القرص
+  1455→// ============================================================
+  1456→
+  1457→function buildSataPower(): THREE.Group {
+  1458→  scope('sataPower');
+  1459→  const g = new THREE.Group();
+  1460→  g.name = 'part-sata-power';
+  1461→  g.add(box(0.13, 0.1, 0.12, mat(COLORS.black, 0.3, 0.5), 0, 0, 0, true, true));
+  1462→  g.add(box(0.11, 0.08, 0.02, mat(0xc9a23f, 0.9, 0.3), -0.06, 0, -0.03, false));
+  1463→  g.add(makeCable(cablePoints(MOUNTS.sataPower, [
+  1464→    [1.28, 0.78, 2.9],
+  1465→    [1.24, 0.76, 2.6],
+  1466→    [1.12, 0.8, 2.5],
+  1467→  ]), 0.032, 0x11161c));
+  1468→  setComponentId(g, 'sataPower');
+  1469→  return g;
+  1470→}
+  1471→
+  1472→// ============================================================
+  1473→// الطرفيات: الشاشة (توجيه v4 — أولوية 1)
+  1474→// كيان مادي مستقل يقف على مكتب الورشة: قاعدة بيضاوية + حامل مائل + لوح بإطار
+  1475→// وذقن ولمبة وزر طاقة. لا كيبورد ولا ماوس — توجيه v3 أ.1.
+  1476→// ليست قطع PC — تُنقر عبر callbacks.onPeripheral
+  1477→// ============================================================
+  1478→
+  1479→function buildMonitor(): THREE.Group {
+  1480→  scope('monitor');
+  1481→  const g = new THREE.Group();
+  1482→  g.name = 'periph-monitor';
+  1483→  g.userData['peripheral'] = 'monitor';
+  1484→
+  1485→  const standMat = mat(0x2a323c, 0.6, 0.42, { map: brushedTexture('#39434e') });
+  1486→  const bezelMat = mat(0x14181e, 0.45, 0.5, { map: brushedTexture('#1b2027') });
+  1487→
+  1488→  // ===== 1) القاعدة: قرص بيضاوي مندرج يلامس سطح المكتب (Y=0 محليًا) =====
+  1489→  const base = new THREE.Mesh(new THREE.CylinderGeometry(1.02, 1.18, 0.09, 30), standMat);
+  1490→  base.scale.z = 0.74;
+  1491→  base.position.set(0, 0.045, -0.1);
+  1492→  base.castShadow = castEnabled;
+  1493→  base.receiveShadow = true;
+  1494→  g.add(base);
+  1495→  // صرة اتصال القاعدة بالحامل
+  1496→  g.add(cyl(0.34, 0.07, standMat, 'y', 0, 0.11, -0.1, false));
+  1497→  // خط لمعة علوي على القاعدة
+  1498→  g.add(cyl(0.86, 0.012, mat(0x525c68, 0.7, 0.35), 'y', 0, 0.092, -0.1, false));
+  1499→
+  1500→  // ===== 2) الحامل: عمود مائل يرتفع من القاعدة إلى ظهر اللوح =====
+  1501→  // اللوح: مركزه screenCenterLocal=(0,2.55,0.1)، سماكته 0.14 → ظهره عند z=0.03.
+  1502→  // العمود يمتد من صرة القاعدة (y 0.14) حتى خلف اللوح (y ~1.6) باتصال هندسي صحيح.
+  1503→  const neck = new THREE.Group();
+  1504→  neck.position.set(0, 0.85, -0.12);
+  1505→  neck.rotation.x = -0.06; // ميلان خلفي خفيف كشاشات حقيقية
+  1506→  const neckBody = box(0.34, 1.5, 0.17, standMat, 0, 0, 0, true);
+  1507→  neck.add(neckBody);
+  1508→  // حز خلفي على العمود (إدارة الكابلات)
+  1509→  neck.add(box(0.1, 1.1, 0.05, mat(0x10151b, 0.3, 0.6), 0, 0.05, -0.1, false));
+  1510→  g.add(neck);
+  1511→  // لوح VESA خلف اللوح يغلق الفجوة بين العمود واللوح
+  1512→  g.add(box(0.95, 0.75, 0.04, standMat, 0, 1.42, -0.045, false));
+  1513→
+  1514→  // ===== 3) اللوح: إطار + ذقن سفلي + شاشة =====
+  1515→  const bezelW = PERIPH.screenW + 0.2;   // 5.5
+  1516→  const bezelH = PERIPH.screenH + 0.2;   // 3.25
+  1517→  const panelY = PERIPH.screenCenterLocal[1] + 0.05; // 2.6
+  1518→  const panelZ = PERIPH.screenCenterLocal[2] - 0.07; // 0.03
+  1519→  const bezel = box(bezelW, bezelH, 0.14, bezelMat, 0, panelY, panelZ, true, true);
+  1520→  bezel.name = 'monitor-panel';
+  1521→  g.add(bezel);
+  1522→  // إطار أمامي رفيع حول الشاشة (3 أشرطة — يترك سطح العرض مكشوفًا تمامًا)
+  1523→  const frameMat = mat(0x1b2129, 0.4, 0.55);
+  1524→  g.add(box(bezelW, 0.1, 0.02, frameMat, 0, panelY + bezelH / 2 - 0.05, panelZ + 0.075, false));
+  1525→  g.add(box(0.1, bezelH - 0.1, 0.02, frameMat, -bezelW / 2 + 0.05, panelY, panelZ + 0.075, false));
+  1526→  g.add(box(0.1, bezelH - 0.1, 0.02, frameMat, bezelW / 2 - 0.05, panelY, panelZ + 0.075, false));
+  1527→  // ذقن سفلي بشعار + لمبة طاقة — أسفل حافة الشاشة بلا تغطيتها
+  1528→  const chinY = panelY - bezelH / 2 + 0.07;
+  1529→  g.add(box(bezelW, 0.14, 0.02, mat(0x232b34, 0.4, 0.5), 0, chinY, panelZ + 0.075, false));
+  1530→  g.add(plane(0.62, 0.07, mat(0xffffff, 0.2, 0.5, { map: frontBadgeTexture(), transparent: true }), 'z', 0, chinY, panelZ + 0.087));
+  1531→  const led = box(0.05, 0.045, 0.02, mat(COLORS.green, 0.2, 0.5, { emissive: 0x22c55e, emissiveIntensity: 0.9 }), -bezelW / 2 + 0.28, chinY, panelZ + 0.086, false);
+  1532→  g.add(led);
+  1533→
+  1534→  // سطح العرض — مادة أساسية يستبدلها PCScene بنسيج الرسّام
+  1535→  const screenMat = new THREE.MeshBasicMaterial({ color: 0x05070c });
+  1536→  const screen = new THREE.Mesh(new THREE.PlaneGeometry(PERIPH.screenW, PERIPH.screenH), screenMat);
+  1537→  screen.position.set(PERIPH.screenCenterLocal[0], PERIPH.screenCenterLocal[1] + 0.05, PERIPH.screenCenterLocal[2]);
+  1538→  screen.name = 'monitor-screen';
+  1539→  g.add(screen);
+  1540→
+  1541→  // زر التشغيل (قابل للنقر) أسفل يمين الذقن
+  1542→  const btn = box(0.12, 0.09, 0.05, mat(0x2a323c, 0.5, 0.4), bezelW / 2 - 0.26, chinY, panelZ + 0.08, false);
+  1543→  btn.userData['peripheral'] = 'monitor-power';
+  1544→  g.add(btn);
+  1545→
+  1546→  // ===== 4) كابل الإشارة: من خلف الشاشة → سطح المكتب → خلف الجهاز → منفذ البطاقة =====
+  1547→  // مجموعة مستقلة عالميًا (يُلغى دوران الأب عليها) لضمان التوجيه الصحيح،
+  1548→  // ويُخفى/يُظهر من PCScene عبر مرجع 'monitor-cable' (المنطق بلا تغيير).
+  1549→  const cableGroup = new THREE.Group();
+  1550→  cableGroup.name = 'monitor-cable';
+  1551→  cableGroup.rotation.y = -PERIPH.monitorRotY; // إلغاء دوران المجموعة الأم — النقاط إحداثيات عالمية
+  1552→  const mp = PERIPH.monitorPos;
+  1553→  const pts = cablePoints(mp, [
+  1554→    [mp[0] - 0.1, 0.28, mp[2] - 0.1],   // دخول من أسفل ظهر الشاشة
+  1555→    [mp[0] + 0.5, 0.05, mp[2] + 1.1],   // هبوط يمين القاعدة على سطح المكتب
+  1556→    [mp[0] + 2.4, 0.05, mp[2] - 0.4],   // قوس يمين الشاشة نحو خلف المكتب
+  1557→    [7.6, 0.05, 1.0],                   // حافة المكتب اليمنى
+  1558→    [6.2, 0.05, -1.3],                  // خلف المكتب
+  1559→    [2.4, 0.05, -1.35],                 // امتداد خلف الجهاز (بعيد عن الواجهة)
+  1560→    [1.28, 0.4, -0.95],                 // بداية الصعود خلف الهيكل
+  1561→    [1.28, 1.4, -0.7],
+  1562→    [1.28, 1.98, 0.02],                 // منفذ DisplayPort على البطاقة
+  1563→  ]);
+  1564→  cableGroup.add(makeCable(pts, 0.028, 0x14181e));
+  1565→  g.add(cableGroup);
+  1566→
+  1567→  return g;
+  1568→}
+  1569→
+  1570→// ============================================================
+  1571→// التجميع النهائي
+  1572→// ============================================================
+  1573→
+  1574→export function buildAllParts(quality: SceneQuality): PartVisuals {
+  1575→  castEnabled = quality !== 'low';
+  1576→
+  1577→  const flags: FlagVisuals = {
+  1578→    ramClips: [],
+  1579→    gpuScrews: [],
+  1580→    psuScrews: [],
+  1581→    fanScrews: [],
+  1582→    moboScrews: [],
+  1583→  };
+  1584→
+  1585→  // بناء الأجزاء
+  1586→  const caseShell = buildCaseShell(flags);
+  1587→  const sidePanel = buildSidePanel();
+  1588→  const motherboard = buildMotherboard(flags);
+  1589→  const cpu = buildCpu();
+  1590→  const cooler = buildCooler();
+  1591→  const ram = buildRam();
+  1592→  const gpu = buildGpu(flags);
+  1593→  const psu = buildPsu(flags);
+  1594→  const ssd = buildSsd();
+  1595→  const hdd = buildHdd();
+  1596→  const fans = buildFans(flags);
+  1597→  const atx24 = buildAtx24();
+  1598→  const eps = buildEps();
+  1599→  const gpuPower = buildGpuPower();
+  1600→  const sataData = buildSataData();
+  1601→  const sataPower = buildSataPower();
+  1602→  const trayTable = buildTrayTable();
+  1603→  const monitor = buildMonitor();
+  1604→
+  1605→  // مواضع التثبيت الابتدائية (المدير يعيد تموضعها عند الفك/التفجير)
+  1606→  const place = (grp: THREE.Group, id: ComponentId): void => {
+  1607→    grp.position.set(...MOUNTS[id]);
+  1608→  };
+  1609→  place(motherboard, 'motherboard');
+  1610→  place(cpu, 'cpu');
+  1611→  place(cooler, 'cooler');
+  1612→  place(ram, 'ram');
+  1613→  place(gpu, 'gpu');
+  1614→  place(psu, 'psu');
+  1615→  place(ssd, 'ssd');
+  1616→  place(hdd, 'hdd');
+  1617→  place(fans, 'fans');
+  1618→  place(atx24, 'atx24');
+  1619→  place(eps, 'eps');
+  1620→  place(gpuPower, 'gpuPower');
+  1621→  place(sataData, 'sataData');
+  1622→  place(sataPower, 'sataPower');
+  1623→
+  1624→  // مجموعة placeholder للمكوّن 'case' (الهيكل نفسه لا يُحرك أبدًا — فارغة للأمان)
+  1625→  const caseAnchor = new THREE.Group();
+  1626→  caseAnchor.name = 'case-anchor';
+  1627→  place(caseAnchor, 'case');
+  1628→
+  1629→  // ===== الطرفيات على المكتب =====
+  1630→  monitor.position.set(...PERIPH.monitorPos);
+  1631→  monitor.rotation.y = PERIPH.monitorRotY;
+  1632→
+  1633→  // حصيرة مكتب تحت الشاشة (تأطير بصري لطيف — توجيه v3: بلا ديكور زائد)
+  1634→  const deskMat = box(PERIPH.matSize[0], 0.012, PERIPH.matSize[1], mat(0x182029, 0.2, 0.85), PERIPH.matCenter[0], PERIPH.matCenter[1], PERIPH.matCenter[2], false);
+  1635→  deskMat.receiveShadow = castEnabled;
+  1636→
+  1637→  const root = new THREE.Group();
+  1638→  root.name = 'pc-parts-root';
+  1639→  root.add(caseShell, sidePanel, trayTable, caseAnchor);
+  1640→  root.add(motherboard, cpu, cooler, ram, gpu, psu, ssd, hdd, fans, atx24, eps, gpuPower, sataData, sataPower);
+  1641→  root.add(monitor); // لا كيبورد ولا ماوس — توجيه v3 أ.1
+  1642→  root.add(deskMat);
+  1643→
+  1644→  const dynamic: Record<ComponentId, THREE.Group> = {
+  1645→    case: caseAnchor,
+  1646→    motherboard,
+  1647→    cpu,
+  1648→    cooler,
+  1649→    ram,
+  1650→    gpu,
+  1651→    psu,
+  1652→    ssd,
+  1653→    hdd,
+  1654→    fans,
+  1655→    atx24,
+  1656→    eps,
+  1657→    gpuPower,
+  1658→    sataData,
+  1659→    sataPower,
+  1660→  };
+  1661→
+  1662→  const visualResult: PartVisuals = { root, dynamic, caseShell, sidePanel, flags, monitor };
+  1663→
+  1664→  // (V5) استبدال المجسمات الإجرائية بالنماذج الحقيقية (GLB مُحمّلة مسبقًا قبل إنشاء المشهد).
+  1665→  // الفشل الفردي يُبقي المجسم الإجرائي في مكانه — لا مشهد مكسور أبدًا.
+  1666→  applyGlbParts(visualResult);
+  1667→
+  1668→  return visualResult;
+  1669→}
+  1670→

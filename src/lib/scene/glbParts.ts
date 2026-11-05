@@ -21,6 +21,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { PERIPH } from './layout';
 import type { FlagVisuals, PartVisuals } from './visualTypes';
 
 type Vec3 = [number, number, number];
@@ -75,11 +76,6 @@ const DEFS: Record<'case' | 'motherboard' | 'cpu' | 'cooler' | 'ram' | 'gpu' | '
 
 const cache = new Map<string, THREE.Object3D>();
 let preloadPromise: Promise<void> | null = null;
-
-/** هل الأصول الحقيقية جاهزة؟ (يُستخدم للقرارات التشخيصية) */
-export function glbAssetsReady(): boolean {
-  return cache.size >= Object.keys(DEFS).length;
-}
 
 /** تحميل كل النماذج مسبقًا — ينجح دائمًا (الفشل الفردي يتخطى النموذج) */
 export function preloadGlbAssets(): Promise<void> {
@@ -303,6 +299,10 @@ function alignGpuToSlot(visuals: PartVisuals): void {
   const boardGroup = visuals.dynamic.motherboard;
   gpuSeat.seated = false;
   gpuSeat.clearance = null;
+  // تصفير كامل حتى لا يقرأ alignGpuPowerCable صناديق قديمة إن فشل التطبيق قبل الجلوس
+  gpuSeat.gpuBox = null;
+  gpuSeat.slotPoint = null;
+  gpuSeat.bracketZ = null;
 
   const slot = new THREE.Vector3();
   const fromGlb = anchorCenter(boardGroup, 'anchor_pcie_x16', slot);
@@ -363,6 +363,102 @@ function alignGpuToSlot(visuals: PartVisuals): void {
   console.info(
     `[v6] GPU seated at slot (${slot.x.toFixed(2)}, ${slot.y.toFixed(2)}, ${slot.z.toFixed(2)}), bracketZ=${bracketZ.toFixed(2)}, ` +
     `clearance cooler=${(gpuSeat.clearance.toCooler * 10).toFixed(1)}cm ram=${(gpuSeat.clearance.toRam * 10).toFixed(1)}cm`,
+  );
+}
+
+// ---------- (V6-G) موصل طاقة البطاقة + نهاية كابل الشاشة — اشتقاق من البطاقة الجالسة ----------
+
+/**
+ * يُستدعى مرة واحدة من buildAllParts بعد applyGlbParts (يغطي مسار GLB ومسار الفشل
+ * الإجرائي معًا — gpuSeat.gpuBox يُملأ في alignGpuToSlot في الحالتين):
+ *  1) موصل gpuPower كان مثبتًا على MOUNTS.gpuPower القديمة فيطفو ~1.4 وحدة فوق البطاقة
+ *     بعد محاذاتها — يُعاد وضعه على مقبس 8pin فوق البطاقة: عقدة anchor_gpu_power في
+ *     النموذج الحقيقي، أو مركز مقبس المجسم الإجرائي 'gpu-power-socket'، ثم أعلى البطاقة
+ *     قرب حافتها الخلفية كحل أخير.
+ *  2) كابل الطاقة يُعاد بناؤه لينتهي عند الموصل نفسه (النقاط الثابتة مخزنة في userData).
+ *  3) نهاية كابل إشارة الشاشة تُشتق من منطقة منافذ البراكيت للبطاقة الجالسة — كانت
+ *     معايرة على بطاقة v3 فكانت تغوص خلف الهيكل.
+ * حتمية وقابلة لإعادة النداء — لا تعتمد على حالة متغيرة بين الندائين.
+ */
+export function alignGpuPowerCable(visuals: PartVisuals): void {
+  const box = gpuSeat.gpuBox;
+  if (!box) return;
+  const gpuGroup = visuals.dynamic.gpu;
+  const powerGroup = visuals.dynamic.gpuPower;
+  if (!gpuGroup || !powerGroup) return;
+
+  // 1) موضع موصل 8pin فوق سطح البطاقة
+  const target = new THREE.Vector3();
+  if (anchorCenter(gpuGroup, 'anchor_gpu_power', target)) {
+    // لا يغرق الموصل داخل جسم البطاقة إن وسمت العقدة سطحًا أدنى من القمة
+    target.y = Math.max(target.y, box.max[1] + 0.04);
+  } else {
+    const socket = findNode(gpuGroup, 'gpu-power-socket'); // مقبس المجسم الإجرائي
+    if (socket) {
+      gpuGroup.updateMatrixWorld(true);
+      const sb = new THREE.Box3().setFromObject(socket);
+      if (isFinite(sb.min.x)) sb.getCenter(target);
+      else socket.getWorldPosition(target);
+    } else {
+      // حل أخير: أعلى البطاقة قرب حافتها الخلفية العلوية
+      target.set((box.min[0] + box.max[0]) / 2, box.max[1] + 0.05, box.min[2] + 0.35);
+    }
+  }
+  powerGroup.position.copy(target);
+  powerGroup.updateMatrixWorld(true);
+
+  // 2) إعادة بناء كابل الطاقة: مخرج PSU ثابت → صعود يسار الهيكل → فوق البطاقة → الموصل
+  const cable = powerGroup.getObjectByName('gpu-power-cable');
+  if (cable instanceof THREE.Mesh) {
+    const fixed = cable.userData['worldPts'] as Array<readonly [number, number, number]> | undefined;
+    if (fixed && fixed.length >= 2) {
+      const rel = (p: THREE.Vector3): THREE.Vector3 => p.clone().sub(powerGroup.position);
+      const pts = fixed.map((p) => rel(new THREE.Vector3(p[0], p[1], p[2])));
+      // نقطة الاقتراب: من يسار البطاقة وفوق قمتها — لا يخترق الكابل جسم البطاقة
+      pts.push(rel(new THREE.Vector3(box.min[0] - 0.25, box.max[1] + 0.3, (fixed[fixed.length - 1][2] + target.z) / 2)));
+      pts.push(rel(target)); // الموصل نفسه = أصل المجموعة
+      cable.geometry.dispose();
+      cable.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, 0.04, 8, false);
+    }
+  }
+
+  // 3) نهاية كابل إشارة الشاشة على منطقة منافذ البراكيت الخلفي (F5)
+  const portZ = box.min[2] + 0.02; // أطراف المنافذ عند الحد الخلفي للبطاقة
+  let portX: number;
+  let portY: number;
+  if (gpuSeat.source === 'glb-anchors') {
+    // حافة الشق = حافة البراكيت (موثقة بالتدقيق: منافذ عند x≈1.8، أعلى القمة بقليل)
+    portX = box.max[0] - 0.03;
+    portY = box.max[1] - 0.06;
+  } else {
+    // المجسم الإجرائي: مركز البراكيت المسماي = منطقة منافذه تمامًا
+    const bracket = findNode(gpuGroup, 'gpu-bracket');
+    gpuGroup.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(bracket ?? gpuGroup);
+    if (isFinite(bb.min.x)) {
+      portX = (bb.min.x + bb.max.x) / 2;
+      portY = (bb.min.y + bb.max.y) / 2;
+    } else {
+      portX = gpuGroup.position.x;
+      portY = box.max[1] - 0.06;
+    }
+  }
+  const port = new THREE.Vector3(portX, portY, portZ);
+  const signal = visuals.monitor.getObjectByName('monitor-signal-cable');
+  if (signal instanceof THREE.Mesh) {
+    const fixed = signal.userData['worldPts'] as Array<readonly [number, number, number]> | undefined;
+    if (fixed) {
+      const mp = PERIPH.monitorPos;
+      const pts = fixed.map((p) => new THREE.Vector3(p[0] - mp[0], p[1] - mp[1], p[2] - mp[2]));
+      pts.push(port.clone().sub(new THREE.Vector3(mp[0], mp[1], mp[2])));
+      signal.geometry.dispose();
+      signal.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, 0.028, 8, false);
+    }
+  }
+
+  console.info(
+    `[v6] gpuPower connector seated at (${target.x.toFixed(2)}, ${target.y.toFixed(2)}, ${target.z.toFixed(2)}), ` +
+    `monitor cable end at (${port.x.toFixed(2)}, ${port.y.toFixed(2)}, ${port.z.toFixed(2)})`,
   );
 }
 
@@ -505,8 +601,6 @@ function swapCooler(visuals: PartVisuals): void {
   const cooler = normalize(model.clone(true), def);
   setShadows(cooler.root, true);
   group.add(cooler.root);
-  // (إزالة تدقيق V6) خط spinners القديم — الـRotor المسماه يكفي لمنظومة المراوح الجديدة
-  findNode(group, 'cooler_fan_rotor');
 }
 
 // ---------- ذاكرة RAM (شريحتان في الفتحتين 1 و3) ----------
@@ -552,10 +646,6 @@ function swapGpu(visuals: PartVisuals): void {
     visuals.flags.gpuScrews.push(s);
     group.add(s);
   }
-
-  for (const name of ['gpu_fan_rotor_1', 'gpu_fan_rotor_2']) {
-    findNode(group, name);
-  }
 }
 
 // ---------- مزود الطاقة ----------
@@ -581,8 +671,6 @@ function swapPsu(visuals: PartVisuals): void {
       group.add(s);
     }
   }
-
-  findNode(group, 'psu_fan_rotor');
 }
 
 // ---------- M.2 SSD ----------
@@ -627,7 +715,6 @@ function swapFans(visuals: PartVisuals): void {
     wrapper.add(fan.root);
 
     // 4 براغي الزوايا (إجرائية — على محور المروحة المحلي Y)
-    visuals.flags.fanScrews = visuals.flags.fanScrews || [];
     const half = 0.53;
     for (const sx of [-1, 1]) {
       for (const sz of [-1, 1]) {
@@ -717,6 +804,35 @@ function swapMonitor(visuals: PartVisuals): void {
       new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x22c55e, emissiveIntensity: 0.9, metalness: 0.2, roughness: 0.5 }),
     );
     ledMesh.position.set(bbox.min.x + 0.28, chinY, chinZ);
+    ledMesh.name = 'monitor-chin-led';
+    group.add(ledMesh);
+  } else {
+    // (إصلاح تدقيق V6-G) نموذج بلا مادة سطح العرض (Monitor2_mat): يعاد إنشاء السطح
+    // الإجرائي بنفس أبعاد buildMonitor وإلا بقي بلا 'monitor-screen' فيفقد الرسّام
+    // كانفسه وتظل الشاشة سوداء بلا زر تفاعلي
+    console.warn('[glb] monitor.glb بلا مادة سطح العرض (Monitor2_mat) — أُعيد إنشاء السطح الإجرائي');
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(PERIPH.screenW, PERIPH.screenH),
+      new THREE.MeshBasicMaterial({ color: 0x05070c }),
+    );
+    plane.name = 'monitor-screen';
+    plane.position.set(PERIPH.screenCenterLocal[0], PERIPH.screenCenterLocal[1] + 0.05, PERIPH.screenCenterLocal[2]);
+    group.add(plane);
+
+    // زر الطاقة + لمبة الذقن — نفس هندسة buildMonitor (الزر قابل للنقر)
+    const panelY = PERIPH.screenCenterLocal[1] + 0.05;
+    const panelZ = PERIPH.screenCenterLocal[2] - 0.07;
+    const chinY = panelY - (PERIPH.screenH + 0.2) / 2 + 0.07;
+    const btn = oldBtn ?? makePlugBox(0.12, 0.09, 0.05, 0x2a323c);
+    btn.userData['peripheral'] = 'monitor-power';
+    btn.name = 'monitor-power-btn';
+    btn.position.set((PERIPH.screenW + 0.2) / 2 - 0.26, chinY, panelZ + 0.08);
+    group.add(btn);
+    const ledMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.045, 0.02),
+      new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x22c55e, emissiveIntensity: 0.9, metalness: 0.2, roughness: 0.5 }),
+    );
+    ledMesh.position.set(-((PERIPH.screenW + 0.2) / 2) + 0.28, chinY, panelZ + 0.086);
     ledMesh.name = 'monitor-chin-led';
     group.add(ledMesh);
   }

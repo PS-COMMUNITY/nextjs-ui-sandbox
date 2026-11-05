@@ -21,8 +21,42 @@ export interface PersistShape {
   quizScores: Record<string, { score: number; at: number }>;
   missionsDone: string[];
   lessonsRead: string[];
+  // (إصلاح U10) حقول إضافية بإصدار 6.0.0 — تحميل النسخ الأقدم يعوّضها بقيم آمنة
+  notepad: string;
+  activeMissionId: string | null;
+  missionStepIndex: number;
   settings: { quality: 'low' | 'medium' | 'high' };
   savedAt: number;
+}
+
+/** مدخلات بناء النسخة الاحتياطية — كل ما يُصرَّف من لقطة حالة المتجر. */
+export type BackupInput = Omit<PersistShape, 'version' | 'savedAt'>;
+
+/**
+ * (إصلاح U1) يبني كائن النسخة الاحتياطية الموحد (PersistShape) من لقطة حالة المتجر —
+ * مصدر واحد يستخدمه تصدير «الإعدادات» و«سجل الجلسات» معًا حتى لا يختلف شكلا التصدير
+ * (كان تصدير الإعدادات يُغفل جلسة الفني فيمحوها عند الاستيراد).
+ */
+export function buildBackupShape(input: BackupInput): PersistShape {
+  return {
+    version: APP_VERSION,
+    simulation: input.simulation,
+    tech: input.tech ?? null,
+    logs: input.logs,
+    quizScores: input.quizScores,
+    missionsDone: input.missionsDone,
+    lessonsRead: input.lessonsRead,
+    notepad: input.notepad ?? '',
+    activeMissionId: input.activeMissionId ?? null,
+    missionStepIndex: input.missionStepIndex ?? 0,
+    settings: input.settings,
+    savedAt: Date.now(),
+  };
+}
+
+/** يبني نص JSON للنسخة الاحتياطية منسقًا بأسطر مقروءة (نفس تنسيق downloadJson). */
+export function buildBackupJson(input: BackupInput): string {
+  return JSON.stringify(buildBackupShape(input), null, 2);
 }
 
 /** مفتاح التخزين الموحد للتطبيق. */
@@ -44,6 +78,32 @@ export function storageAvailable(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * (إصلاح U4) فحص خام لوجود حفظ سابق في التخزين وإصداره — دون تحقق هيكلي كامل.
+ * يستخدمه المتجر ليميّز «لا يوجد حفظ» عن «يوجد حفظ لكنه تالف/من إصدار غير مدعوم»
+ * ليُعلم المستخدم بدل تجاهل صامت. لا يرمي أبدًا ويعيد نتائج آمنة.
+ */
+export function loadRawMeta(): { exists: boolean; version: string | null } {
+  try {
+    if (!storageAvailable()) return { exists: false, version: null };
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (raw === null) return { exists: false, version: null };
+    let version: string | null = null;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null && 'version' in parsed) {
+        const v = (parsed as { version?: unknown }).version;
+        if (typeof v === 'string') version = v;
+      }
+    } catch {
+      // بيانات غير قابلة للتحليل — تبقى version صفراء لكن exists صحيح
+    }
+    return { exists: true, version };
+  } catch {
+    return { exists: false, version: null };
   }
 }
 
@@ -79,7 +139,7 @@ export function loadAll(): PersistShape | null {
 
     // التحقق من الإصدار: نقبل إصدار V6 الحالي وإصدار V5 السابق (ترقية شفافة —
     // normalizeSimulationState في المتجر يملأ الحقول الجديدة بقيمها الافتراضية).
-    const ACCEPTED_VERSIONS = new Set([APP_VERSION, '5.0.0', '4.0.0']);
+    const ACCEPTED_VERSIONS = new Set([APP_VERSION, '6.0.0', '5.0.0', '4.0.0']);
     if (typeof data.version !== 'string' || !ACCEPTED_VERSIONS.has(data.version)) return null;
 
     // تحقق هيكلي أساسي يحمي الواجهة من بيانات تالفة.
@@ -94,7 +154,8 @@ export function loadAll(): PersistShape | null {
     if (data.settings.quality !== 'low' && data.settings.quality !== 'medium' && data.settings.quality !== 'high') return null;
     if (typeof data.savedAt !== 'number' || !Number.isFinite(data.savedAt)) return null;
 
-    // tech اختياري (توافقًا مع نسخ قديمة من نفس الإصدار) — يُدمج في المتجر كـ null
+    // tech اختياري (توافقًا مع نسخ قديمة من نفس الإصدار) — يُدمج في المتجر كـ null.
+    // (إصلاح U10) الحقول الجديدة اختيارية بقيم افتراضية آمنة حتى تُحمّل النسخ الأقدم دون مشاكل.
     const merged: PersistShape = {
       version: data.version,
       simulation: data.simulation,
@@ -103,6 +164,9 @@ export function loadAll(): PersistShape | null {
       quizScores: data.quizScores,
       missionsDone: data.missionsDone,
       lessonsRead: data.lessonsRead,
+      notepad: data.notepad ?? '',
+      activeMissionId: data.activeMissionId ?? null,
+      missionStepIndex: data.missionStepIndex ?? 0,
       settings: data.settings,
       savedAt: data.savedAt,
     };

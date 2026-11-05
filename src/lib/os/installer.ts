@@ -67,6 +67,9 @@ export function getSetupState(): SetupState {
   return setup;
 }
 
+/** (إصلاح B8) إعادة تهيئة حالة المعالج — تُستدعى عند اكتمال التثبيت، وعند الإلغاء،
+ *  وعند تغيير العائلة في الخطوة 0 إذا كانت هناك خطوات سابقة (دفاعًا من بقاء singleton
+ *  عبر إعادة تشغيل بعائلة مختلفة). متاحة أيضًا للمتجر (لا يمكن تعديل labStore من هنا). */
 export function resetSetup(): void {
   setup = initialSetupState();
 }
@@ -145,28 +148,68 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
   // اختيار العائلة أولًا (قائمة وسائط الإقلاع)
   if (!setup.family) {
     const top = chrome(os, ctx, null, 'اختر وسيط التثبيت — Installation Media');
+    // (إصلاح B4) الوسيط المُدخل فعليًا (sim.usbMedia) هو مصدر الحقيقة — كان الاختيار حرًا
+    // فتُثبَّت عائلة من وسيط غير موجود أصلًا.
+    const usb = store.sim.usbMedia;
+    const usbFam = usb ? WINDOWS_FAMILIES.find((f) => f.id === usb) ?? null : null;
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
     ctx.font = '14px sans-serif';
     ctx.fillText('الوسيط المُدخل يحدد عائلة النظام — كل عائلة لها تدفقها ومتطلباتها الموثقة:', 36, top + 16);
-    let y = top + 36;
+    if (usbFam) {
+      // شارة الوسيط المقفل + تعطيل بقية العائلات
+      ctx.fillStyle = '#39c7b8';
+      ctx.font = 'bold 13.5px sans-serif';
+      ctx.fillText(`وسيط USB مثبّت: ${usbFam.nameAr} (${usbFam.nameEn})`, os.W - 330, top + 16);
+    } else {
+      // (ملاحظة تعليمية) بلا وسيط يرفض الجهاز الحقيقي الإقلاع إلى المعالج أصلًا
+      ctx.fillStyle = '#eab308';
+      ctx.font = '12.5px sans-serif';
+      ctx.fillText('تنبيه تعليمي: بلا وسيط تثبيت مُدخل يرفض الجهاز الحقيقي الإقلاع إلى معالج التثبيت أصلًا — المحاكاة تسمح بالتجربة هنا.', 36, top + 34);
+    }
+    let y = top + (usbFam ? 36 : 52);
     const cols = 2;
     const bw = Math.min(430, (os.W - 90) / cols);
     let i = 0;
     for (const fam of WINDOWS_FAMILIES) {
+      const locked = !!usbFam && fam.id !== usbFam.id;
       const cx = 36 + (i % cols) * (bw + 18);
       const cy = y + Math.floor(i / cols) * 62;
-      selectable(os, ctx, cx, cy, bw, 52, `${fam.nameEn} (${fam.year})`, fam.editions.map((e) => e.nameAr).join(' • ').slice(0, 64), false, () => {
-        setup.family = fam.id;
-        setup.step = 1;
-        setup.errorAr = null;
-        os.dirty = true;
-      });
+      if (locked) {
+        // (إصلاح B4) اختيار معطّل — العائلة الأخرى لا تطابق الوسيط المُدخل
+        ctx.globalAlpha = 0.38;
+        selectable(os, ctx, cx, cy, bw, 52, `${fam.nameEn} (${fam.year})`, fam.editions.map((e) => e.nameAr).join(' • ').slice(0, 64), false, () => {
+          setup.errorAr = 'هذا الاختيار معطّل: الوسيط المُدخل يحدد العائلة. للتغيير أخرج الوسيط وأدخل وسائط أخرى من نافذة الوسائط.';
+          os.dirty = true;
+        });
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.font = 'bold 11.5px sans-serif';
+        ctx.fillText('مقفل — لا يطابق الوسيط', cx + bw - 132, cy + 25);
+      } else {
+        selectable(os, ctx, cx, cy, bw, 52, `${fam.nameEn} (${fam.year})`, fam.editions.map((e) => e.nameAr).join(' • ').slice(0, 64), !!usbFam, () => {
+          // (إصلاح B8) دفاعًا: حالة قديمة من جلسة سابقة تُمسح قبل البدء بعائلة جديدة
+          if (setup.step !== 0 || setup.done || setup.family) resetSetup();
+          setup.family = fam.id;
+          setup.step = 1;
+          setup.errorAr = null;
+          os.dirty = true;
+        });
+      }
       i++;
     }
     y += Math.ceil(WINDOWS_FAMILIES.length / cols) * 62 + 6;
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.font = '12.5px sans-serif';
+    if (usbFam) {
+      os.wrapText(ctx, 'للتغيير أخرج الوسيط وأدخل وسائط أخرى من نافذة الوسائط.', 36, y, os.W - 72, 17);
+      y += 22;
+    }
     os.wrapText(ctx, 'ملاحظة أمانة: هذا معالج محاكاة داخل مختبر افتراضي — لا يوزع ملفات Windows ولا يطلب مفاتيح حقيقية ولا يمس أقراص جهازك.', 36, y, os.W - 72, 17);
+    if (setup.errorAr) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.font = '13px sans-serif';
+      os.wrapText(ctx, '!! ' + setup.errorAr, 36, y + 24, os.W - 72, 17);
+    }
     return;
   }
   if (!family) return;
@@ -211,20 +254,29 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     ctx.fillText(setup.keyText + (os.blink ? '|' : ''), 48, top + 56);
     os.addRect('custom', 36, top + 30, 380, 40, {
       onClick: () => {
-        os.focusedTextbox = {
+        // (إصلاح B2/B3) عبر focusTextbox: هوية ثابتة + بلا نافذة مالكة (وضع ملء الشاشة)
+        os.focusTextbox({
           get: () => setup.keyText,
           set: (t) => { setup.keyText = t.toUpperCase().slice(0, 29); },
-        };
-        os.dirty = true;
+        });
       },
     }, 'text');
 
     let y = top + 90;
+    // (إصلاح B6) تلميح الصيغة المعلن عند إدخال غير مكتمل/غير صالح
+    const keyRegex = /^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/;
+    const keyInvalidHint = !setup.keySkipped && setup.keyText.length > 0 && !keyRegex.test(setup.keyText);
+    if (keyInvalidHint) {
+      ctx.fillStyle = '#ffd9a0';
+      ctx.font = '12.5px sans-serif';
+      ctx.fillText('الصيغة: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX (25 حرفاً)', 36, top + 82);
+    }
     if (canSkip) {
       bigButton(os, ctx, 36, y, 220, 38, setup.keySkipped ? '✓ ليس لدي مفتاح (مُخطى)' : 'ليس لدي مفتاح منتج', () => { setup.keySkipped = !setup.keySkipped; setup.keyText = ''; os.dirty = true; });
       y += 50;
     }
-    const keyValid = setup.keySkipped || /^[A-Z0-9]{5}(-[A-Z0-9]{5}){0,4}$/.test(setup.keyText) || setup.keyText.length >= 5;
+    // (إصلاح B6) أُزيل الاختصار `length >= 5` — التحقق الحقيقي: 5 مجموعات من 5 أحرف/أرقام مفصولة بشرطات
+    const keyValid = setup.keySkipped || keyRegex.test(setup.keyText);
     bigButton(os, ctx, 36, y, 140, 38, 'Next ←', () => {
       if (!keyValid) { setup.errorAr = 'أدخل مفتاحًا بصيغة تعليمية صحيحة أو اختر التخطي إن كان متاحًا لهذه العائلة.'; os.dirty = true; return; }
       setup.errorAr = null;
@@ -407,10 +459,19 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
         ctx.fillText('القرص غير مهيأ — «New» سينشئ أقسام النظام تلقائيًا وفق النمط المسموح.', 36, y);
         y += 22;
       }
+      // (ميزة B12) تحذير حد MBR المعلن: نمط MBR + قرص أكبر من 2048 جيجابايت
+      if ((disk.style ?? allowed[0]) === 'mbr' && disk.sizeGB > MBR_MAX_DISK_GB) {
+        ctx.fillStyle = '#ffd9a0';
+        ctx.font = '13px sans-serif';
+        os.wrapText(ctx, `⚠ أقراص MBR تدعم حتى ${MBR_MAX_DISK_GB} جيجابايت فقط — سيتم استخدام أول ${MBR_MAX_DISK_GB} جيجابايت.`, 36, y, os.W - 72, 17);
+        y += 24;
+      }
       bigButton(os, ctx, 36, y, 130, 36, 'New (قسم جديد)', () => {
         if (!allowed.length) { setup.errorAr = partitionConflictMessageAr(boot, disk.style ?? 'mbr'); os.dirty = true; return; }
         const style = allowed[0];
-        setup.partPlan = autoPartitionPlan(style, disk.sizeGB).map((p) => ({ label: p.label, kind: p.kind, fs: p.fs, sizeGB: p.sizeGB }));
+        // (ميزة B12) على MBR لا يُعنون فعليًا فوق 2048 جيجابايت — تثبيت حجم الخطة عند السقف
+        const planSizeGB = style === 'mbr' ? Math.min(disk.sizeGB, MBR_MAX_DISK_GB) : disk.sizeGB;
+        setup.partPlan = autoPartitionPlan(style, planSizeGB).map((p) => ({ label: p.label, kind: p.kind, fs: p.fs, sizeGB: p.sizeGB }));
         setup.errorAr = null;
         os.dirty = true;
       });
@@ -623,11 +684,11 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     ctx.fillText(setup.userName + (os.blink ? '|' : ''), 48, top + 54);
     os.addRect('custom', 36, top + 28, 380, 40, {
       onClick: () => {
-        os.focusedTextbox = {
+        // (إصلاح B2/B3) عبر focusTextbox — انظر خطوة مفتاح المنتج
+        os.focusTextbox({
           get: () => setup.userName,
           set: (t) => { setup.userName = t.slice(0, 20); },
-        };
-        os.dirty = true;
+        });
       },
     }, 'text');
     bigButton(os, ctx, 36, top + 88, 140, 38, 'Next ←', () => {
@@ -663,11 +724,11 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     ctx.fillText('•'.repeat(setup.password.length) + (os.blink ? '|' : ''), 48, top + 54);
     os.addRect('custom', 36, top + 28, 380, 40, {
       onClick: () => {
-        os.focusedTextbox = {
+        // (إصلاح B2/B3) عبر focusTextbox — انظر خطوة مفتاح المنتج
+        os.focusTextbox({
           get: () => setup.password,
           set: (t) => { setup.password = t.slice(0, 24); },
-        };
-        os.dirty = true;
+        });
       },
     }, 'text');
     bigButton(os, ctx, 436, top + 28, 150, 40, 'مسح كلمة المرور', () => { setup.password = ''; os.dirty = true; }, false);

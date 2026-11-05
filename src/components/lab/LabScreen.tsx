@@ -56,10 +56,11 @@ import {
 import { toast } from 'sonner';
 import { isWebGLAvailable, PCScene } from '@/lib/scene/PCScene';
 import { preloadGlbAssets } from '@/lib/scene/glbParts';
-import type { ComponentId, ChecklistItem, MachineFlag, PartStatus } from '@/lib/types';
+import type { ComponentId, ChecklistItem, MachineFlag, PartStatus, WinFamilyId } from '@/lib/types';
 import { assemblyStateOf, ASSEMBLY_STATE_INFO, SECURE_FLAGS } from '@/lib/types';
 import { COMPONENT_MAP } from '@/lib/data/catalog';
 import { WINDOWS_FAMILIES } from '@/lib/data/windowsCatalog';
+import type { Arch, PartStyle, WinFamily } from '@/lib/data/windowsCatalog';
 import {
   getRemovalChecklist,
   getInstallChecklist,
@@ -69,6 +70,7 @@ import { FLAG_INFO } from '@/lib/simulation/machineFlags';
 import { installedCount, useLabStore } from '@/lib/store/labStore';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -512,14 +514,146 @@ function FallbackView({ messageAr }: { messageAr: string }) {
 }
 
 // ============ (V6-D) حوار وسائط التثبيت — نقطة الدخول الرسمية لمعالج تثبيت Windows ============
+// (ميزة F1) تبويب «إنشاء وسيط تثبيت»: معالج بأسلوب Rufus يعلّم سلسلة القرارات الكلاسيكية
+// للفني (عائلة ← بنية ← نمط تقسيم/وضع إقلاع ← محاكاة إنشاء). حالة المعالج محلية بالكامل
+// في هذا المكوّن — المتجر لا يرى إلا الناتج النهائي عبر insertUsb(family) الموجود أصلًا.
+
+/** مراحل محاكاة الإنشاء الأربع — تُعرض بالتسلسل مع تقدم العملية */
+const CREATION_STAGES_AR = [
+  'تهيئة الوسيط (FAT32)',
+  'كتابة سجل الإقلاع',
+  'نسخ ملفات التثبيت (~3GB وهميًا)',
+  'اكتمل إنشاء الوسيط',
+] as const;
+
+/** عتبة بدء كل مرحلة على شريط التقدم (٪) */
+const CREATION_STAGE_AT: readonly number[] = [0, 25, 55, 100];
+
+/** المدة الكلية لمحاكاة الإنشاء — 2.5ث (25 نداء × 100ms) */
+const CREATION_TOTAL_MS = 2500;
+
+/** رسالة تعارض نمط التقسيم مع العائلة — شرح عربي يُعطَّل معه زر «التالي» */
+function schemeConflictAr(f: WinFamily, s: PartStyle): string {
+  if (s === 'gpt') {
+    return f.bootModes.includes('uefi')
+      ? 'نمط GPT غير مدرج ضمن أنماط هذه العائلة التعليمية — اختر MBR.'
+      : 'هذه العائلة تققلع بوضع BIOS/Legacy فقط ولا تدعم الإقلاع من قرص GPT — اختر MBR.';
+  }
+  return f.bootModes.includes('bios')
+    ? 'نمط MBR غير مدرج ضمن أنماط هذه العائلة التعليمية — اختر GPT.'
+    : 'هذه العائلة تتطلب UEFI مع قرص GPT (مع TPM 2.0 وSecure Boot) — MBR غير مدعوم.';
+}
+
 function UsbMediaDialog() {
   const usbMedia = useLabStore((s) => s.sim.usbMedia);
-  const bootMode = useLabStore((s) => s.sim.firmware.bootMode);
+  const platformBoot = useLabStore((s) => s.sim.firmware.bootMode);
   const insertUsb = useLabStore((s) => s.insertUsb);
   const [open, setOpen] = useState(false);
 
+  // ===== حالة التبويب ومعالج الإنشاء — كلها محلية (لا حالة معالج في المتجر) =====
+  const [tab, setTab] = useState<'ready' | 'create'>('ready');
+  const [step, setStep] = useState<0 | 1 | 2 | 3>(0); // 0=عائلة، 1=بنية، 2=نمط تقسيم، 3=محاكاة الإنشاء
+  const [familyId, setFamilyId] = useState<WinFamilyId | null>(null);
+  const [arch, setArch] = useState<Arch | null>(null);
+  const [scheme, setScheme] = useState<PartStyle | null>(null);
+  const [progress, setProgress] = useState(0); // 0..100
+  const [done, setDone] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const family = familyId ? WINDOWS_FAMILIES.find((f) => f.id === familyId) ?? null : null;
+  /** البنى المدعومة للعائلة = اتحاد بنى طبعاتها (XP Home مثلًا x86 فقط بينما Professional يدعم x64) */
+  const familyArchs: Arch[] = family
+    ? (['x86', 'x64'] as Arch[]).filter((a) => family.editions.some((e) => e.arch.includes(a)))
+    : [];
+  /** وضع الإقلاع المشتق من نمط التقسيم — القاعدة الكلاسيكية: GPT⇔UEFI وMBR⇔BIOS/Legacy */
+  const derivedBoot: 'bios' | 'uefi' | null =
+    scheme === 'gpt' ? 'uefi' : scheme === 'mbr' ? 'bios' : null;
+  const schemeSupported = !!(
+    family &&
+    scheme &&
+    derivedBoot &&
+    family.partStyles.includes(scheme) &&
+    family.bootModes.includes(derivedBoot)
+  );
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  // تنظيف المؤقت عند تفكيك المكوّن — لا مؤقت يتيم بعد الإغلاق
+  useEffect(() => stopTimer, [stopTimer]);
+
+  const resetWizard = useCallback(() => {
+    stopTimer();
+    setStep(0);
+    setFamilyId(null);
+    setArch(null);
+    setScheme(null);
+    setProgress(0);
+    setDone(false);
+  }, [stopTimer]);
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      if (!next) {
+        setTab('ready');
+        resetWizard();
+      }
+    },
+    [resetWizard],
+  );
+
+  /** الخطوة 1: اختيار العائلة يهيئ البنية ونمط التقسيم المقترحَين تلقائيًا */
+  const chooseFamily = (id: WinFamilyId) => {
+    const f = WINDOWS_FAMILIES.find((x) => x.id === id);
+    if (!f) return;
+    setFamilyId(id);
+    setArch(f.editions.some((e) => e.arch.includes('x86')) ? 'x86' : 'x64');
+    // اقتراح نمط التقسيم: عائلة بوضع إقلاع وحيد ← نمطها الوحيد، وإلا وفق وضع إقلاع المنصة الحالي
+    const preferred: PartStyle = platformBoot === 'uefi' ? 'gpt' : 'mbr';
+    setScheme(f.partStyles.includes(preferred) ? preferred : f.partStyles[0]);
+    setStep(1);
+  };
+
+  /** الخطوة 4: محاكاة إنشاء 2.5ث — الاكتمال والإلغاء كلاهما في نداء المؤقت (حدث خارجي) */
+  const startCreation = () => {
+    const chosenFamily = familyId;
+    if (!chosenFamily || !scheme) return;
+    stopTimer();
+    setDone(false);
+    setProgress(0);
+    setStep(3);
+    const startedAt = Date.now();
+    timerRef.current = setInterval(() => {
+      const pct = Math.min(100, Math.round(((Date.now() - startedAt) / CREATION_TOTAL_MS) * 100));
+      setProgress(pct);
+      if (pct >= 100) {
+        // الاكتمال: إدخال الوسيط بالإجراء الموجود + toast نجاح — قسم «وسائط جاهزة» سيعكس الحالة من المتجر
+        stopTimer();
+        setDone(true);
+        insertUsb(chosenFamily);
+        toast.success('جُهّز الوسيط وأُدخل — أعد التشغيل وأدخل قائمة الإقلاع');
+      }
+    }, 100);
+  };
+
+  /** حالة كل سطر مرحلة على شريط التقدم: مخفية/جارية/منتهية */
+  const stageState = (i: number): 'hidden' | 'active' | 'done' => {
+    if (progress < CREATION_STAGE_AT[i]) return 'hidden';
+    const next = CREATION_STAGE_AT[i + 1];
+    if (next === undefined ? progress >= 100 : progress >= next) return 'done';
+    return 'active';
+  };
+
+  const familyName = (id: WinFamilyId | null) =>
+    id ? WINDOWS_FAMILIES.find((f) => f.id === id)?.nameAr ?? id : '';
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button
           size="sm"
@@ -531,7 +665,7 @@ function UsbMediaDialog() {
           {usbMedia ? `الوسيط: ${WINDOWS_FAMILIES.find((f) => f.id === usbMedia)?.nameEn ?? usbMedia}` : 'وسيط USB'}
         </Button>
       </DialogTrigger>
-      <DialogContent dir="rtl" className="max-w-2xl">
+      <DialogContent dir="rtl" className="max-w-2xl max-h-[85vh] overflow-y-auto scrollbar-thin">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <Usb className="h-4 w-4" aria-hidden />
@@ -542,48 +676,290 @@ function UsbMediaDialog() {
           </DialogDescription>
         </DialogHeader>
 
+        {/* (F1) تبويبا الحوار: الوسائط الجاهزة / معالج إنشاء الوسيط */}
+        <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted/60 p-1" role="tablist" aria-label="أقسام حوار وسائط التثبيت">
+          <Button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'ready'}
+            variant={tab === 'ready' ? 'default' : 'ghost'}
+            className="h-9 max-sm:h-11 text-xs"
+            onClick={() => setTab('ready')}
+          >
+            وسائط جاهزة
+          </Button>
+          <Button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'create'}
+            variant={tab === 'create' ? 'default' : 'ghost'}
+            className="h-9 max-sm:h-11 text-xs"
+            onClick={() => setTab('create')}
+          >
+            إنشاء وسيط تثبيت
+          </Button>
+        </div>
+
         <div className="rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
-          <p className="font-medium mb-1">وضع إقلاع المنصة الحالي: {bootMode === 'uefi' ? 'UEFI (يقبل GPT)' : 'BIOS/Legacy (يقبل MBR)'}</p>
+          <p className="font-medium mb-1">وضع إقلاع المنصة الحالي: {platformBoot === 'uefi' ? 'UEFI (يقبل GPT)' : 'BIOS/Legacy (يقبل MBR)'}</p>
           <p className="text-muted-foreground">
             العائلات القديمة (XP/Vista) تقلع بوضع BIOS/Legacy فقط، وويندوز 11 يقلع بوضع UEFI فقط. بدّل الوضع من إعدادات البرنامج الثابت ← تبويب Boot ← مفتاح Boot Mode. متطلبات TPM 2.0 وSecure Boot من تبويب Security.
           </p>
         </div>
 
-        <div className="max-h-80 space-y-2 overflow-y-auto pe-1 scrollbar-thin" role="list" aria-label="قائمة عائلات Windows المتاحة">
-          {WINDOWS_FAMILIES.map((f) => (
-            <div key={f.id} className="flex items-center gap-2 rounded-lg border p-2.5" role="listitem">
-              <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium leading-tight">
-                  {f.nameEn} <span className="text-muted-foreground">({f.year})</span>
-                </p>
-                <p className="text-[11px] text-muted-foreground leading-tight mt-0.5 truncate">
-                  {f.editions.length} طبعات • حد أدنى {Math.ceil(f.minRamMB / 1024)}GB RAM / {f.minDiskGB}GB قرص
-                </p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {f.bootModes.map((m) => (
-                    <Badge key={m} variant="outline" className="text-[9px] px-1 py-0">{m === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}</Badge>
-                  ))}
-                  {f.partStyles.map((s) => (
-                    <Badge key={s} variant="outline" className="text-[9px] px-1 py-0">{s.toUpperCase()}</Badge>
-                  ))}
-                  {f.requiresTpm2 ? (
-                    <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0 + Secure Boot</Badge>
-                  ) : null}
-                </div>
-              </div>
-              {usbMedia === f.id ? (
-                <Button size="sm" variant="secondary" className="h-8 shrink-0" onClick={() => { insertUsb(null); }}>
-                  إخراج الوسيط
-                </Button>
+        {tab === 'ready' ? (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-medium">وسائط جاهزة</p>
+              {usbMedia ? (
+                <Badge variant="outline" className="gap-1 text-[10px]">
+                  <Usb className="h-3 w-3" aria-hidden />
+                  مُدخل الآن: {familyName(usbMedia)}
+                </Badge>
               ) : (
-                <Button size="sm" className="h-8 shrink-0" onClick={() => { insertUsb(f.id); }}>
-                  إدخال
-                </Button>
+                <span className="text-[11px] text-muted-foreground">لا وسيط مُدخل حاليًا</span>
               )}
             </div>
-          ))}
-        </div>
+            <div className="max-h-80 space-y-2 overflow-y-auto pe-1 scrollbar-thin" role="list" aria-label="قائمة عائلات Windows المتاحة">
+              {WINDOWS_FAMILIES.map((f) => (
+                <div key={f.id} className="flex items-center gap-2 rounded-lg border p-2.5" role="listitem">
+                  <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium leading-tight">
+                      {f.nameEn} <span className="text-muted-foreground">({f.year})</span>
+                    </p>
+                    <p className="text-[11px] text-muted-foreground leading-tight mt-0.5 truncate">
+                      {f.editions.length} طبعات • حد أدنى {Math.ceil(f.minRamMB / 1024)}GB RAM / {f.minDiskGB}GB قرص
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {f.bootModes.map((m) => (
+                        <Badge key={m} variant="outline" className="text-[9px] px-1 py-0">{m === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}</Badge>
+                      ))}
+                      {f.partStyles.map((s) => (
+                        <Badge key={s} variant="outline" className="text-[9px] px-1 py-0">{s.toUpperCase()}</Badge>
+                      ))}
+                      {f.requiresTpm2 ? (
+                        <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0 + Secure Boot</Badge>
+                      ) : null}
+                    </div>
+                  </div>
+                  {usbMedia === f.id ? (
+                    <Button size="sm" variant="secondary" className="h-8 shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => { insertUsb(null); }}>
+                      إخراج الوسيط
+                    </Button>
+                  ) : (
+                    <Button size="sm" className="h-8 shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => { insertUsb(f.id); }}>
+                      إدخال
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="max-h-80 space-y-3 overflow-y-auto pe-1 scrollbar-thin" aria-live="polite" aria-label="معالج إنشاء وسيط تثبيت">
+            {/* رأس الخطوة */}
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-medium">
+                {step === 0 && 'الخطوة 1 من 3 — اختر عائلة Windows'}
+                {step === 1 && `الخطوة 2 من 3 — اختر البنية لـ ${familyName(familyId)}`}
+                {step === 2 && 'الخطوة 3 من 3 — اختر نمط التقسيم'}
+                {step === 3 && (done ? 'اكتمل إنشاء الوسيط' : 'جارٍ إنشاء الوسيط — محاكاة تعليمية')}
+              </p>
+              <Badge variant="outline" className="shrink-0 text-[10px]">{['عائلة', 'بنية', 'تقسيم', 'إنشاء'][step]}</Badge>
+            </div>
+
+            {/* الخطوة 1: العائلات السبع مع عدد الطبعات وشارات البنى المتاحة */}
+            {step === 0 && (
+              <div className="space-y-2">
+                {WINDOWS_FAMILIES.map((f) => {
+                  const archs: Arch[] = (['x86', 'x64'] as Arch[]).filter((a) => f.editions.some((e) => e.arch.includes(a)));
+                  const selected = familyId === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => chooseFamily(f.id)}
+                      aria-pressed={selected}
+                      className={cn(
+                        'flex w-full items-center gap-2 rounded-lg border p-2.5 text-start min-h-11 transition-colors hover:bg-muted/60',
+                        selected && 'border-primary bg-primary/10',
+                      )}
+                    >
+                      <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium leading-tight">
+                          {f.nameAr} <span className="text-muted-foreground">({f.nameEn} • {f.year})</span>
+                        </span>
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          <Badge variant="outline" className="text-[9px] px-1 py-0">{f.editions.length} طبعات</Badge>
+                          {archs.map((a) => (
+                            <Badge key={a} variant="outline" className="text-[9px] px-1 py-0">{a === 'x86' ? '32-bit (x86)' : '64-bit (x64)'}</Badge>
+                          ))}
+                          {f.requiresTpm2 ? (
+                            <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0</Badge>
+                          ) : null}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* الخطوة 2: البنية — تُعرض البنى المدعومة فقط حسب بيانات العائلة */}
+            {step === 1 && family && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  {(['x86', 'x64'] as Arch[]).map((a) => {
+                    const supported = familyArchs.includes(a);
+                    const selected = arch === a;
+                    return (
+                      <button
+                        key={a}
+                        type="button"
+                        disabled={!supported}
+                        onClick={() => setArch(a)}
+                        aria-pressed={selected}
+                        className={cn(
+                          'flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-lg border p-2.5 text-start transition-colors',
+                          supported ? 'hover:bg-muted/60' : 'cursor-not-allowed opacity-40',
+                          selected && 'border-primary bg-primary/10',
+                        )}
+                      >
+                        <span className="text-sm font-medium">{a === 'x86' ? 'x86 — 32-bit' : 'x64 — 64-bit'}</span>
+                        <span className="text-[10px] text-muted-foreground">{supported ? 'مدعومة لهذه العائلة' : 'غير متاحة لهذه العائلة'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {familyId === 'xp' && arch === 'x64' && (
+                  <p className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2 text-[11px] leading-relaxed text-amber-200/90">
+                    ملاحظة تعليمية: إصدار Home من XP جاء ببنية x86 فقط — بنية x64 متاحة عبر إصدار Professional.
+                  </p>
+                )}
+                {familyId === '11' && (
+                  <p className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2 text-[11px] leading-relaxed text-amber-200/90">
+                    ويندوز 11 جاء ببنية 64-bit فقط — لا توجد إصدارات x86 منه.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* الخطوة 3: نمط التقسيم + وضع الإقلاع المشتق منه */}
+            {step === 2 && family && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  {(['gpt', 'mbr'] as PartStyle[]).map((s) => {
+                    const selected = scheme === s;
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setScheme(s)}
+                        aria-pressed={selected}
+                        className={cn(
+                          'flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-lg border p-2.5 text-start transition-colors hover:bg-muted/60',
+                          selected && 'border-primary bg-primary/10',
+                        )}
+                      >
+                        <span className="text-sm font-medium">{s === 'gpt' ? 'GPT — لأنظمة UEFI' : 'MBR — لأنظمة BIOS/Legacy'}</span>
+                        <span className="text-[10px] text-muted-foreground">{s === 'gpt' ? 'جدول أقسام حديث مع قسم EFI' : 'جدول أقسام كلاسيكي للإقلاع القديم'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {scheme && derivedBoot && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge variant="outline" className="text-[10px]">
+                      وضع الإقلاع المشتق: {derivedBoot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}
+                    </Badge>
+                    <span className="text-[10px] text-muted-foreground">تأكد أن وضع إقلاع المنصة في تبويب Boot يطابقه قبل الإقلاع من الوسيط.</span>
+                  </div>
+                )}
+                {scheme && !schemeSupported && (
+                  <p className="rounded-md border border-rose-600/30 bg-rose-600/10 p-2 text-[11px] leading-relaxed text-rose-300">
+                    {schemeConflictAr(family, scheme)}
+                  </p>
+                )}
+                {/* سطر تعليمي: GPT+UEFI مقابل MBR+BIOS في جملة واحدة */}
+                <p className="rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
+                  القاعدة: GPT يقترن بـ UEFI (جدول أقسام حديث يدعم أقراصًا أكبر من 2TB وقسم EFI منفصل)، بينما MBR يقترن بـ BIOS/Legacy — نمط التقسيم يجب أن يطابق وضع إقلاع اللوحة وإلا رفض المثبّت القرص.
+                </p>
+              </div>
+            )}
+
+            {/* الخطوة 4: شريط تقدم + المراحل الأربع بالتسلسل */}
+            {step === 3 && (
+              <div className="space-y-2.5">
+                <Progress value={progress} className="h-2" aria-label="تقدم إنشاء الوسيط" />
+                <p className="text-[11px] text-muted-foreground" dir="ltr">{progress}%</p>
+                <ul className="space-y-1.5">
+                  {CREATION_STAGES_AR.map((label, i) => {
+                    const st = stageState(i);
+                    if (st === 'hidden') return null;
+                    return (
+                      <li key={label} className={cn('flex items-center gap-2 text-xs', st === 'done' ? 'text-emerald-500' : 'text-foreground')}>
+                        {st === 'done'
+                          ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                          : <CircleDashed className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden />}
+                        {label}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {done && family && (
+                  <p className="rounded-md border border-emerald-600/30 bg-emerald-600/10 p-2 text-[11px] leading-relaxed text-emerald-300">
+                    الوسيط «{family.nameAr}» ({arch === 'x86' ? 'x86' : 'x64'} • {scheme === 'gpt' ? 'GPT/UEFI' : 'MBR/BIOS'}) أصبح مُدخلًا — تجده الآن في قسم «وسائط جاهزة».
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* أزرار المعالج */}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              {step === 0 && (
+                <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!familyId} onClick={() => setStep(1)}>
+                  التالي: اختر البنية
+                </Button>
+              )}
+              {step === 1 && (
+                <>
+                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={() => setStep(0)}>رجوع</Button>
+                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!arch} onClick={() => setStep(2)}>التالي: نمط التقسيم</Button>
+                </>
+              )}
+              {step === 2 && (
+                <>
+                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={() => setStep(1)}>رجوع</Button>
+                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!scheme || !schemeSupported} onClick={startCreation}>
+                    بدء الإنشاء (محاكاة)
+                  </Button>
+                </>
+              )}
+              {step === 3 && !done && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 max-sm:h-11 max-sm:px-3 w-full text-rose-400"
+                  onClick={() => { stopTimer(); setProgress(0); setStep(2); }}
+                >
+                  إلغاء الإنشاء
+                </Button>
+              )}
+              {step === 3 && done && (
+                <>
+                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={resetWizard}>
+                    إنشاء وسيط آخر
+                  </Button>
+                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" onClick={() => setTab('ready')}>
+                    عرض الوسائط الجاهزة
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         <p className="text-[11px] text-muted-foreground leading-relaxed">
           أمانة تعليمية: هذه وسائط محاكاة داخل المشروع — لا تُوزّع ملفات Windows ولا تطلب مفاتيح حقيقية، وكل العمليات على أقراص الجهاز الافتراضي فقط.
@@ -626,6 +1002,25 @@ export default function LabScreen() {
   const damagePart = useLabStore((s) => s.damagePart);
   const setNotepad = useLabStore((s) => s.setNotepad);
   const clearNotepad = useLabStore((s) => s.clearNotepad);
+
+  // (إصلاح U8) مرجع الجودة: إنشاء المشهد يعمل مرة واحدة بمعتمدات [] — يقرأ الجودة
+  // من المرجع بدل القيمة الملتقطة وقت الإنشاء، مع بقاء مؤثر المزامنة المنفصل كما هو.
+  const qualityRef = useRef(quality);
+  // (إصلاح U6) سجل مؤقتات السلاسل الزمنية (مثل إعادة تشغيل بيئة الاسترداد) —
+  // تُلغى كلها عند التخلص من المشهد/مغادرة الشاشة حتى لا تعمل بعد رحيل الشاشة.
+  const pendingTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const trackTimeout = useCallback((fn: () => void, ms: number) => {
+    const id = setTimeout(() => {
+      pendingTimeoutsRef.current.delete(id);
+      fn();
+    }, ms);
+    pendingTimeoutsRef.current.add(id);
+    return id;
+  }, []);
+  const clearPendingTimeouts = useCallback(() => {
+    for (const id of pendingTimeoutsRef.current) clearTimeout(id);
+    pendingTimeoutsRef.current.clear();
+  }, []);
 
   // إنشاء المشهد مرة واحدة — كل حالات الفشل تمر عبر callback واحد
   useEffect(() => {
@@ -687,7 +1082,12 @@ export default function LabScreen() {
       onRecoveryRestart: () => {
         const st = useLabStore.getState();
         st.toggleFlag('powerOn'); // إطفاء
-        setTimeout(() => useLabStore.getState().toggleFlag('powerOn'), 900); // تشغيل من جديد
+        // (إصلاح U6) المؤقت متتبّع في pendingTimeoutsRef ويُلغى عند مغادرة الشاشة
+        trackTimeout(() => {
+          // حارس: إن شُغّل الجهاز يدويًا أثناء الانتظار فلا نطفئه من جديد
+          if (useLabStore.getState().sim.flags.powerOn) return;
+          useLabStore.getState().toggleFlag('powerOn'); // تشغيل من جديد
+        }, 900);
       },
       onError: fail,
     };
@@ -707,7 +1107,7 @@ export default function LabScreen() {
       if (cancelled) return;
       setAssetsReady(true);
       try {
-        scene = new PCScene({ container: el, quality, callbacks });
+        scene = new PCScene({ container: el, quality: qualityRef.current, callbacks });
         sceneRef.current = scene;
         const st = useLabStore.getState();
         scene.syncState(st.sim);
@@ -727,6 +1127,7 @@ export default function LabScreen() {
     })();
     return () => {
       cancelled = true;
+      clearPendingTimeouts(); // (إصلاح U6) إلغاء المؤقتات المعلقة عند مغادرة الشاشة/إلغاء التركيب
       scene?.dispose();
       sceneRef.current = null;
     };
@@ -734,6 +1135,7 @@ export default function LabScreen() {
 
   // مزامنة الحالة مع المشهد
   useEffect(() => {
+    qualityRef.current = quality; // (إصلاح U8) إبقاء المرجع متزامنًا مع تغيّر الجودة
     sceneRef.current?.setQuality(quality);
   }, [quality]);
   useEffect(() => {

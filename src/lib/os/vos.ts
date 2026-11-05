@@ -55,7 +55,6 @@ export interface VosAppDef {
   defaultW: number;
   defaultH: number;
   desktop?: boolean;         // يظهر أيقونة على سطح المكتب
-  fullscreenOnly?: boolean;  // يُفتح كملء شاشة (بدون إطار نافذة)
   render: (os: VirtualOS, win: VosWindow | null, ctx: CanvasRenderingContext2D, now: number) => void;
 }
 
@@ -100,7 +99,6 @@ interface HotRect {
   cursor: 'default' | 'pointer' | 'text';
   onClick?: (opts: VosPointerOpts) => void;
   onDbl?: () => void;
-  onRight?: () => void;
   onScroll?: (dy: number) => void;
   z: number;
 }
@@ -109,7 +107,6 @@ export class UiFrame {
   rects: HotRect[] = [];
   keyHandler: ((ev: VosKeyEvent) => boolean) | null = null; // true = استُهلك
   hoverId: string | null = null;
-  textCursor: boolean = false;
 
   add(r: HotRect): void {
     this.rects.push(r);
@@ -172,8 +169,11 @@ export class VirtualOS {
 
   toasts: Array<{ titleAr: string; bodyAr: string; at: number }> = [];
 
-  /** مربع النص المركّز عليه (للتوجيه اللوحي) */
-  focusedTextbox: { get: () => string; set: (t: string) => void; onEnter?: () => void } | null = null;
+  /** مربع النص المركّز عليه (للتوجيه اللوحي)
+   *  (إصلاح B3) id: هوية عدّاد ثابتة تقارن بها التطبيقات بدل هوية الإغلاق (كانت تفشل دائمًا).
+   *  (إصلاح B2) winId: النافذة المالكة — يُلغى الالتقاط عند إغلاقها أو تغيّر وضع البيئة. */
+  focusedTextbox: { id: number; winId: string | null; get: () => string; set: (t: string) => void; onEnter?: () => void } | null = null;
+  private tbCounter = 1;
   private blinkAt = 0;
 
   private frame: UiFrame = new UiFrame();
@@ -185,6 +185,11 @@ export class VirtualOS {
   private downAt = 0;
   private lastClickId: string | null = null;
   private lastClickAt = 0;
+  /** (إصلاح B1) آخر مزدوج نقر: نفس المستطيل خلال 350ms يُتجاهل — كان يُطلق onDbl مرتين
+   *  (كشف الفاصل داخل pointer('up') + حدث dblclick الحقيقي عبر pointer('dbl')). */
+  private lastDbl: { key: string; at: number } | null = null;
+  /** (إصلاح B2) وضع البيئة عند آخر فحص تركيز — تغيّره يُلغي الالتقاط اللوحي العالق */
+  private lastFocusMode: VirtualOS['mode'] = 'desktop';
   dirty = true;
 
   constructor(ctx: CanvasRenderingContext2D, W: number, H: number) {
@@ -197,17 +202,34 @@ export class VirtualOS {
     this.apps.set(app.id, app);
   }
 
+  /** (إصلاح B3) تركيز مربع نص بهوية ثابتة (عداد داخلي) — تستخدمه apps.ts و installer.ts */
+  focusTextbox(tb: { winId?: string | null; get: () => string; set: (t: string) => void; onEnter?: () => void }): void {
+    this.focusedTextbox = { id: this.tbCounter++, winId: tb.winId ?? null, get: tb.get, set: tb.set, onEnter: tb.onEnter };
+    this.dirty = true;
+  }
+
+  /** (إصلاح B2) هل يلتقط النظام الافتراضي لوحة المفاتيح الآن؟
+   *  يستدعيه الطبقة الخارجية (PCScene) عند Escape ليقرر توجيه المفتاح بدل خروج وضع الشاشة فورًا. */
+  hasKeyboardFocus(): boolean {
+    return !!this.focusedTextbox || this.startOpen || !!this.ctxMenu;
+  }
+
+  /** (إصلاح B2) فحص صلاحية الالتقاط اللوحي: يُلغى إذا أُغلقت نافذته أو تغيّر وضع البيئة
+   *  (سطح مكتب ⇄ برنامج ثابت ⇄ معالج تثبيت ⇄ استرداد) — كان يخطف كل الكتابة بعدها. */
+  validateFocus(): void {
+    if (this.focusedTextbox) {
+      const winId = this.focusedTextbox.winId;
+      const winOpen = winId ? this.windows.some((w) => w.id === winId) : true;
+      if (!winOpen || this.mode !== this.lastFocusMode) this.focusedTextbox = null;
+    }
+    this.lastFocusMode = this.mode;
+  }
+
   // ============ النوافذ ============
 
   openApp(appId: string, args?: Record<string, unknown>): VosWindow | null {
     const app = this.apps.get(appId);
     if (!app) return null;
-    if (app.fullscreenOnly) {
-      // تطبيقات ملء الشاشة (المثبّت) تُدار كأوضاع لا نوافذ
-      this.mode = 'setup';
-      this.dirty = true;
-      return null;
-    }
     const existing = this.windows.find((w) => w.appId === appId);
     if (existing && !args) {
       existing.minimized = false;
@@ -238,6 +260,9 @@ export class VirtualOS {
     const idx = this.windows.findIndex((w) => w.id === id);
     if (idx >= 0) {
       this.windows.splice(idx, 1);
+      // (إصلاح B2) الإغلاق يلغي التقاط مربع النص التابع للنافذة ومعالج مفاتيحها
+      if (this.focusedTextbox?.winId === id) this.focusedTextbox = null;
+      this.frame.keyHandler = null;
       this.dirty = true;
     }
   }
@@ -269,7 +294,7 @@ export class VirtualOS {
   addRect(
     kind: 'button' | 'title' | 'resize' | 'icon' | 'row' | 'custom' | 'scroll',
     x: number, y: number, w: number, h: number,
-    handlers: { onClick?: (o?: VosPointerOpts) => void; onDbl?: () => void; onRight?: () => void; onScroll?: (dy: number) => void } ,
+    handlers: { onClick?: (o?: VosPointerOpts) => void; onDbl?: () => void; onScroll?: (dy: number) => void } ,
     cursor: 'default' | 'pointer' | 'text' = 'pointer',
     z = 20,
   ): string {
@@ -281,7 +306,6 @@ export class VirtualOS {
       w, h, kind, cursor, z,
       onClick: handlers.onClick ? () => handlers.onClick?.() : undefined,
       onDbl: handlers.onDbl,
-      onRight: handlers.onRight,
       onScroll: handlers.onScroll,
     });
     return id;
@@ -358,7 +382,8 @@ export class VirtualOS {
       this.dragResize = null;
       if (this.activeId && hit && hit.id === this.activeId) {
         if (this.lastClickId === hit.id && now - this.lastClickAt < 380) {
-          hit.onDbl?.();
+          // (إصلاح B1) عبر fireDbl حتى لا يتكرر مع حدث dblclick الحقيقي
+          this.fireDbl(hit);
           this.lastClickId = null;
         } else {
           hit.onClick?.(opts);
@@ -373,17 +398,30 @@ export class VirtualOS {
 
     if (type === 'dbl') {
       const hit = f.hit(x, y);
-      hit?.onDbl?.();
+      // (إصلاح B1) نفس المسار المركزي: المزدوج المكرر خلال 350ms على نفس المستطيل يُتجاهل
+      if (hit) this.fireDbl(hit);
       return;
     }
 
     if (type === 'right') {
       const hit = f.hit(x, y);
-      if (hit?.onRight) hit.onRight();
-      else if (!hit) this.desktopContextMenu(x, y);
+      // (تنظيف B14) أُزيل onRight الميت — النقر الأيمن فوق عنصر لا يفعل شيئًا (كما كان عمليًا)،
+      // وفوق الفراغ يفتح قائمة سياق سطح المكتب.
+      if (!hit) this.desktopContextMenu(x, y);
       this.dirty = true;
       return;
     }
+  }
+
+  /** (إصلاح B1) إطلاق onDbl مركزي مع إزالة الازدواج: نفس المستطيل خلال 350ms = تجاهل */
+  private fireDbl(rect: HotRect): void {
+    const now = Date.now();
+    if (this.lastDbl && this.lastDbl.key === rect.id && now - this.lastDbl.at < 350) {
+      this.lastDbl = { key: rect.id, at: now };
+      return;
+    }
+    this.lastDbl = { key: rect.id, at: now };
+    rect.onDbl?.();
   }
 
   wheel(x: number, y: number, dy: number): void {
@@ -396,6 +434,8 @@ export class VirtualOS {
 
   /** لوحة المفاتيح الحقيقية — توجيه V6 §4.3: Enter/Backspace/Tab/Shift/Ctrl/الأسهم/Esc */
   key(ev: VosKeyEvent): void {
+    // (إصلاح B2) فحص صلاحية الالتقاط قبل كل مفتاح — لا خطف للكتابة بعد إغلاق النافذة/تغيير الوضع
+    this.validateFocus();
     // مربع نص مركّز يلتقط الكتابة أولًا
     if (this.focusedTextbox) {
       const tb = this.focusedTextbox;
@@ -440,6 +480,8 @@ export class VirtualOS {
 
   /** يرسم إطارًا كاملًا ويعيد true إذا اكتمل رسم فعلي */
   render(now: number): boolean {
+    // (إصلاح B2) تغيّر الوضع (سطح مكتب/ثابت/تثبيت/استرداد) يلغي الالتقاط اللوحي العالق
+    this.validateFocus();
     this.frame = new UiFrame();
     // (إصلاح تدقيق V6) معرّفات مستقرة بين الإطارات: كانت r1، r2… تتزايد عالميًا عبر الرسوم،
     // فتتغير هوية المستطيل نفسه بين pointerdown وpointerup (الرسم يحدث بينهما)
@@ -473,6 +515,7 @@ export class VirtualOS {
 
   /** يفرض رسم وضع setup عبر تطبيق المثبّت — يستدعى من PCScene قبل render */
   drawSetupWith(fn: (ctx: CanvasRenderingContext2D, os: VirtualOS, now: number) => void, now: number): boolean {
+    this.validateFocus(); // (إصلاح B2)
     this.frame = new UiFrame();
     this.rectCounter = 1; // (إصلاح تدقيق V6) نفس سبب render() — معرّفات مستقرة بين الإطارات
     const ctx = this.ctx;
@@ -798,7 +841,7 @@ export class VirtualOS {
     const items: Array<{ label: string; act: () => void }> = [
       { label: 'معلومات النظام', act: () => this.openApp('settings') },
       { label: 'فتح مستكشف الملفات', act: () => this.openApp('explorer') },
-      { label: 'إغلاق كل النوافذ', act: () => { this.windows = []; this.dirty = true; } },
+      { label: 'إغلاق كل النوافذ', act: () => { this.windows = []; this.focusedTextbox = null; this.frame.keyHandler = null; this.dirty = true; } },
     ];
     this.ctxMenu = { x: Math.min(x, this.W - 200), y: Math.min(y, this.H - 130), items };
     this.dirty = true;
@@ -1090,7 +1133,7 @@ export class VirtualOS {
 
     const opts: Array<{ label: string; note: string; act?: () => void; color?: string }> = [
       { label: 'Startup Repair — إصلاح بدء التشغيل', note: 'محاولة إصلاح تلقائية (قد تفشل وتشرح السبب)', act: () => d.onStartupRepair?.(), color: '#39c7b8' },
-      { label: 'Command Prompt — موجه الأوامر', note: 'أوامر إصلاح الإقلاع التعليمية: bootrec /fixmbr /fixboot /rebuildbcd', act: () => d.onCommandPrompt?.(), color: '#39c7b8' },
+      { label: 'Command Prompt — موجه الأوامر', note: 'أوامر إصلاح الإقلاع التعليمية: bootrec /fixmbr /fixboot /scanos /rebuildbcd', act: () => d.onCommandPrompt?.(), color: '#39c7b8' },
       { label: 'Restart — إعادة التشغيل', note: 'أعد تشغيل الجهاز بعد الإصلاح', act: () => d.onRestart?.(), color: '#e8eef7' },
     ];
     let y = 216;
