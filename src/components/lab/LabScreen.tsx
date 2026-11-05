@@ -45,8 +45,6 @@ import {
   Minimize2,
   Hand,
   PanelRightClose,
-  ChevronDown,
-  ChevronUp,
   Keyboard,
   Eraser,
   Usb,
@@ -68,6 +66,8 @@ import {
 import { computeMonitorView } from '@/lib/simulation/monitorEngine';
 import { FLAG_INFO } from '@/lib/simulation/machineFlags';
 import { installedCount, useLabStore } from '@/lib/store/labStore';
+import TechnicianScreen from '@/components/lab/TechnicianScreen';
+import MissionsPanel from '@/components/lab/MissionsPanel';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -394,7 +394,7 @@ function HintsOverlay({ dragMode }: { dragMode: boolean }) {
   if (!visible) return null;
   return (
     <div
-      className="pointer-events-none absolute top-2 start-2 z-10 rounded-md border border-border/70 bg-background/85 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground backdrop-blur-sm"
+      className="pointer-events-none absolute top-12 start-2 z-10 max-lg:hidden rounded-md border border-border/70 bg-background/85 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground backdrop-blur-sm"
       dir="rtl"
       role="note"
       aria-label="تلميحات التحكم بالماوس ولوحة المفاتيح الحقيقيين"
@@ -414,76 +414,9 @@ function HintsOverlay({ dragMode }: { dragMode: boolean }) {
   );
 }
 
-// ============ لوحة الخطوات القابلة للطي (أسفل المشهد) ============
-function StepsPanel() {
-  const sim = useLabStore((s) => s.sim);
-  const selected = useLabStore((s) => s.selected);
-  const toggleFlag = useLabStore((s) => s.toggleFlag);
-  const detachPart = useLabStore((s) => s.detachPart);
-  const installPart = useLabStore((s) => s.installPart);
-  const [open, setOpen] = useState(true);
-
-  const removable = selected !== null && selected !== 'case';
-  const status = selected ? sim.parts[selected] : null;
-  const phase: 'remove' | 'install' | null =
-    removable && status === 'installed' ? 'remove' :
-    removable && (status === 'awaiting' || status === 'removed') ? 'install' : null;
-  const items = !removable || !selected ? [] : phase === 'remove'
-    ? getRemovalChecklist(sim, selected)
-    : phase === 'install'
-      ? getInstallChecklist(sim, selected)
-      : [];
-
-  const done = items.filter((i) => i.done).length;
-
-  return (
-    <div className="rounded-lg border bg-card/60">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-start"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-      >
-        {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" aria-hidden /> : <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />}
-        <span className="text-xs font-bold">خطوات العمل {selected && phase ? `— ${COMPONENT_MAP[selected].nameAr}` : ''}</span>
-        {items.length > 0 ? (
-          <Badge variant="outline" className="font-mono text-[10px]" dir="ltr">{done}/{items.length}</Badge>
-        ) : null}
-        <span className="ms-auto text-[10px] text-muted-foreground">{open ? 'طي' : 'فتح'}</span>
-      </button>
-      {open ? (
-        <div className="border-t px-3 py-2">
-          {!selected ? (
-            <p className="text-[11px] text-muted-foreground">حدّد قطعة من المشهد لتظهر خطوات فكها/تركيبها هنا بالترتيب.</p>
-          ) : selected === 'case' ? (
-            <p className="text-[11px] text-muted-foreground">الهيكل يُفتح ويُغلق من زر «الغطاء الجانبي» في شريط الأدوات — بلا مسامير خارجية في هذا الطراز.</p>
-          ) : !phase ? (
-            <p className="text-[11px] text-muted-foreground">
-              الحالة الحالية: {ASSEMBLY_STATE_INFO[assemblyStateOf(status!, false)].labelAr} — لا خطوات نشطة الآن.
-            </p>
-          ) : (
-            <>
-              <p className="text-[11px] text-muted-foreground mb-1.5">
-                {phase === 'remove'
-                  ? 'المطلوب الآن: أول خطوة غير مكتملة بالترتيب — لا تتجاوز أي خطوة.'
-                  : 'المطلوب الآن: أكمل شروط التركيب ثم ركّب القطعة في موضعها.'}
-              </p>
-              <ul className="space-y-1.5">
-                {items.map((item) => (
-                  <ChecklistRow key={item.source + item.labelAr} item={item} mode={phase} onFlag={toggleFlag} onPart={phase === 'remove' ? detachPart : installPart} />
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 // ============ الوضع البديل التعليمي عند غياب WebGL ============
 function FallbackView({ messageAr }: { messageAr: string }) {
-  const setScreen = useLabStore((s) => s.setScreen);
+  const openTool = useLabStore((s) => s.openTool);
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-amber-600/40 bg-amber-600/10 p-4">
@@ -506,7 +439,7 @@ function FallbackView({ messageAr }: { messageAr: string }) {
           </Card>
         ))}
       </div>
-      <Button variant="outline" onClick={() => setScreen('catalog')}>
+      <Button variant="outline" onClick={() => openTool('catalog')}>
         الانتقال إلى كتالوج القطع الكامل
       </Button>
     </div>
@@ -990,6 +923,7 @@ export default function LabScreen() {
   const isolated = useLabStore((s) => s.isolated);
   const quality = useLabStore((s) => s.quality);
   const sidePanelsHidden = useLabStore((s) => s.sidePanelsHidden);
+  const screen = useLabStore((s) => s.screen);
   const bootStartedAt = useLabStore((s) => s.bootStartedAt);
   const notepad = useLabStore((s) => s.notepad);
   const airflowVisible = useLabStore((s) => s.airflowVisible);
@@ -1288,9 +1222,41 @@ export default function LabScreen() {
   const panelOpen = sim.flags.panelOpen;
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* شريط أدوات المشهد — صغير وواضح (توجيه v3 2.1) */}
-      <div className="flex flex-wrap items-center gap-1 rounded-lg border bg-card/60 p-1.5" role="toolbar" aria-label="أدوات المشهد ثلاثي الأبعاد">
+    // (v7) ورشة غامرة: المشهد يملأ كل المساحة وكل الأدوات طبقات زجاجية عائمة فوقه —
+    // جذر ملء الشاشة هو هذا الغلاف كي يبقى HUD كاملًا داخل وضع fullscreen الأصلي.
+    <div
+      ref={sceneWrapRef}
+      className="absolute inset-0 overflow-hidden bg-[#0d1218]"
+      dir="rtl"
+    >
+      {/* حاوية الكانفس — ResizeObserver في المشهد يتكيف مع أي حجم تلقائيًا */}
+      <div
+        ref={containerRef}
+        dir="ltr"
+        className="absolute inset-0"
+        role="application"
+        aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
+      />
+
+      {/* مؤشر تجهيز النماذج قبل اكتمال التحميل */}
+      {!assetsReady ? (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 bg-[#0d1218] text-sm text-slate-300" dir="rtl" role="status" aria-live="polite">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-600 border-t-cyan-400" aria-hidden />
+          جارٍ تجهيز النماذج ثلاثية الأبعاد…
+          <span className="text-[11px] text-muted-foreground">فشل التحميل يعني تلقائيًا البديل الإجرائي — لن يبقى المشهد فارغًا</span>
+        </div>
+      ) : null}
+
+      {/* تلميحات التحكم (زر H) — جهة لا تتعارض مع اللوحة الجانبية */}
+      <HintsOverlay dragMode={dragMode} />
+
+      {/* شريط الأدوات العائم — أعلى المنتصف */}
+      <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-2">
+        <div
+          role="toolbar"
+          aria-label="أدوات المشهد ثلاثي الأبعاد"
+          className="pointer-events-auto flex max-w-full items-center gap-1 overflow-x-auto scrollbar-thin rounded-lg border border-border/60 bg-background/85 p-1 shadow-lg backdrop-blur"
+        >
         <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('front')} title="منظور أمامي (1)">
           <View className="h-3.5 w-3.5" aria-hidden /> أمامي
         </Button>
@@ -1408,112 +1374,99 @@ export default function LabScreen() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+        </div>
       </div>
 
-      {/* المشهد + اللوحة الجانبية */}
-      <div className={cn('grid gap-3', sidePanelsHidden ? '' : 'lg:grid-cols-[minmax(0,1fr)_360px]')}>
-        <div className="space-y-2 min-w-0">
-          <SafetyStrip />
-
-          {/* (V6 §3) قراءة حية: الحرارة المُحاكاة + سرعة كل مروحة وحالتها واتجاه تدفقها */}
-          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-card/40 px-2.5 py-1.5" dir="rtl" aria-label="قراءة المراوح والحرارة المحاكاة">
-            <Badge variant="outline" className="gap-1 text-[10px]">
-              <Thermometer className="h-3 w-3" aria-hidden />
-              CPU {sim.thermal.cpuTempC.toFixed(0)}°C / GPU {sim.thermal.gpuTempC.toFixed(0)}°C
-            </Badge>
-            <span className="text-[10px] text-muted-foreground">محاكاة تعليمية:</span>
-            {fansReport.length === 0 ? (
-              <span className="text-[10px] text-muted-foreground">…تجهيز منظومة المراوح</span>
-            ) : (
-              fansReport.map((f) => (
-                <Badge
-                  key={f.labelAr}
-                  variant="outline"
-                  className={cn(
-                    'gap-1 text-[10px]',
-                    !f.running ? 'border-slate-600/40 text-slate-400' : f.rpm > 1200 ? 'border-rose-600/40 text-rose-400' : 'border-emerald-600/40 text-emerald-400',
-                  )}
-                  title={`${f.labelAr} — ${f.airflowAr}`}
-                >
-                  <Wind className="h-3 w-3" aria-hidden />
-                  {f.labelAr}: {f.running ? `${f.rpm} RPM` : 'متوقفة'}
-                </Badge>
-              ))
-            )}
-          </div>
-
-          <div
-            ref={sceneWrapRef}
-            className={cn(
-              'relative overflow-hidden rounded-xl border bg-[#0d1218]',
-              isFullscreen ? 'h-screen' : 'h-[52vh] min-h-[380px] lg:h-[calc(100vh-320px)] lg:min-h-[460px]',
-            )}
-          >
-            <div
-              ref={containerRef}
-              dir="ltr"
-              className="h-full w-full"
-              role="application"
-              aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
-            />
-            {/* (إضافة تدقيق V6) مؤشر تجهيز النماذج قبل اكتمال التحميل */}
-            {!assetsReady ? (
-              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#0d1218] text-sm text-slate-300" dir="rtl" role="status" aria-live="polite">
-                <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-600 border-t-cyan-400" aria-hidden />
-                جارٍ تجهيز النماذج ثلاثية الأبعاد…
-                <span className="text-[11px] text-muted-foreground">فشل التحميل يعني تلقائيًا البديل الإجرائي — لن يبقى المشهد فارغًا</span>
-              </div>
-            ) : null}
-            {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن */}
-            {focusMode ? (
-              <div className="pointer-events-auto absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-2 bg-emerald-950/80 px-3 py-1.5 text-xs text-emerald-200 backdrop-blur-sm" dir="rtl">
-                <MonitorUp className="h-3.5 w-3.5" aria-hidden />
-                <span className="font-bold">وضع التحكم بالشاشة</span>
-                <span className="opacity-80">— الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي داخل الشاشة المجسمة</span>
-                <kbd className="rounded border border-emerald-500/50 px-1 font-mono">Esc</kbd>
-                <span className="opacity-80">للعودة للمختبر</span>
-                <Button size="sm" variant="secondary" className="h-6 gap-1 px-2 text-[10px]" onClick={() => sceneRef.current?.setFocusMode(false)}>
-                  <DoorClosed className="h-3 w-3" aria-hidden /> خروج
-                </Button>
-              </div>
-            ) : null}
-            <HintsOverlay dragMode={dragMode} />
-          </div>
-
-          {/* حقل إدخال حقيقي → دفتر النظام الافتراضي على الشاشة (توجيه v3 أ.2) */}
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="gap-1 shrink-0 text-[10px]">
-              <Keyboard className="h-3 w-3" aria-hidden /> دفتر النظام
-            </Badge>
-            <Input
-              value={notepad}
-              onChange={(e) => setNotepad(e.target.value)}
-              disabled={!canType}
-              placeholder={canType ? 'اكتب بلوحة مفاتيحك — يظهر النص على الشاشة الافتراضية' : 'يعمل بعد إقلاع ناجح يدخل النظام الافتراضي'}
-              className="h-8 text-xs"
-              aria-label="إدخال نص حقيقي يظهر في دفتر النظام الافتراضي على الشاشة ثلاثية الأبعاد"
-            />
-            <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 max-sm:h-11 max-sm:w-11" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
-              <Eraser className="h-3.5 w-3.5" aria-hidden />
-              <span className="sr-only">مسح دفتر النظام</span>
+      {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن — تحت شريط الأدوات */}
+      {focusMode ? (
+        <div className="pointer-events-none absolute inset-x-0 top-12 z-30 flex justify-center px-2">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-950/85 px-3 py-1.5 text-xs text-emerald-200 shadow-lg backdrop-blur" dir="rtl">
+            <MonitorUp className="h-3.5 w-3.5" aria-hidden />
+            <span className="font-bold">وضع التحكم بالشاشة</span>
+            <span className="opacity-80 hidden sm:inline">— الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي داخل الشاشة المجسمة</span>
+            <kbd className="rounded border border-emerald-500/50 px-1 font-mono">Esc</kbd>
+            <span className="opacity-80">للعودة</span>
+            <Button size="sm" variant="secondary" className="h-6 gap-1 px-2 text-[10px]" onClick={() => sceneRef.current?.setFocusMode(false)}>
+              <DoorClosed className="h-3 w-3" aria-hidden /> خروج
             </Button>
           </div>
-
-          <p className="text-[11px] text-muted-foreground">
-            الجهاز المرجعي: هيكل Mid-Tower + لوحة ATX (مقبس LGA1700 / ذاكرة DDR5) — أساس اللوحة مسح حقيقي مرخص CC0 (Poly Haven).
-            اختصارات المشهد: <kbd className="rounded border px-1 font-mono">R</kbd> إعادة، <kbd className="rounded border px-1 font-mono">F</kbd> تركيز، <kbd className="rounded border px-1 font-mono">X</kbd> أشعة، <kbd className="rounded border px-1 font-mono">M</kbd> التحكم بالشاشة، <kbd className="rounded border px-1 font-mono">Delete</kbd> إعدادات UEFI، <kbd className="rounded border px-1 font-mono">1/2/3</kbd> مناظير، <kbd className="rounded border px-1 font-mono">H</kbd> تلميحات.
-          </p>
-
-          <StepsPanel />
         </div>
-        {!sidePanelsHidden ? (
-          <div className="min-w-0">
-            <ScrollArea className="h-fit max-h-[calc(100vh-240px)] scrollbar-thin">
-              <InfoPanel />
-            </ScrollArea>
-          </div>
-        ) : null}
+      ) : null}
+
+      {/* الرصيف السفلي العائم — التشغيل والسلامة ثم الحرارة والمراوح ثم دفتر النظام */}
+      <div className="pointer-events-none absolute bottom-2 start-2 z-20 max-lg:z-40 flex w-[min(640px,calc(100vw-1rem))] flex-col gap-1.5">
+        <div className="pointer-events-auto rounded-lg border border-border/60 bg-background/85 px-2 py-1.5 shadow-lg backdrop-blur">
+          <SafetyStrip />
+        </div>
+
+        {/* (V6 §3) قراءة حية: الحرارة المُحاكاة + سرعة كل مروحة وحالتها واتجاه تدفقها */}
+        <div
+          className="pointer-events-auto flex flex-wrap items-center gap-1.5 rounded-lg border border-border/60 bg-background/85 px-2 py-1.5 shadow-lg backdrop-blur"
+          dir="rtl"
+          aria-label="قراءة المراوح والحرارة المحاكاة"
+        >
+          <Badge variant="outline" className="gap-1 text-[10px]">
+            <Thermometer className="h-3 w-3" aria-hidden />
+            CPU {sim.thermal.cpuTempC.toFixed(0)}°C / GPU {sim.thermal.gpuTempC.toFixed(0)}°C
+          </Badge>
+          <span className="text-[10px] text-muted-foreground">محاكاة تعليمية:</span>
+          {fansReport.length === 0 ? (
+            <span className="text-[10px] text-muted-foreground">…تجهيز منظومة المراوح</span>
+          ) : (
+            fansReport.map((f) => (
+              <Badge
+                key={f.labelAr}
+                variant="outline"
+                className={cn(
+                  'gap-1 text-[10px]',
+                  !f.running ? 'border-slate-600/40 text-slate-400' : f.rpm > 1200 ? 'border-rose-600/40 text-rose-400' : 'border-emerald-600/40 text-emerald-400',
+                )}
+                title={`${f.labelAr} — ${f.airflowAr}`}
+              >
+                <Wind className="h-3 w-3" aria-hidden />
+                {f.labelAr}: {f.running ? `${f.rpm} RPM` : 'متوقفة'}
+              </Badge>
+            ))
+          )}
+        </div>
+
+        {/* حقل إدخال حقيقي → دفتر النظام الافتراضي على الشاشة (توجيه v3 أ.2) */}
+        <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-border/60 bg-background/85 px-2 py-1.5 shadow-lg backdrop-blur">
+          <Badge variant="outline" className="gap-1 shrink-0 text-[10px]">
+            <Keyboard className="h-3 w-3" aria-hidden /> دفتر النظام
+          </Badge>
+          <Input
+            value={notepad}
+            onChange={(e) => setNotepad(e.target.value)}
+            disabled={!canType}
+            placeholder={canType ? 'اكتب بلوحة مفاتيحك — يظهر النص على الشاشة الافتراضية' : 'يعمل بعد إقلاع ناجح يدخل النظام الافتراضي'}
+            className="h-8 min-w-0 flex-1 text-xs"
+            aria-label="إدخال نص حقيقي يظهر في دفتر النظام الافتراضي على الشاشة ثلاثية الأبعاد"
+          />
+          <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 max-sm:h-11 max-sm:w-11" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
+            <Eraser className="h-3.5 w-3.5" aria-hidden />
+            <span className="sr-only">مسح دفتر النظام</span>
+          </Button>
+        </div>
       </div>
+
+      {/* اللوحة الجانبية العائمة — محتواها يتبع نمط العمل الحالي فوق المشهد الحيّ نفسه */}
+      {/* على الجوال: ورقة سفلية بارتفاع محدود حتى لا تُخفي المشهد كليًا */}
+      {!sidePanelsHidden ? (
+        <div className="absolute bottom-2 end-2 top-12 z-30 w-[min(384px,calc(100vw-1rem))] max-lg:inset-x-2 max-lg:top-auto max-lg:h-[46vh] max-lg:w-auto">
+          <ScrollArea className="h-full rounded-lg border border-border/60 bg-background/90 shadow-xl backdrop-blur scrollbar-thin">
+            <div className="p-2" dir="rtl">
+              {screen === 'lab' ? (
+                <InfoPanel />
+              ) : screen === 'tech' ? (
+                <TechnicianScreen variant="panel" />
+              ) : (
+                <MissionsPanel />
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+      ) : null}
     </div>
   );
 }

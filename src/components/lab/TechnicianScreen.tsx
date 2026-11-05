@@ -338,6 +338,7 @@ function Stage6Repair() {
   const tech = useLabStore((s) => s.tech);
   const sim = useLabStore((s) => s.sim);
   const setScreen = useLabStore((s) => s.setScreen);
+  const openTool = useLabStore((s) => s.openTool);
   const advanceTechStage = useLabStore((s) => s.advanceTechStage);
   const patchTech = useLabStore((s) => s.patchTech);
   if (!tech) return null;
@@ -361,7 +362,7 @@ function Stage6Repair() {
           <Button className="gap-1.5" onClick={() => setScreen('lab')}>
             <Hammer className="h-4 w-4" aria-hidden /> انتقل إلى المختبر
           </Button>
-          <Button variant="outline" className="gap-1.5" onClick={() => setScreen('diagnostics')}>
+          <Button variant="outline" className="gap-1.5" onClick={() => openTool('diagnostics')}>
             <Stethoscope className="h-4 w-4" aria-hidden /> فحص POST السريع
           </Button>
         </div>
@@ -582,7 +583,7 @@ function Stage9Report() {
 }
 
 // ============ اختيار بطاقة طلب (عند عدم وجود جلسة) ============
-function OrderPicker() {
+function OrderPicker({ panel = false }: { panel?: boolean }) {
   const startTechSession = useLabStore((s) => s.startTechSession);
   return (
     <Card>
@@ -593,10 +594,9 @@ function OrderPicker() {
       </CardHeader>
       <CardContent className="p-4 pt-0">
         <p className="text-xs text-muted-foreground leading-relaxed mb-3">
-          {/* (إصلاح U9) العدد من بيانات الأعطال لا نص ثابت — يطابق HomeScreen */}
           {`${FAULTS.length} عطلًا تعليميًا بأربع درجات صعوبة — سيُركّب العطل على الجهاز الافتراضي وستمر بالمراحل التسع حتى تقرير التسليم.`}
         </p>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div className={panel ? 'grid gap-2' : 'grid gap-2 sm:grid-cols-2 lg:grid-cols-3'}>
           {FAULTS.map((f) => (
             <button
               key={f.id}
@@ -619,10 +619,13 @@ function OrderPicker() {
 }
 
 // ============ الشاشة ============
-export default function TechnicianScreen() {
+// variant="panel": تُعرض كلوحة عائمة جانبية فوق المشهد الحيّ (عمود واحد) —
+// variant="full": التخطيط الواسع القديم (يُستخدم إن رُكّبت خارج الورشة).
+export default function TechnicianScreen({ variant = 'full' }: { variant?: 'full' | 'panel' } = {}) {
   const tech = useLabStore((s) => s.tech);
   const abandonTechSession = useLabStore((s) => s.abandonTechSession);
   const patchTech = useLabStore((s) => s.patchTech);
+  const panel = variant === 'panel';
 
   if (!tech) {
     return (
@@ -635,12 +638,26 @@ export default function TechnicianScreen() {
             سير عمل فني حقيقي من بطاقة الطلب حتى تقرير التسليم — لا يمكن تخطي مرحلة، وكل بوابة انتقال تُتحقق آليًا من حالة الجهاز.
           </p>
         </div>
-        <OrderPicker />
+        <OrderPicker panel={panel} />
       </div>
     );
   }
 
   const stage = tech.stage;
+  const stageContent = (
+    <>
+      {stage === 1 && <Stage1OrderCard />}
+      {stage === 2 && <Stage2Safety />}
+      {stage === 3 && <Stage3External />}
+      {stage === 4 && <Stage4Internal />}
+      {stage === 5 && <Stage5Hypothesis />}
+      {stage === 6 && <Stage6Repair />}
+      {stage === 7 && <Stage7Verify />}
+      {stage === 8 && <Stage8Boot />}
+      {stage === 9 && <Stage9Report />}
+    </>
+  );
+
   return (
     <div className="space-y-4">
       <div className="rounded-lg border bg-card p-3">
@@ -657,19 +674,9 @@ export default function TechnicianScreen() {
         <StageStepper current={stage} onJump={(s) => patchTech({ stage: s })} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <div className="min-w-0 space-y-4">
-          {stage === 1 && <Stage1OrderCard />}
-          {stage === 2 && <Stage2Safety />}
-          {stage === 3 && <Stage3External />}
-          {stage === 4 && <Stage4Internal />}
-          {stage === 5 && <Stage5Hypothesis />}
-          {stage === 6 && <Stage6Repair />}
-          {stage === 7 && <Stage7Verify />}
-          {stage === 8 && <Stage8Boot />}
-          {stage === 9 && <Stage9Report />}
-        </div>
-        <div className="min-w-0 space-y-3">
+      {panel ? (
+        <div className="space-y-3">
+          {stageContent}
           <GatePanel stage={stage} />
           <Card>
             <CardContent className="p-3 text-[11px] text-muted-foreground leading-relaxed">
@@ -677,21 +684,34 @@ export default function TechnicianScreen() {
               {TECH_STAGES[stage - 1].briefAr}
             </CardContent>
           </Card>
-          <Card>
-            <CardContent className="p-3">
-              <p className="text-xs font-bold mb-1.5">المراحل</p>
-              <ul className="space-y-1">
-                {TECH_STAGES.map((st) => (
-                  <li key={st.id} className={cn('text-[11px] flex items-center gap-1.5', st.id === stage ? 'text-foreground font-bold' : st.id < stage ? 'text-emerald-400' : 'text-muted-foreground')}>
-                    {st.id < stage ? <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden /> : <CircleDashed className="h-3 w-3 shrink-0" aria-hidden />}
-                    {st.id}. {st.titleAr}
-                  </li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
         </div>
-      </div>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+          <div className="min-w-0 space-y-4">{stageContent}</div>
+          <div className="min-w-0 space-y-3">
+            <GatePanel stage={stage} />
+            <Card>
+              <CardContent className="p-3 text-[11px] text-muted-foreground leading-relaxed">
+                <p className="font-bold text-foreground mb-1 text-xs">{TECH_STAGES[stage - 1].titleAr}</p>
+                {TECH_STAGES[stage - 1].briefAr}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-3">
+                <p className="text-xs font-bold mb-1.5">المراحل</p>
+                <ul className="space-y-1">
+                  {TECH_STAGES.map((st) => (
+                    <li key={st.id} className={cn('text-[11px] flex items-center gap-1.5', st.id === stage ? 'text-foreground font-bold' : st.id < stage ? 'text-emerald-400' : 'text-muted-foreground')}>
+                      {st.id < stage ? <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden /> : <CircleDashed className="h-3 w-3 shrink-0" aria-hidden />}
+                      {st.id}. {st.titleAr}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

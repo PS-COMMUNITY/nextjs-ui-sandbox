@@ -1,36 +1,32 @@
 'use client';
 
 /**
- * هيكل التطبيق الوحيد (SPA) — تنقّل داخلي بين الشاشات دون routes إضافية.
+ * هيكل التطبيق الوحيد (v7 — ورشة واحدة غامرة):
+ * التطبيق كله مشهد ثلاثي الأبعاد حيّ يملأ الشاشة — لا صفحة ترحيب ولا قائمة
+ * اختبارات. ثلاثة أنماط عمل فوق المشهد نفسه (المختبر الحر / جلسة الفني /
+ * المهام الموجهة) + نوافذ أدوات مرجعية تنفتح فوق المشهد دون تجميده.
  *
- * توجيه v3 §2.1: شريط علوي بهوية المختبر + اسم وضع العمل + حالة الحفظ + الجودة +
- * مساعدة واضحة؛ تنقل جانبي موجز على الشاشات الواسعة وأفقي قابل للتمرير على الضيقة؛
- * المنطقة الأكبر للمحتوى (نافذة المختبر)؛ تذييل لاصق أسفل الصفحة.
+ * اللجنة تقيّم تقنيات 3D والتدريب العملي — لذلك المشهد هو البطل:
+ * يفتح مباشرة، يبقى حيًّا عند تبديل النمط، والأدوات طبقة فوقه.
  */
-import { useEffect } from 'react';
 import {
   Activity,
   BatteryCharging,
-  BookOpenCheck,
+  Blocks,
   Boxes,
   CircleHelp,
   Cpu,
   GraduationCap,
-  Hand,
-  Home as HomeIcon,
-  Keyboard,
   LibraryBig,
-  Mouse,
-  MousePointerClick,
   Settings as SettingsIcon,
-  ClipboardList,
-  Blocks,
   Stethoscope,
+  ClipboardList,
   Loader2,
+  Wrench,
 } from 'lucide-react';
-import { useLabStore, type ScreenId } from '@/lib/store/labStore';
+import { useEffect } from 'react';
+import { useLabStore, type ScreenId, type ToolId } from '@/lib/store/labStore';
 import { APP_VERSION } from '@/lib/types';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -40,49 +36,49 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 
-import HomeScreen from '@/components/screens/HomeScreen';
 import LabScreen from '@/components/lab/LabScreen';
-import TechnicianScreen from '@/components/lab/TechnicianScreen';
 import CatalogScreen from '@/components/screens/CatalogScreen';
-import TrainingScreen from '@/components/lab/TrainingScreen';
-import BuilderScreen from '@/components/screens/BuilderScreen';
 import DiagnosticsScreen from '@/components/screens/DiagnosticsScreen';
 import PowerScreen from '@/components/screens/PowerScreen';
-import LessonsScreen from '@/components/screens/LessonsScreen';
+import BuilderScreen from '@/components/screens/BuilderScreen';
 import ReportsScreen from '@/components/screens/ReportsScreen';
 import SettingsScreen from '@/components/screens/SettingsScreen';
 
-const NAV: { id: ScreenId; labelAr: string; icon: typeof HomeIcon }[] = [
-  { id: 'home', labelAr: 'الرئيسية', icon: HomeIcon },
-  { id: 'lab', labelAr: 'المختبر 3D', icon: Boxes },
-  { id: 'tech', labelAr: 'جلسة الفني', icon: Stethoscope },
-  { id: 'catalog', labelAr: 'كتالوج القطع', icon: LibraryBig },
-  { id: 'training', labelAr: 'التدريب الموجه', icon: GraduationCap },
-  { id: 'builder', labelAr: 'التجميعة والتوافق', icon: Blocks },
-  { id: 'diagnostics', labelAr: 'تشخيص الأعطال', icon: Activity },
-  { id: 'power', labelAr: 'الطاقة والتخزين', icon: BatteryCharging },
-  { id: 'lessons', labelAr: 'الاختبارات والتقارير', icon: BookOpenCheck },
-  { id: 'reports', labelAr: 'سجل الجلسات', icon: ClipboardList },
-  { id: 'settings', labelAr: 'الإعدادات', icon: SettingsIcon },
+/** أنماط العمل الثلاثة — كلها فوق المشهد الحيّ نفسه */
+const MODES: { id: ScreenId; labelAr: string; hintAr: string; icon: typeof Boxes }[] = [
+  { id: 'lab', labelAr: 'المختبر', hintAr: 'فك وتركيب وتشغيل حر', icon: Boxes },
+  { id: 'tech', labelAr: 'جلسة فني', hintAr: 'المراحل التسع حتى تقرير التسليم', icon: Stethoscope },
+  { id: 'missions', labelAr: 'المهام', hintAr: 'تدريب موجه يُتحقق آليًا', icon: GraduationCap },
 ];
 
-const QUALITY_LABEL: Record<string, string> = {
-  low: 'جودة: منخفضة',
-  medium: 'جودة: متوسطة',
-  high: 'جودة: مرتفعة',
-};
+/** الأدوات المرجعية — نوافذ فوق المشهد */
+const TOOLS: { id: ToolId; labelAr: string; icon: typeof LibraryBig; titleAr: string; descAr: string; widthClass: string }[] = [
+  { id: 'catalog', labelAr: 'كتالوج القطع', icon: LibraryBig, titleAr: 'كتالوج القطع المرجعي', descAr: 'مواصفات القطع الافتراضية المستخدمة في المختبر', widthClass: 'max-w-5xl' },
+  { id: 'diagnostics', labelAr: 'تشخيص الأعطال', icon: Activity, titleAr: 'تشخيص الأعطال', descAr: 'سيناريوهات أعطال وفحص POST للجهاز الحالي', widthClass: 'max-w-4xl' },
+  { id: 'power', labelAr: 'الطاقة والتخزين', icon: BatteryCharging, titleAr: 'الطاقة والتخزين', descAr: 'ميزانية الطاقة وصحة الأقراص (محاكاة تعليمية)', widthClass: 'max-w-4xl' },
+  { id: 'builder', labelAr: 'التوافق والتجميعة', icon: Blocks, titleAr: 'التجميعة والتوافق', descAr: 'قواعد التوافق بين القطع قبل الشراء أو التجميع', widthClass: 'max-w-5xl' },
+  { id: 'reports', labelAr: 'سجل الجلسات', icon: ClipboardList, titleAr: 'سجل الجلسات والتقارير', descAr: 'أحداثك في المختبر وتصديرها', widthClass: 'max-w-4xl' },
+  { id: 'settings', labelAr: 'الإعدادات', icon: SettingsIcon, titleAr: 'الإعدادات', descAr: 'جودة الرسم والنسخ الاحتياطي والبيانات', widthClass: 'max-w-2xl' },
+];
 
-/** محتوى نافذة المساعدة — تحكم الماوس ولوحة المفاتيح الحقيقيين فقط (توجيه v3 §5) */
+/** محتوى نافذة المساعدة — تحكم الماوس ولوحة المفاتيح الحقيقيين فقط */
 function HelpContent() {
   const mouseRows = [
-    { icon: MousePointerClick, actionAr: 'نقرة يسار على قطعة', resultAr: 'تحديد القطعة وعرض معلوماتها' },
-    { icon: Hand, actionAr: 'سحب الزر الأيسر على فراغ', resultAr: 'تدوير الكاميرا' },
-    { icon: Mouse, actionAr: 'عجلة الماوس', resultAr: 'تقريب/إبعاد' },
-    { icon: Hand, actionAr: 'سحب الزر الأيمن', resultAr: 'تحريك المشهد' },
-    { icon: MousePointerClick, actionAr: 'دبل-كليك', resultAr: 'إعادة ضبط الكاميرا' },
-    { icon: Hand, actionAr: 'سحب قطعة (في وضع السحب)', resultAr: 'نقلها إلى الصينية أو الجهاز مع تحقق' },
+    { actionAr: 'نقرة يسار على قطعة', resultAr: 'تحديد القطعة وعرض معلوماتها' },
+    { actionAr: 'سحب الزر الأيسر على فراغ', resultAr: 'تدوير الكاميرا' },
+    { actionAr: 'عجلة الماوس', resultAr: 'تقريب/إبعاد' },
+    { actionAr: 'سحب الزر الأيمن', resultAr: 'تحريك المشهد' },
+    { actionAr: 'دبل-كليك', resultAr: 'إعادة ضبط الكاميرا' },
+    { actionAr: 'سحب قطعة (في وضع السحب)', resultAr: 'نقلها إلى الصينية أو الجهاز مع تحقق' },
   ];
   const keyRows = [
     { key: 'R', resultAr: 'إعادة ضبط منظور الكاميرا' },
@@ -90,7 +86,7 @@ function HelpContent() {
     { key: 'X', resultAr: 'تبديل الأشعة السينية (مخطط القطع)' },
     { key: 'E', resultAr: 'تبديل العرض التفجيري' },
     { key: 'H', resultAr: 'إظهار/إخفاء تلميحات التحكم' },
-    { key: 'M', resultAr: 'وضع التحكم بالشاشة المجسمة (الماوس والكيبورد يتحكمان بالنظام الافتراضي) — Esc للخروج' },
+    { key: 'M', resultAr: 'وضع التحكم بالشاشة المجسمة — Esc للخروج' },
     { key: '1 / 2 / 3', resultAr: 'مناظير جاهزة: أمامي / جانبي / علوي' },
     { key: 'Delete', resultAr: 'الدخول إلى إعدادات البرنامج الثابت (UEFI/BIOS) أثناء التشغيل' },
     { key: 'Esc', resultAr: 'إلغاء التحديد والعزل' },
@@ -98,27 +94,19 @@ function HelpContent() {
   return (
     <div className="space-y-4">
       <div>
-        <p className="text-sm font-bold mb-2 flex items-center gap-1.5">
-          <Mouse className="size-4 text-cyan-500" /> الماوس الحقيقي
-        </p>
+        <p className="text-sm font-bold mb-2">الماوس الحقيقي</p>
         <ul className="space-y-1.5">
-          {mouseRows.map((r) => {
-            const Icon = r.icon;
-            return (
-              <li key={r.actionAr} className="flex items-center gap-2 rounded-md border p-2 text-xs">
-                <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="font-medium">{r.actionAr}</span>
-                <span className="text-muted-foreground">=</span>
-                <span className="text-muted-foreground">{r.resultAr}</span>
-              </li>
-            );
-          })}
+          {mouseRows.map((r) => (
+            <li key={r.actionAr} className="flex items-center gap-2 rounded-md border p-2 text-xs">
+              <span className="font-medium">{r.actionAr}</span>
+              <span className="text-muted-foreground">=</span>
+              <span className="text-muted-foreground">{r.resultAr}</span>
+            </li>
+          ))}
         </ul>
       </div>
       <div>
-        <p className="text-sm font-bold mb-2 flex items-center gap-1.5">
-          <Keyboard className="size-4 text-cyan-500" /> لوحة المفاتيح الحقيقية
-        </p>
+        <p className="text-sm font-bold mb-2">لوحة المفاتيح الحقيقية</p>
         <ul className="space-y-1.5">
           {keyRows.map((r) => (
             <li key={r.key} className="flex items-center gap-2 rounded-md border p-2 text-xs">
@@ -138,10 +126,12 @@ function HelpContent() {
 export default function AppShell() {
   const screen = useLabStore((s) => s.screen);
   const setScreen = useLabStore((s) => s.setScreen);
+  const tool = useLabStore((s) => s.tool);
+  const openTool = useLabStore((s) => s.openTool);
+  const closeTool = useLabStore((s) => s.closeTool);
   const hydrated = useLabStore((s) => s.hydrated);
   const hydrate = useLabStore((s) => s.hydrate);
   const saveStatus = useLabStore((s) => s.saveStatus);
-  const quality = useLabStore((s) => s.quality);
 
   useEffect(() => {
     hydrate();
@@ -153,164 +143,148 @@ export default function AppShell() {
         <Cpu className="h-10 w-10 text-primary animate-pulse" aria-hidden />
         <div className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-          <span>جارٍ تحميل المختبر…</span>
+          <span>جارٍ تجهيز ورشة العمل ثلاثية الأبعاد…</span>
         </div>
       </div>
     );
   }
 
-  const currentMode = NAV.find((n) => n.id === screen)?.labelAr ?? '';
+  const activeTool = TOOLS.find((t) => t.id === tool) ?? null;
+  const saveOk = saveStatus.available && !saveStatus.lastErrorAr;
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      {/* (إصلاح U11) رابط «تخطَّ إلى المحتوى» — أول عنصر قابل للتركيز، يظهر فقط عند التركيز بلوحة المفاتيح */}
+    <div className="h-screen flex flex-col bg-background overflow-hidden">
+      {/* (إصلاح U11) رابط «تخطَّ إلى المحتوى» */}
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:start-2 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-primary-foreground focus:shadow-lg"
       >
-        تخطَّ إلى المحتوى
+        تخطَّ إلى المحتوى
       </a>
-      {/* الشريط العلوي */}
-      <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 no-print">
-        <div className="mx-auto max-w-[1600px] px-3 sm:px-4">
-          <div className="flex h-14 items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 border border-primary/30">
-              <Cpu className="h-5 w-5 text-primary" aria-hidden />
+
+      {/* الشريط العلوي الرفيع — كل المساحة الباقية للمشهد */}
+      <header className="shrink-0 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 no-print relative z-40">
+        <div className="flex h-12 items-center gap-2 px-2 sm:px-3">
+          {/* الهوية */}
+          <div className="flex items-center gap-2 min-w-0 shrink-0">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/15 border border-primary/30">
+              <Cpu className="h-4 w-4 text-primary" aria-hidden />
             </div>
-            <div className="min-w-0">
-              <h1 className="text-sm sm:text-base font-bold leading-tight truncate">
-                PC Repair 3D Studio
-              </h1>
-              <p className="text-[11px] sm:text-xs text-muted-foreground leading-tight truncate">
-                مختبر صيانة الحاسوب الافتراضي
-              </p>
-            </div>
-            <Badge variant="outline" className="hidden md:inline-flex gap-1">
-              <Cpu className="h-3 w-3" aria-hidden /> الوضع: {currentMode}
-            </Badge>
-            <div className="ms-auto flex items-center gap-2">
-              <Badge variant="outline" className="hidden sm:inline-flex text-[11px]">
-                {QUALITY_LABEL[quality]}
-              </Badge>
-              <span
-                className={cn(
-                  'flex items-center gap-1.5 text-xs',
-                  saveStatus.available && !saveStatus.lastErrorAr ? 'text-emerald-500' : 'text-amber-500',
-                )}
-                title={saveStatus.lastErrorAr ?? 'حفظ محلي تلقائي'}
-              >
-                <span
-                  className={cn(
-                    'h-2 w-2 rounded-full',
-                    saveStatus.available && !saveStatus.lastErrorAr ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse',
-                  )}
-                  aria-hidden
-                />
-                {saveStatus.available && !saveStatus.lastErrorAr ? 'الحفظ المحلي يعمل' : 'تحذير حفظ'}
-              </span>
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
-                    <CircleHelp className="h-4 w-4" aria-hidden />
-                    <span className="hidden sm:inline">المساعدة</span>
-                  </Button>
-                </DialogTrigger>
-                <DialogContent dir="rtl" className="max-w-lg max-h-[85vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle>التحكم بالمختبر</DialogTitle>
-                    <DialogDescription>
-                      جهازا الإدخال الحقيقيان (ماوسك ولوحة مفاتيحك) هما أدوات التحكم — لا يوجد ماوس أو كيبورد داخل المشهد.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <HelpContent />
-                </DialogContent>
-              </Dialog>
+            <div className="hidden md:block leading-tight">
+              <h1 className="text-sm font-bold truncate">PC Repair 3D Studio</h1>
+              <p className="text-[10px] text-muted-foreground truncate">مختبر صيانة الحاسوب الافتراضي</p>
             </div>
           </div>
-          {/* شريط التنقل الأفقي — للشاشات الضيقة */}
-          <nav aria-label="التنقل الرئيسي" className="flex gap-1 overflow-x-auto scrollbar-thin pb-2 lg:hidden">
-            {NAV.map((item) => {
-              const Icon = item.icon;
-              const active = screen === item.id;
+
+          {/* أنماط العمل الثلاثة — مفصولة بصريًا فوق المشهد الحيّ */}
+          <nav aria-label="أنماط العمل" className="flex items-center gap-1 rounded-lg border bg-card/60 p-1 mx-auto">
+            {MODES.map((m) => {
+              const Icon = m.icon;
+              const active = screen === m.id;
               return (
                 <button
-                  key={item.id}
+                  key={m.id}
                   type="button"
-                  onClick={() => setScreen(item.id)}
+                  onClick={() => setScreen(m.id)}
                   aria-current={active ? 'page' : undefined}
+                  title={m.hintAr}
                   className={cn(
-                    'flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-xs sm:text-sm font-medium transition-colors',
-                    'min-h-[36px]',
+                    'flex items-center gap-1.5 rounded-md px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium transition-colors min-h-[34px]',
                     active
                       ? 'bg-primary text-primary-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground hover:bg-accent',
                   )}
                 >
                   <Icon className="h-4 w-4" aria-hidden />
-                  {item.labelAr}
+                  <span>{m.labelAr}</span>
                 </button>
               );
             })}
           </nav>
+
+          {/* الأدوات + المساعدة + حالة الحفظ */}
+          <div className="flex items-center gap-1.5 shrink-0 ms-auto">
+            <span
+              className={cn('h-2 w-2 rounded-full shrink-0', saveOk ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse')}
+              title={saveOk ? 'الحفظ المحلي يعمل' : (saveStatus.lastErrorAr ?? 'تحذير حفظ')}
+              aria-hidden
+            />
+            <DropdownMenu dir="rtl">
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+                  <Wrench className="h-3.5 w-3.5" aria-hidden />
+                  <span className="hidden sm:inline">الأدوات</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel className="text-xs text-muted-foreground">أدوات مرجعية فوق المشهد</DropdownMenuLabel>
+                {TOOLS.map((t) => {
+                  const Icon = t.icon;
+                  return (
+                    <DropdownMenuItem key={t.id} onClick={() => openTool(t.id)} className="gap-2 text-sm">
+                      <Icon className="h-4 w-4 text-muted-foreground" aria-hidden />
+                      {t.labelAr}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Dialog>
+              <DialogTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+                  <CircleHelp className="h-3.5 w-3.5" aria-hidden />
+                  <span className="hidden sm:inline">المساعدة</span>
+                </Button>
+              </DialogTrigger>
+              <DialogContent dir="rtl" className="max-w-lg max-h-[85vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>التحكم بالمختبر</DialogTitle>
+                  <DialogDescription>
+                    جهازا الإدخال الحقيقيان (ماوسك ولوحة مفاتيحك) هما أدوات التحكم — لا يوجد ماوس أو كيبورد داخل المشهد.
+                  </DialogDescription>
+                </DialogHeader>
+                <HelpContent />
+              </DialogContent>
+            </Dialog>
+          </div>
         </div>
       </header>
 
-      {/* التنقل الجانبي (للشاشات الواسعة) + المحتوى */}
-      <div className="mx-auto flex w-full max-w-[1600px] flex-1 items-stretch">
-        <aside
-          aria-label="التنقل الجانبي"
-          className="hidden lg:flex w-52 shrink-0 flex-col gap-1 border-e bg-card/40 p-2 sticky top-[57px] self-start max-h-[calc(100vh-57px)] overflow-y-auto scrollbar-thin no-print"
-        >
-          {NAV.map((item) => {
-            const Icon = item.icon;
-            const active = screen === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setScreen(item.id)}
-                aria-current={active ? 'page' : undefined}
-                className={cn(
-                  'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors min-h-[40px] text-start',
-                  active
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-                )}
-              >
-                <Icon className="h-4 w-4 shrink-0" aria-hidden />
-                <span className="truncate">{item.labelAr}</span>
-              </button>
-            );
-          })}
-        </aside>
+      {/* المشهد الغامر — يملأ كل المساحة المتبقية ويبقى حيًّا دائمًا */}
+      <main id="main-content" className="flex-1 min-h-0 relative">
+        <LabScreen />
+      </main>
 
-        <main id="main-content" className="flex-1 min-w-0 px-3 sm:px-4 py-4 sm:py-6">
-          {screen === 'home' && <HomeScreen />}
-          {screen === 'lab' && <LabScreen />}
-          {screen === 'tech' && <TechnicianScreen />}
-          {screen === 'catalog' && <CatalogScreen />}
-          {screen === 'training' && <TrainingScreen />}
-          {screen === 'builder' && <BuilderScreen />}
-          {screen === 'diagnostics' && <DiagnosticsScreen />}
-          {screen === 'power' && <PowerScreen />}
-          {screen === 'lessons' && <LessonsScreen />}
-          {screen === 'reports' && <ReportsScreen />}
-          {screen === 'settings' && <SettingsScreen />}
-        </main>
-      </div>
-
-      {/* تذييل لاصق أسفل الشاشة — يُدفع طبيعيًا عند طول المحتوى */}
-      <footer className="mt-auto border-t bg-card/50 no-print">
-        <div className="mx-auto max-w-[1600px] px-4 py-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] sm:text-xs text-muted-foreground text-center">
+      {/* تذييل لاصق بسطر واحد — لا يسرق مساحة المشهد */}
+      <footer className="shrink-0 border-t bg-card/50 no-print relative z-40">
+        <div className="h-7 px-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-0 text-[10px] sm:text-[11px] text-muted-foreground leading-none">
           <span className="font-medium">PC Repair 3D Studio v{APP_VERSION}</span>
           <span aria-hidden>•</span>
-          <span>محاكاة تعليمية — القيم التقديرية ليست قياسات حقيقية</span>
-          <span aria-hidden>•</span>
+          <span className="hidden sm:inline">محاكاة تعليمية — القيم تقديرية وليست قياسات حقيقية</span>
+          <span aria-hidden className="hidden sm:inline">•</span>
           <span>بياناتك محفوظة محليًا في متصفحك فقط</span>
-          <span aria-hidden>•</span>
-          <span dir="ltr" className="font-mono">1366×768+</span>
         </div>
       </footer>
+
+      {/* نافذة الأداة المرجعية — تنفتح فوق المشهد دون تفكيكه */}
+      <Dialog open={activeTool !== null} onOpenChange={(open) => { if (!open) closeTool(); }}>
+        {activeTool ? (
+          <DialogContent dir="rtl" className={cn('w-[96vw] h-[88vh] max-h-[88vh] overflow-hidden flex flex-col', activeTool.widthClass)}>
+            <DialogHeader className="shrink-0">
+              <DialogTitle>{activeTool.titleAr}</DialogTitle>
+              <DialogDescription>{activeTool.descAr}</DialogDescription>
+            </DialogHeader>
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin -mx-1 px-1" dir="rtl">
+              {tool === 'catalog' && <CatalogScreen />}
+              {tool === 'diagnostics' && <DiagnosticsScreen />}
+              {tool === 'power' && <PowerScreen />}
+              {tool === 'builder' && <BuilderScreen />}
+              {tool === 'reports' && <ReportsScreen />}
+              {tool === 'settings' && <SettingsScreen />}
+            </div>
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </div>
   );
 }

@@ -1,0 +1,1520 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * شاشة المختبر ثلاثي الأبعاد — المشهد التفاعلي + لوحة المعلومات وأدوات التحكم.
+     5→ * آلة الحالات الكاملة: مثبتة/فصل جزئي/صينية/بانتظار/تلف تدريبي + طرفيات تفاعلية.
+     6→ *
+     7→ * توجيه v3 المطبق هنا:
+     8→ *  - جهازا إدخال المستخدم الحقيقيان فقط: الماوس (تحديد/تدوير/تكبير/تحريك/سحب قطع)
+     9→ *    ولوحة المفاتيح (اختصارات لا تُلتقط أثناء الكتابة في الحقول + حقل إدخال حقيقي).
+    10→ *  - لا كيبورد ولا ماوس ثلاثيي الأبعاد في المشهد إطلاقًا.
+    11→ *  - شريط أدوات مصغر وواضح + ملء شاشة + لوحة خطوات قابلة للطي + تلميح تحكم.
+    12→ */
+    13→import { useEffect, useRef, useState, useCallback } from 'react';
+    14→import {
+    15→  Camera,
+    16→  DoorOpen,
+    17→  DoorClosed,
+    18→  X,
+    19→  Bomb,
+    20→  Focus,
+    21→  EyeOff,
+    22→  RotateCcw,
+    23→  Power,
+    24→  PlugZap,
+    25→  Plug,
+    26→  Wrench,
+    27→  Hammer,
+    28→  ShieldAlert,
+    29→  TriangleAlert,
+    30→  CheckCircle2,
+    31→  CircleDashed,
+    32→  Wind,
+    33→  Thermometer,
+    34→  MonitorUp,
+    35→  MonitorX,
+    36→  Monitor,
+    37→  PackageOpen,
+    38→  HandMetal,
+    39→  View,
+    40→  FlipHorizontal2,
+    41→  ChevronsUp,
+    42→  ZoomIn,
+    43→  ZoomOut,
+    44→  Maximize2,
+    45→  Minimize2,
+    46→  Hand,
+    47→  PanelRightClose,
+    48→  ChevronDown,
+    49→  ChevronUp,
+    50→  Keyboard,
+    51→  Eraser,
+    52→  Usb,
+    53→  HardDrive,
+    54→  ShieldCheck,
+    55→} from 'lucide-react';
+    56→import { toast } from 'sonner';
+    57→import { isWebGLAvailable, PCScene } from '@/lib/scene/PCScene';
+    58→import { preloadGlbAssets } from '@/lib/scene/glbParts';
+    59→import type { ComponentId, ChecklistItem, MachineFlag, PartStatus, WinFamilyId } from '@/lib/types';
+    60→import { assemblyStateOf, ASSEMBLY_STATE_INFO, SECURE_FLAGS } from '@/lib/types';
+    61→import { COMPONENT_MAP } from '@/lib/data/catalog';
+    62→import { WINDOWS_FAMILIES } from '@/lib/data/windowsCatalog';
+    63→import type { Arch, PartStyle, WinFamily } from '@/lib/data/windowsCatalog';
+    64→import {
+    65→  getRemovalChecklist,
+    66→  getInstallChecklist,
+    67→} from '@/lib/simulation/assemblyEngine';
+    68→import { computeMonitorView } from '@/lib/simulation/monitorEngine';
+    69→import { FLAG_INFO } from '@/lib/simulation/machineFlags';
+    70→import { installedCount, useLabStore } from '@/lib/store/labStore';
+    71→import { Button } from '@/components/ui/button';
+    72→import { Badge } from '@/components/ui/badge';
+    73→import { Progress } from '@/components/ui/progress';
+    74→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    75→import { Input } from '@/components/ui/input';
+    76→import { ScrollArea } from '@/components/ui/scroll-area';
+    77→import { Separator } from '@/components/ui/separator';
+    78→import {
+    79→  AlertDialog,
+    80→  AlertDialogAction,
+    81→  AlertDialogCancel,
+    82→  AlertDialogContent,
+    83→  AlertDialogDescription,
+    84→  AlertDialogFooter,
+    85→  AlertDialogHeader,
+    86→  AlertDialogTitle,
+    87→  AlertDialogTrigger,
+    88→} from '@/components/ui/alert-dialog';
+    89→import {
+    90→  Dialog,
+    91→  DialogContent,
+    92→  DialogDescription,
+    93→  DialogHeader,
+    94→  DialogTitle,
+    95→  DialogTrigger,
+    96→} from '@/components/ui/dialog';
+    97→import { cn } from '@/lib/utils';
+    98→
+    99→// ============ شارة الحالة (آلة الحالات الثمانية) ============
+   100→function StatusBadge({ id }: { id: ComponentId }) {
+   101→  const sim = useLabStore((s) => s.sim);
+   102→  if (id === 'case') {
+   103→    return <Badge variant="outline" className="gap-1">هيكل الجهاز</Badge>;
+   104→  }
+   105→  const secureOpen = (SECURE_FLAGS[id] ?? []).some((f) => sim.flags[f]);
+   106→  const state = assemblyStateOf(sim.parts[id], secureOpen);
+   107→  const info = ASSEMBLY_STATE_INFO[state];
+   108→  const colorClass: Record<string, string> = {
+   109→    emerald: 'bg-emerald-600/15 text-emerald-400 border-emerald-600/40',
+   110→    amber: 'bg-amber-600/15 text-amber-400 border-amber-600/40',
+   111→    slate: 'bg-slate-600/15 text-slate-300 border-slate-600/40',
+   112→    cyan: 'bg-cyan-600/15 text-cyan-400 border-cyan-600/40',
+   113→    rose: 'bg-rose-600/15 text-rose-400 border-rose-600/40',
+   114→  };
+   115→  const icon =
+   116→    state === 'INSTALLED_CORRECTLY' ? <CheckCircle2 className="h-3 w-3" aria-hidden /> :
+   117→    state === 'AWAITING_INSTALL' ? <HandMetal className="h-3 w-3" aria-hidden /> :
+   118→    state === 'TRAINING_DAMAGE' ? <TriangleAlert className="h-3 w-3" aria-hidden /> :
+   119→    <Wrench className="h-3 w-3" aria-hidden />;
+   120→  return (
+   121→    <Badge variant="outline" className={cn('gap-1', colorClass[info.colorAr] ?? '')}>
+   122→      {icon}
+   123→      {state === 'INSTALLED_CORRECTLY' ? 'مثبتة بإحكام' : state === 'INSTALLED_SECURED' ? 'مثبتة (مزالج مفتوحة)' : info.labelAr}
+   124→    </Badge>
+   125→  );
+   126→}
+   127→
+   128→/** خطوة قائمة تحقق قابلة للتنفيذ (علم ميكانيكي أو فك/تركيب قطعة) */
+   129→function ChecklistRow({
+   130→  item,
+   131→  mode,
+   132→  onFlag,
+   133→  onPart,
+   134→}: {
+   135→  item: ChecklistItem;
+   136→  mode: 'remove' | 'install';
+   137→  onFlag: (f: MachineFlag) => void;
+   138→  onPart: (id: ComponentId) => void;
+   139→}) {
+   140→  const isFlag = item.source !== 'safetyOff' && item.source !== 'safetyUnplug' && item.source !== 'base';
+   141→  const canRunFlag = !item.done && isFlag && item.available;
+   142→  const canRunPart = !item.done && !isFlag && item.actionPart && item.available;
+   143→  return (
+   144→    <li
+   145→      className={cn(
+   146→        'flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs',
+   147→        item.done ? 'border-emerald-600/30 bg-emerald-600/10' : 'border-border bg-card',
+   148→        !item.done && !item.available && 'opacity-60',
+   149→      )}
+   150→    >
+   151→      {item.done ? (
+   152→        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden />
+   153→      ) : (
+   154→        <CircleDashed className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   155→      )}
+   156→      <div className="min-w-0 flex-1">
+   157→        <p className={cn('font-medium leading-tight', item.done && 'line-through opacity-70')}>{item.labelAr}</p>
+   158→        {!item.done && item.hintAr ? (
+   159→          <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{item.hintAr}</p>
+   160→        ) : null}
+   161→      </div>
+   162→      {canRunFlag ? (
+   163→        <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onFlag(item.source as MachineFlag)}>
+   164→          <Hammer className="h-3 w-3" aria-hidden /> نفّذ
+   165→        </Button>
+   166→      ) : null}
+   167→      {canRunPart ? (
+   168→        <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onPart(item.actionPart!)}>
+   169→          <Hammer className="h-3 w-3" aria-hidden />
+   170→          {mode === 'remove' ? 'افصل' : 'وصّل'}
+   171→        </Button>
+   172→      ) : null}
+   173→    </li>
+   174→  );
+   175→}
+   176→
+   177→function InfoPanel() {
+   178→  const selected = useLabStore((s) => s.selected);
+   179→  const select = useLabStore((s) => s.select);
+   180→  const sim = useLabStore((s) => s.sim);
+   181→  const detachPart = useLabStore((s) => s.detachPart);
+   182→  const extractPart = useLabStore((s) => s.extractPart);
+   183→  const preparePart = useLabStore((s) => s.preparePart);
+   184→  const installPart = useLabStore((s) => s.installPart);
+   185→  const repairPart = useLabStore((s) => s.repairPart);
+   186→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   187→  const setIsolated = useLabStore((s) => s.setIsolated);
+   188→  const isolated = useLabStore((s) => s.isolated);
+   189→
+   190→  if (!selected) {
+   191→    return (
+   192→      <Card>
+   193→        <CardContent className="p-4 text-sm text-muted-foreground leading-relaxed">
+   194→          <p className="font-medium text-foreground mb-1">حدّد قطعة من المشهد</p>
+   195→          <p>انقر على أي قطعة داخل الجهاز لعرض معلوماتها وحالتها وخطوات فكها أو تركيبها. انقر زر الشاشة الافتراضية (في المشهد) لتشغيلها، واكتب في حقل «دفتر النظام» أسفل المشهد عندما يدخل النظام الافتراضي.</p>
+   196→          <p className="mt-1">تدوير: سحب بالزر الأيسر — تقريب: العجلة — تحريك: الزر الأيمن — إعادة الكاميرا: دبل-كليك.</p>
+   197→        </CardContent>
+   198→      </Card>
+   199→    );
+   200→  }
+   201→
+   202→  const entry = COMPONENT_MAP[selected];
+   203→  const status: PartStatus = sim.parts[selected];
+   204→  const removable = selected !== 'case';
+   205→  const removalItems = removable ? getRemovalChecklist(sim, selected) : [];
+   206→  const installItems = removable ? getInstallChecklist(sim, selected) : [];
+   207→
+   208→  return (
+   209→    <Card>
+   210→      <CardHeader className="p-4 pb-2">
+   211→        <div className="flex items-start justify-between gap-2">
+   212→          <div>
+   213→            <CardTitle className="text-base leading-tight">{entry.nameAr}</CardTitle>
+   214→            <p dir="ltr" className="text-left font-mono text-[11px] text-muted-foreground mt-0.5">
+   215→              {entry.nameEn} · {entry.id}
+   216→            </p>
+   217→          </div>
+   218→          <StatusBadge id={selected} />
+   219→        </div>
+   220→      </CardHeader>
+   221→      <CardContent className="p-4 pt-2 space-y-3">
+   222→        <p className="text-xs leading-relaxed text-muted-foreground">{entry.description}</p>
+   223→
+   224→        {/* أزرار آلة الحالات */}
+   225→        {removable ? (
+   226→          <div className="flex flex-wrap gap-2">
+   227→            {status === 'installed' ? (
+   228→              <Button size="sm" className="gap-1.5" onClick={() => detachPart(selected)}>
+   229→                <Hammer className="h-3.5 w-3.5" aria-hidden /> فصل جزئي (فك)
+   230→              </Button>
+   231→            ) : null}
+   232→            {status === 'separated' ? (
+   233→              <Button size="sm" className="gap-1.5 bg-amber-600 hover:bg-amber-700" onClick={() => extractPart(selected)}>
+   234→                <PackageOpen className="h-3.5 w-3.5" aria-hidden /> استخراج إلى الصينية
+   235→              </Button>
+   236→            ) : null}
+   237→            {status === 'removed' ? (
+   238→              <Button size="sm" className="gap-1.5 bg-cyan-700 hover:bg-cyan-600" onClick={() => preparePart(selected)}>
+   239→                <HandMetal className="h-3.5 w-3.5" aria-hidden /> التقاط للتركيب
+   240→              </Button>
+   241→            ) : null}
+   242→            {status === 'awaiting' ? (
+   243→              <Button size="sm" className="gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={() => installPart(selected)}>
+   244→                <Wrench className="h-3.5 w-3.5" aria-hidden /> ركّب الآن
+   245→              </Button>
+   246→            ) : null}
+   247→            {status === 'damaged' ? (
+   248→              <Button size="sm" className="gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={() => repairPart(selected)}>
+   249→                <Wrench className="h-3.5 w-3.5" aria-hidden /> استبدال بقطعة سليمة
+   250→              </Button>
+   251→            ) : null}
+   252→            <Button
+   253→              size="sm"
+   254→              variant="outline"
+   255→              className="gap-1.5"
+   256→              onClick={() => setIsolated(isolated === selected ? null : selected)}
+   257→            >
+   258→              <EyeOff className="h-3.5 w-3.5" aria-hidden />
+   259→              {isolated === selected ? 'إلغاء العزل' : 'عزل للفحص'}
+   260→            </Button>
+   261→          </div>
+   262→        ) : (
+   263→          <p className="text-xs text-muted-foreground">الهيكل هو جسم الجهاز — استخدم زر «الغطاء الجانبي» في شريط أدوات المشهد لفتحه أو إغلاقه.</p>
+   264→        )}
+   265→
+   266→        <Separator />
+   267→
+   268→        {/* قائمة تحقق الفك */}
+   269→        {removable && status === 'installed' ? (
+   270→          <div>
+   271→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   272→              <ShieldAlert className="h-3.5 w-3.5 text-amber-500" aria-hidden /> شروط الفك بالترتيب
+   273→            </p>
+   274→            <ul className="space-y-1.5">
+   275→              {removalItems.map((item) => (
+   276→                <ChecklistRow key={item.source + item.labelAr} item={item} mode="remove" onFlag={toggleFlag} onPart={detachPart} />
+   277→              ))}
+   278→            </ul>
+   279→          </div>
+   280→        ) : null}
+   281→
+   282→        {/* قائمة تحقق التركيب */}
+   283→        {removable && (status === 'awaiting' || status === 'removed') ? (
+   284→          <div>
+   285→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   286→              <Wrench className="h-3.5 w-3.5 text-emerald-500" aria-hidden /> شروط إعادة التركيب
+   287→            </p>
+   288→            <ul className="space-y-1.5">
+   289→              {installItems.map((item) => (
+   290→                <ChecklistRow key={item.source + item.labelAr} item={item} mode="install" onFlag={toggleFlag} onPart={installPart} />
+   291→              ))}
+   292→            </ul>
+   293→          </div>
+   294→        ) : null}
+   295→
+   296→        {/* خطوات الإغلاق بعد التركيب */}
+   297→        {removable && status === 'installed' && (SECURE_FLAGS[selected] ?? []).some((f) => sim.flags[f]) ? (
+   298→          <div>
+   299→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   300→              <Hammer className="h-3.5 w-3.5 text-primary" aria-hidden /> أكمل التثبيت (خطوات متبقية)
+   301→            </p>
+   302→            <ul className="space-y-1.5">
+   303→              {(SECURE_FLAGS[selected] ?? [])
+   304→                .filter((f) => sim.flags[f])
+   305→                .map((f) => (
+   306→                  <li key={f} className="flex items-center gap-2 rounded-md border border-amber-600/30 bg-amber-600/10 px-2.5 py-2 text-xs">
+   307→                    <CircleDashed className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+   308→                    <div className="min-w-0 flex-1">
+   309→                      <p className="font-medium leading-tight">{FLAG_INFO[f].labelAr} — ما زال مفتوحًا</p>
+   310→                      <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{FLAG_INFO[f].hintAr}</p>
+   311→                    </div>
+   312→                    <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => toggleFlag(f)}>
+   313→                      <Hammer className="h-3 w-3" aria-hidden /> أغلق
+   314→                    </Button>
+   315→                  </li>
+   316→                ))}
+   317→            </ul>
+   318→          </div>
+   319→        ) : null}
+   320→
+   321→        {/* السلامة */}
+   322→        {entry.safety.length > 0 ? (
+   323→          <div className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2.5">
+   324→            <p className="text-xs font-bold text-amber-400 mb-1 flex items-center gap-1.5">
+   325→              <TriangleAlert className="h-3.5 w-3.5" aria-hidden /> تنبيهات السلامة
+   326→            </p>
+   327→            <ul className="text-[11px] leading-relaxed text-amber-200/80 list-disc ps-4 space-y-0.5">
+   328→              {entry.safety.map((s, i) => (
+   329→                <li key={i}>{s}</li>
+   330→              ))}
+   331→            </ul>
+   332→          </div>
+   333→        ) : null}
+   334→
+   335→        <button
+   336→          type="button"
+   337→          className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+   338→          onClick={() => select(null)}
+   339→        >
+   340→          إلغاء التحديد
+   341→        </button>
+   342→      </CardContent>
+   343→    </Card>
+   344→  );
+   345→}
+   346→
+   347→// ============ لوحة السلامة السريعة (الطاقة + الشاشة) ============
+   348→function SafetyStrip() {
+   349→  const sim = useLabStore((s) => s.sim);
+   350→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   351→  const toggleMonitor = useLabStore((s) => s.toggleMonitor);
+   352→  const count = installedCount(sim);
+   353→
+   354→  return (
+   355→    <div className="flex flex-wrap items-center gap-2">
+   356→      <Button
+   357→        size="sm"
+   358→        variant={sim.flags.powerOn ? 'destructive' : 'outline'}
+   359→        className={cn('gap-1.5', !sim.flags.powerOn && 'border-emerald-600/40 text-emerald-400 hover:bg-emerald-600/10')}
+   360→        onClick={() => toggleFlag('powerOn')}
+   361→      >
+   362→        <Power className="h-3.5 w-3.5" aria-hidden />
+   363→        {sim.flags.powerOn ? 'إطفاء الجهاز' : 'تشغيل الجهاز'}
+   364→      </Button>
+   365→      <Button
+   366→        size="sm"
+   367→        variant="outline"
+   368→        className={cn('gap-1.5', sim.flags.acConnected ? 'border-amber-600/40 text-amber-400' : 'border-emerald-600/40 text-emerald-400')}
+   369→        onClick={() => toggleFlag('acConnected')}
+   370→      >
+   371→        {sim.flags.acConnected ? <PlugZap className="h-3.5 w-3.5" aria-hidden /> : <Plug className="h-3.5 w-3.5" aria-hidden />}
+   372→        {sim.flags.acConnected ? 'فصل كابل الكهرباء' : 'توصيل كابل الكهرباء'}
+   373→      </Button>
+   374→      <Button
+   375→        size="sm"
+   376→        variant="outline"
+   377→        className={cn('gap-1.5', sim.peripherals.monitorOn ? 'border-cyan-600/40 text-cyan-400' : '')}
+   378→        onClick={toggleMonitor}
+   379→        title="تشغيل/إطفاء الشاشة الافتراضية (أو انقر زرها في المشهد)"
+   380→      >
+   381→        <Monitor className="h-3.5 w-3.5" aria-hidden />
+   382→        {sim.peripherals.monitorOn ? 'إطفاء الشاشة' : 'تشغيل الشاشة'}
+   383→      </Button>
+   384→      <Badge variant="outline" className="font-mono" dir="ltr">
+   385→        {count}/14
+   386→      </Badge>
+   387→    </div>
+   388→  );
+   389→}
+   390→
+   391→// ============ تلميح التحكم بالجهازين الحقيقيين (زر H) ============
+   392→function HintsOverlay({ dragMode }: { dragMode: boolean }) {
+   393→  const visible = useLabStore((s) => s.hintsVisible);
+   394→  if (!visible) return null;
+   395→  return (
+   396→    <div
+   397→      className="pointer-events-none absolute top-2 start-2 z-10 rounded-md border border-border/70 bg-background/85 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground backdrop-blur-sm"
+   398→      dir="rtl"
+   399→      role="note"
+   400→      aria-label="تلميحات التحكم بالماوس ولوحة المفاتيح الحقيقيين"
+   401→    >
+   402→      <p className="font-bold text-foreground mb-0.5 flex items-center gap-1.5">
+   403→        <Hand className="h-3 w-3" aria-hidden /> تحكم الماوس
+   404→      </p>
+   405→      <p>سحب الزر الأيسر: تدوير • العجلة: تقريب • الزر الأيمن: تحريك</p>
+   406→      <p>نقرة: تحديد قطعة • دبل-كليك: إعادة الكاميرا</p>
+   407→      {dragMode ? (
+   408→        <p className="text-cyan-400 mt-0.5">وضع الفك/التركيب: اسحب القطعة المفصولة إلى الصينية، أو القطعة الجاهزة إلى الجهاز</p>
+   409→      ) : (
+   410→        <p className="mt-0.5">فعّل «وضع السحب» لفك/تركيب القطع بالسحب المباشر</p>
+   411→      )}
+   412→      <p className="mt-0.5">لوحة المفاتيح: R إعادة • F تركيز • X أشعة • 1/2/3 مناظير • H إخفاء</p>
+   413→    </div>
+   414→  );
+   415→}
+   416→
+   417→// ============ لوحة الخطوات القابلة للطي (أسفل المشهد) ============
+   418→function StepsPanel() {
+   419→  const sim = useLabStore((s) => s.sim);
+   420→  const selected = useLabStore((s) => s.selected);
+   421→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   422→  const detachPart = useLabStore((s) => s.detachPart);
+   423→  const installPart = useLabStore((s) => s.installPart);
+   424→  const [open, setOpen] = useState(true);
+   425→
+   426→  const removable = selected !== null && selected !== 'case';
+   427→  const status = selected ? sim.parts[selected] : null;
+   428→  const phase: 'remove' | 'install' | null =
+   429→    removable && status === 'installed' ? 'remove' :
+   430→    removable && (status === 'awaiting' || status === 'removed') ? 'install' : null;
+   431→  const items = !removable || !selected ? [] : phase === 'remove'
+   432→    ? getRemovalChecklist(sim, selected)
+   433→    : phase === 'install'
+   434→      ? getInstallChecklist(sim, selected)
+   435→      : [];
+   436→
+   437→  const done = items.filter((i) => i.done).length;
+   438→
+   439→  return (
+   440→    <div className="rounded-lg border bg-card/60">
+   441→      <button
+   442→        type="button"
+   443→        className="flex w-full items-center gap-2 px-3 py-2 text-start"
+   444→        onClick={() => setOpen(!open)}
+   445→        aria-expanded={open}
+   446→      >
+   447→        {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" aria-hidden /> : <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />}
+   448→        <span className="text-xs font-bold">خطوات العمل {selected && phase ? `— ${COMPONENT_MAP[selected].nameAr}` : ''}</span>
+   449→        {items.length > 0 ? (
+   450→          <Badge variant="outline" className="font-mono text-[10px]" dir="ltr">{done}/{items.length}</Badge>
+   451→        ) : null}
+   452→        <span className="ms-auto text-[10px] text-muted-foreground">{open ? 'طي' : 'فتح'}</span>
+   453→      </button>
+   454→      {open ? (
+   455→        <div className="border-t px-3 py-2">
+   456→          {!selected ? (
+   457→            <p className="text-[11px] text-muted-foreground">حدّد قطعة من المشهد لتظهر خطوات فكها/تركيبها هنا بالترتيب.</p>
+   458→          ) : selected === 'case' ? (
+   459→            <p className="text-[11px] text-muted-foreground">الهيكل يُفتح ويُغلق من زر «الغطاء الجانبي» في شريط الأدوات — بلا مسامير خارجية في هذا الطراز.</p>
+   460→          ) : !phase ? (
+   461→            <p className="text-[11px] text-muted-foreground">
+   462→              الحالة الحالية: {ASSEMBLY_STATE_INFO[assemblyStateOf(status!, false)].labelAr} — لا خطوات نشطة الآن.
+   463→            </p>
+   464→          ) : (
+   465→            <>
+   466→              <p className="text-[11px] text-muted-foreground mb-1.5">
+   467→                {phase === 'remove'
+   468→                  ? 'المطلوب الآن: أول خطوة غير مكتملة بالترتيب — لا تتجاوز أي خطوة.'
+   469→                  : 'المطلوب الآن: أكمل شروط التركيب ثم ركّب القطعة في موضعها.'}
+   470→              </p>
+   471→              <ul className="space-y-1.5">
+   472→                {items.map((item) => (
+   473→                  <ChecklistRow key={item.source + item.labelAr} item={item} mode={phase} onFlag={toggleFlag} onPart={phase === 'remove' ? detachPart : installPart} />
+   474→                ))}
+   475→              </ul>
+   476→            </>
+   477→          )}
+   478→        </div>
+   479→      ) : null}
+   480→    </div>
+   481→  );
+   482→}
+   483→
+   484→// ============ الوضع البديل التعليمي عند غياب WebGL ============
+   485→function FallbackView({ messageAr }: { messageAr: string }) {
+   486→  const setScreen = useLabStore((s) => s.setScreen);
+   487→  return (
+   488→    <div className="space-y-4">
+   489→      <div className="rounded-lg border border-amber-600/40 bg-amber-600/10 p-4">
+   490→        <p className="font-bold text-amber-400 flex items-center gap-2">
+   491→          <TriangleAlert className="h-4 w-4" aria-hidden /> المشهد ثلاثي الأبعاد غير متاح
+   492→        </p>
+   493→        <p className="text-sm text-amber-200/80 mt-1 leading-relaxed">{messageAr}</p>
+   494→        <p className="text-xs text-muted-foreground mt-1">
+   495→          ما يلي عرض تعليمي مبسط نصي — وليس محاكاة ثلاثية الأبعاد.
+   496→        </p>
+   497→      </div>
+   498→      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+   499→        {Object.values(COMPONENT_MAP).map((c) => (
+   500→          <Card key={c.id}>
+   501→            <CardContent className="p-4">
+   502→              <p className="font-bold text-sm">{c.nameAr}</p>
+   503→              <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{c.nameEn}</p>
+   504→              <p className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-3">{c.role}</p>
+   505→            </CardContent>
+   506→          </Card>
+   507→        ))}
+   508→      </div>
+   509→      <Button variant="outline" onClick={() => setScreen('catalog')}>
+   510→        الانتقال إلى كتالوج القطع الكامل
+   511→      </Button>
+   512→    </div>
+   513→  );
+   514→}
+   515→
+   516→// ============ (V6-D) حوار وسائط التثبيت — نقطة الدخول الرسمية لمعالج تثبيت Windows ============
+   517→// (ميزة F1) تبويب «إنشاء وسيط تثبيت»: معالج بأسلوب Rufus يعلّم سلسلة القرارات الكلاسيكية
+   518→// للفني (عائلة ← بنية ← نمط تقسيم/وضع إقلاع ← محاكاة إنشاء). حالة المعالج محلية بالكامل
+   519→// في هذا المكوّن — المتجر لا يرى إلا الناتج النهائي عبر insertUsb(family) الموجود أصلًا.
+   520→
+   521→/** مراحل محاكاة الإنشاء الأربع — تُعرض بالتسلسل مع تقدم العملية */
+   522→const CREATION_STAGES_AR = [
+   523→  'تهيئة الوسيط (FAT32)',
+   524→  'كتابة سجل الإقلاع',
+   525→  'نسخ ملفات التثبيت (~3GB وهميًا)',
+   526→  'اكتمل إنشاء الوسيط',
+   527→] as const;
+   528→
+   529→/** عتبة بدء كل مرحلة على شريط التقدم (٪) */
+   530→const CREATION_STAGE_AT: readonly number[] = [0, 25, 55, 100];
+   531→
+   532→/** المدة الكلية لمحاكاة الإنشاء — 2.5ث (25 نداء × 100ms) */
+   533→const CREATION_TOTAL_MS = 2500;
+   534→
+   535→/** رسالة تعارض نمط التقسيم مع العائلة — شرح عربي يُعطَّل معه زر «التالي» */
+   536→function schemeConflictAr(f: WinFamily, s: PartStyle): string {
+   537→  if (s === 'gpt') {
+   538→    return f.bootModes.includes('uefi')
+   539→      ? 'نمط GPT غير مدرج ضمن أنماط هذه العائلة التعليمية — اختر MBR.'
+   540→      : 'هذه العائلة تققلع بوضع BIOS/Legacy فقط ولا تدعم الإقلاع من قرص GPT — اختر MBR.';
+   541→  }
+   542→  return f.bootModes.includes('bios')
+   543→    ? 'نمط MBR غير مدرج ضمن أنماط هذه العائلة التعليمية — اختر GPT.'
+   544→    : 'هذه العائلة تتطلب UEFI مع قرص GPT (مع TPM 2.0 وSecure Boot) — MBR غير مدعوم.';
+   545→}
+   546→
+   547→function UsbMediaDialog() {
+   548→  const usbMedia = useLabStore((s) => s.sim.usbMedia);
+   549→  const platformBoot = useLabStore((s) => s.sim.firmware.bootMode);
+   550→  const insertUsb = useLabStore((s) => s.insertUsb);
+   551→  const [open, setOpen] = useState(false);
+   552→
+   553→  // ===== حالة التبويب ومعالج الإنشاء — كلها محلية (لا حالة معالج في المتجر) =====
+   554→  const [tab, setTab] = useState<'ready' | 'create'>('ready');
+   555→  const [step, setStep] = useState<0 | 1 | 2 | 3>(0); // 0=عائلة، 1=بنية، 2=نمط تقسيم، 3=محاكاة الإنشاء
+   556→  const [familyId, setFamilyId] = useState<WinFamilyId | null>(null);
+   557→  const [arch, setArch] = useState<Arch | null>(null);
+   558→  const [scheme, setScheme] = useState<PartStyle | null>(null);
+   559→  const [progress, setProgress] = useState(0); // 0..100
+   560→  const [done, setDone] = useState(false);
+   561→  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+   562→
+   563→  const family = familyId ? WINDOWS_FAMILIES.find((f) => f.id === familyId) ?? null : null;
+   564→  /** البنى المدعومة للعائلة = اتحاد بنى طبعاتها (XP Home مثلًا x86 فقط بينما Professional يدعم x64) */
+   565→  const familyArchs: Arch[] = family
+   566→    ? (['x86', 'x64'] as Arch[]).filter((a) => family.editions.some((e) => e.arch.includes(a)))
+   567→    : [];
+   568→  /** وضع الإقلاع المشتق من نمط التقسيم — القاعدة الكلاسيكية: GPT⇔UEFI وMBR⇔BIOS/Legacy */
+   569→  const derivedBoot: 'bios' | 'uefi' | null =
+   570→    scheme === 'gpt' ? 'uefi' : scheme === 'mbr' ? 'bios' : null;
+   571→  const schemeSupported = !!(
+   572→    family &&
+   573→    scheme &&
+   574→    derivedBoot &&
+   575→    family.partStyles.includes(scheme) &&
+   576→    family.bootModes.includes(derivedBoot)
+   577→  );
+   578→
+   579→  const stopTimer = useCallback(() => {
+   580→    if (timerRef.current !== null) {
+   581→      clearInterval(timerRef.current);
+   582→      timerRef.current = null;
+   583→    }
+   584→  }, []);
+   585→
+   586→  // تنظيف المؤقت عند تفكيك المكوّن — لا مؤقت يتيم بعد الإغلاق
+   587→  useEffect(() => stopTimer, [stopTimer]);
+   588→
+   589→  const resetWizard = useCallback(() => {
+   590→    stopTimer();
+   591→    setStep(0);
+   592→    setFamilyId(null);
+   593→    setArch(null);
+   594→    setScheme(null);
+   595→    setProgress(0);
+   596→    setDone(false);
+   597→  }, [stopTimer]);
+   598→
+   599→  const handleOpenChange = useCallback(
+   600→    (next: boolean) => {
+   601→      setOpen(next);
+   602→      if (!next) {
+   603→        setTab('ready');
+   604→        resetWizard();
+   605→      }
+   606→    },
+   607→    [resetWizard],
+   608→  );
+   609→
+   610→  /** الخطوة 1: اختيار العائلة يهيئ البنية ونمط التقسيم المقترحَين تلقائيًا */
+   611→  const chooseFamily = (id: WinFamilyId) => {
+   612→    const f = WINDOWS_FAMILIES.find((x) => x.id === id);
+   613→    if (!f) return;
+   614→    setFamilyId(id);
+   615→    setArch(f.editions.some((e) => e.arch.includes('x86')) ? 'x86' : 'x64');
+   616→    // اقتراح نمط التقسيم: عائلة بوضع إقلاع وحيد ← نمطها الوحيد، وإلا وفق وضع إقلاع المنصة الحالي
+   617→    const preferred: PartStyle = platformBoot === 'uefi' ? 'gpt' : 'mbr';
+   618→    setScheme(f.partStyles.includes(preferred) ? preferred : f.partStyles[0]);
+   619→    setStep(1);
+   620→  };
+   621→
+   622→  /** الخطوة 4: محاكاة إنشاء 2.5ث — الاكتمال والإلغاء كلاهما في نداء المؤقت (حدث خارجي) */
+   623→  const startCreation = () => {
+   624→    const chosenFamily = familyId;
+   625→    if (!chosenFamily || !scheme) return;
+   626→    stopTimer();
+   627→    setDone(false);
+   628→    setProgress(0);
+   629→    setStep(3);
+   630→    const startedAt = Date.now();
+   631→    timerRef.current = setInterval(() => {
+   632→      const pct = Math.min(100, Math.round(((Date.now() - startedAt) / CREATION_TOTAL_MS) * 100));
+   633→      setProgress(pct);
+   634→      if (pct >= 100) {
+   635→        // الاكتمال: إدخال الوسيط بالإجراء الموجود + toast نجاح — قسم «وسائط جاهزة» سيعكس الحالة من المتجر
+   636→        stopTimer();
+   637→        setDone(true);
+   638→        insertUsb(chosenFamily);
+   639→        toast.success('جُهّز الوسيط وأُدخل — أعد التشغيل وأدخل قائمة الإقلاع');
+   640→      }
+   641→    }, 100);
+   642→  };
+   643→
+   644→  /** حالة كل سطر مرحلة على شريط التقدم: مخفية/جارية/منتهية */
+   645→  const stageState = (i: number): 'hidden' | 'active' | 'done' => {
+   646→    if (progress < CREATION_STAGE_AT[i]) return 'hidden';
+   647→    const next = CREATION_STAGE_AT[i + 1];
+   648→    if (next === undefined ? progress >= 100 : progress >= next) return 'done';
+   649→    return 'active';
+   650→  };
+   651→
+   652→  const familyName = (id: WinFamilyId | null) =>
+   653→    id ? WINDOWS_FAMILIES.find((f) => f.id === id)?.nameAr ?? id : '';
+   654→
+   655→  return (
+   656→    <Dialog open={open} onOpenChange={handleOpenChange}>
+   657→      <DialogTrigger asChild>
+   658→        <Button
+   659→          size="sm"
+   660→          variant={usbMedia ? 'default' : 'ghost'}
+   661→          className="h-7 gap-1 px-2 text-[11px]"
+   662→          title="إدخال/إخراج وسيط تثبيت Windows — يفتح معالج التثبيت عند الإقلاع منه (V6-D)"
+   663→        >
+   664→          <Usb className="h-3.5 w-3.5" aria-hidden />
+   665→          {usbMedia ? `الوسيط: ${WINDOWS_FAMILIES.find((f) => f.id === usbMedia)?.nameEn ?? usbMedia}` : 'وسيط USB'}
+   666→        </Button>
+   667→      </DialogTrigger>
+   668→      <DialogContent dir="rtl" className="max-w-2xl max-h-[85vh] overflow-y-auto scrollbar-thin">
+   669→        <DialogHeader>
+   670→          <DialogTitle className="flex items-center gap-2 text-base">
+   671→            <Usb className="h-4 w-4" aria-hidden />
+   672→            وسائط تثبيت Windows — محاكاة تعليمية
+   673→          </DialogTitle>
+   674→          <DialogDescription>
+   675→            اختر عائلة لإدخال وسيطها. بعد الإدخال: شغّل الجهاز، وتأكد أن أولوية الإقلاع «USB» أولًا (زر DEL أو تبويب Boot في إعدادات البرنامج الثابت) — بعد POST سيقلع الجهاز إلى معالج التثبيت على الشاشة المجسمة.
+   676→          </DialogDescription>
+   677→        </DialogHeader>
+   678→
+   679→        {/* (F1) تبويبا الحوار: الوسائط الجاهزة / معالج إنشاء الوسيط */}
+   680→        <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted/60 p-1" role="tablist" aria-label="أقسام حوار وسائط التثبيت">
+   681→          <Button
+   682→            type="button"
+   683→            role="tab"
+   684→            aria-selected={tab === 'ready'}
+   685→            variant={tab === 'ready' ? 'default' : 'ghost'}
+   686→            className="h-9 max-sm:h-11 text-xs"
+   687→            onClick={() => setTab('ready')}
+   688→          >
+   689→            وسائط جاهزة
+   690→          </Button>
+   691→          <Button
+   692→            type="button"
+   693→            role="tab"
+   694→            aria-selected={tab === 'create'}
+   695→            variant={tab === 'create' ? 'default' : 'ghost'}
+   696→            className="h-9 max-sm:h-11 text-xs"
+   697→            onClick={() => setTab('create')}
+   698→          >
+   699→            إنشاء وسيط تثبيت
+   700→          </Button>
+   701→        </div>
+   702→
+   703→        <div className="rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
+   704→          <p className="font-medium mb-1">وضع إقلاع المنصة الحالي: {platformBoot === 'uefi' ? 'UEFI (يقبل GPT)' : 'BIOS/Legacy (يقبل MBR)'}</p>
+   705→          <p className="text-muted-foreground">
+   706→            العائلات القديمة (XP/Vista) تقلع بوضع BIOS/Legacy فقط، وويندوز 11 يقلع بوضع UEFI فقط. بدّل الوضع من إعدادات البرنامج الثابت ← تبويب Boot ← مفتاح Boot Mode. متطلبات TPM 2.0 وSecure Boot من تبويب Security.
+   707→          </p>
+   708→        </div>
+   709→
+   710→        {tab === 'ready' ? (
+   711→          <>
+   712→            <div className="flex items-center justify-between gap-2">
+   713→              <p className="text-sm font-medium">وسائط جاهزة</p>
+   714→              {usbMedia ? (
+   715→                <Badge variant="outline" className="gap-1 text-[10px]">
+   716→                  <Usb className="h-3 w-3" aria-hidden />
+   717→                  مُدخل الآن: {familyName(usbMedia)}
+   718→                </Badge>
+   719→              ) : (
+   720→                <span className="text-[11px] text-muted-foreground">لا وسيط مُدخل حاليًا</span>
+   721→              )}
+   722→            </div>
+   723→            <div className="max-h-80 space-y-2 overflow-y-auto pe-1 scrollbar-thin" role="list" aria-label="قائمة عائلات Windows المتاحة">
+   724→              {WINDOWS_FAMILIES.map((f) => (
+   725→                <div key={f.id} className="flex items-center gap-2 rounded-lg border p-2.5" role="listitem">
+   726→                  <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   727→                  <div className="min-w-0 flex-1">
+   728→                    <p className="text-sm font-medium leading-tight">
+   729→                      {f.nameEn} <span className="text-muted-foreground">({f.year})</span>
+   730→                    </p>
+   731→                    <p className="text-[11px] text-muted-foreground leading-tight mt-0.5 truncate">
+   732→                      {f.editions.length} طبعات • حد أدنى {Math.ceil(f.minRamMB / 1024)}GB RAM / {f.minDiskGB}GB قرص
+   733→                    </p>
+   734→                    <div className="mt-1 flex flex-wrap gap-1">
+   735→                      {f.bootModes.map((m) => (
+   736→                        <Badge key={m} variant="outline" className="text-[9px] px-1 py-0">{m === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}</Badge>
+   737→                      ))}
+   738→                      {f.partStyles.map((s) => (
+   739→                        <Badge key={s} variant="outline" className="text-[9px] px-1 py-0">{s.toUpperCase()}</Badge>
+   740→                      ))}
+   741→                      {f.requiresTpm2 ? (
+   742→                        <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0 + Secure Boot</Badge>
+   743→                      ) : null}
+   744→                    </div>
+   745→                  </div>
+   746→                  {usbMedia === f.id ? (
+   747→                    <Button size="sm" variant="secondary" className="h-8 shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => { insertUsb(null); }}>
+   748→                      إخراج الوسيط
+   749→                    </Button>
+   750→                  ) : (
+   751→                    <Button size="sm" className="h-8 shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => { insertUsb(f.id); }}>
+   752→                      إدخال
+   753→                    </Button>
+   754→                  )}
+   755→                </div>
+   756→              ))}
+   757→            </div>
+   758→          </>
+   759→        ) : (
+   760→          <div className="max-h-80 space-y-3 overflow-y-auto pe-1 scrollbar-thin" aria-live="polite" aria-label="معالج إنشاء وسيط تثبيت">
+   761→            {/* رأس الخطوة */}
+   762→            <div className="flex items-center justify-between gap-2">
+   763→              <p className="text-sm font-medium">
+   764→                {step === 0 && 'الخطوة 1 من 3 — اختر عائلة Windows'}
+   765→                {step === 1 && `الخطوة 2 من 3 — اختر البنية لـ ${familyName(familyId)}`}
+   766→                {step === 2 && 'الخطوة 3 من 3 — اختر نمط التقسيم'}
+   767→                {step === 3 && (done ? 'اكتمل إنشاء الوسيط' : 'جارٍ إنشاء الوسيط — محاكاة تعليمية')}
+   768→              </p>
+   769→              <Badge variant="outline" className="shrink-0 text-[10px]">{['عائلة', 'بنية', 'تقسيم', 'إنشاء'][step]}</Badge>
+   770→            </div>
+   771→
+   772→            {/* الخطوة 1: العائلات السبع مع عدد الطبعات وشارات البنى المتاحة */}
+   773→            {step === 0 && (
+   774→              <div className="space-y-2">
+   775→                {WINDOWS_FAMILIES.map((f) => {
+   776→                  const archs: Arch[] = (['x86', 'x64'] as Arch[]).filter((a) => f.editions.some((e) => e.arch.includes(a)));
+   777→                  const selected = familyId === f.id;
+   778→                  return (
+   779→                    <button
+   780→                      key={f.id}
+   781→                      type="button"
+   782→                      onClick={() => chooseFamily(f.id)}
+   783→                      aria-pressed={selected}
+   784→                      className={cn(
+   785→                        'flex w-full items-center gap-2 rounded-lg border p-2.5 text-start min-h-11 transition-colors hover:bg-muted/60',
+   786→                        selected && 'border-primary bg-primary/10',
+   787→                      )}
+   788→                    >
+   789→                      <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   790→                      <span className="min-w-0 flex-1">
+   791→                        <span className="block text-sm font-medium leading-tight">
+   792→                          {f.nameAr} <span className="text-muted-foreground">({f.nameEn} • {f.year})</span>
+   793→                        </span>
+   794→                        <span className="mt-1 flex flex-wrap gap-1">
+   795→                          <Badge variant="outline" className="text-[9px] px-1 py-0">{f.editions.length} طبعات</Badge>
+   796→                          {archs.map((a) => (
+   797→                            <Badge key={a} variant="outline" className="text-[9px] px-1 py-0">{a === 'x86' ? '32-bit (x86)' : '64-bit (x64)'}</Badge>
+   798→                          ))}
+   799→                          {f.requiresTpm2 ? (
+   800→                            <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0</Badge>
+   801→                          ) : null}
+   802→                        </span>
+   803→                      </span>
+   804→                    </button>
+   805→                  );
+   806→                })}
+   807→              </div>
+   808→            )}
+   809→
+   810→            {/* الخطوة 2: البنية — تُعرض البنى المدعومة فقط حسب بيانات العائلة */}
+   811→            {step === 1 && family && (
+   812→              <div className="space-y-2">
+   813→                <div className="grid grid-cols-2 gap-2">
+   814→                  {(['x86', 'x64'] as Arch[]).map((a) => {
+   815→                    const supported = familyArchs.includes(a);
+   816→                    const selected = arch === a;
+   817→                    return (
+   818→                      <button
+   819→                        key={a}
+   820→                        type="button"
+   821→                        disabled={!supported}
+   822→                        onClick={() => setArch(a)}
+   823→                        aria-pressed={selected}
+   824→                        className={cn(
+   825→                          'flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-lg border p-2.5 text-start transition-colors',
+   826→                          supported ? 'hover:bg-muted/60' : 'cursor-not-allowed opacity-40',
+   827→                          selected && 'border-primary bg-primary/10',
+   828→                        )}
+   829→                      >
+   830→                        <span className="text-sm font-medium">{a === 'x86' ? 'x86 — 32-bit' : 'x64 — 64-bit'}</span>
+   831→                        <span className="text-[10px] text-muted-foreground">{supported ? 'مدعومة لهذه العائلة' : 'غير متاحة لهذه العائلة'}</span>
+   832→                      </button>
+   833→                    );
+   834→                  })}
+   835→                </div>
+   836→                {familyId === 'xp' && arch === 'x64' && (
+   837→                  <p className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2 text-[11px] leading-relaxed text-amber-200/90">
+   838→                    ملاحظة تعليمية: إصدار Home من XP جاء ببنية x86 فقط — بنية x64 متاحة عبر إصدار Professional.
+   839→                  </p>
+   840→                )}
+   841→                {familyId === '11' && (
+   842→                  <p className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2 text-[11px] leading-relaxed text-amber-200/90">
+   843→                    ويندوز 11 جاء ببنية 64-bit فقط — لا توجد إصدارات x86 منه.
+   844→                  </p>
+   845→                )}
+   846→              </div>
+   847→            )}
+   848→
+   849→            {/* الخطوة 3: نمط التقسيم + وضع الإقلاع المشتق منه */}
+   850→            {step === 2 && family && (
+   851→              <div className="space-y-2">
+   852→                <div className="grid grid-cols-2 gap-2">
+   853→                  {(['gpt', 'mbr'] as PartStyle[]).map((s) => {
+   854→                    const selected = scheme === s;
+   855→                    return (
+   856→                      <button
+   857→                        key={s}
+   858→                        type="button"
+   859→                        onClick={() => setScheme(s)}
+   860→                        aria-pressed={selected}
+   861→                        className={cn(
+   862→                          'flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-lg border p-2.5 text-start transition-colors hover:bg-muted/60',
+   863→                          selected && 'border-primary bg-primary/10',
+   864→                        )}
+   865→                      >
+   866→                        <span className="text-sm font-medium">{s === 'gpt' ? 'GPT — لأنظمة UEFI' : 'MBR — لأنظمة BIOS/Legacy'}</span>
+   867→                        <span className="text-[10px] text-muted-foreground">{s === 'gpt' ? 'جدول أقسام حديث مع قسم EFI' : 'جدول أقسام كلاسيكي للإقلاع القديم'}</span>
+   868→                      </button>
+   869→                    );
+   870→                  })}
+   871→                </div>
+   872→                {scheme && derivedBoot && (
+   873→                  <div className="flex flex-wrap items-center gap-1.5">
+   874→                    <Badge variant="outline" className="text-[10px]">
+   875→                      وضع الإقلاع المشتق: {derivedBoot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}
+   876→                    </Badge>
+   877→                    <span className="text-[10px] text-muted-foreground">تأكد أن وضع إقلاع المنصة في تبويب Boot يطابقه قبل الإقلاع من الوسيط.</span>
+   878→                  </div>
+   879→                )}
+   880→                {scheme && !schemeSupported && (
+   881→                  <p className="rounded-md border border-rose-600/30 bg-rose-600/10 p-2 text-[11px] leading-relaxed text-rose-300">
+   882→                    {schemeConflictAr(family, scheme)}
+   883→                  </p>
+   884→                )}
+   885→                {/* سطر تعليمي: GPT+UEFI مقابل MBR+BIOS في جملة واحدة */}
+   886→                <p className="rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
+   887→                  القاعدة: GPT يقترن بـ UEFI (جدول أقسام حديث يدعم أقراصًا أكبر من 2TB وقسم EFI منفصل)، بينما MBR يقترن بـ BIOS/Legacy — نمط التقسيم يجب أن يطابق وضع إقلاع اللوحة وإلا رفض المثبّت القرص.
+   888→                </p>
+   889→              </div>
+   890→            )}
+   891→
+   892→            {/* الخطوة 4: شريط تقدم + المراحل الأربع بالتسلسل */}
+   893→            {step === 3 && (
+   894→              <div className="space-y-2.5">
+   895→                <Progress value={progress} className="h-2" aria-label="تقدم إنشاء الوسيط" />
+   896→                <p className="text-[11px] text-muted-foreground" dir="ltr">{progress}%</p>
+   897→                <ul className="space-y-1.5">
+   898→                  {CREATION_STAGES_AR.map((label, i) => {
+   899→                    const st = stageState(i);
+   900→                    if (st === 'hidden') return null;
+   901→                    return (
+   902→                      <li key={label} className={cn('flex items-center gap-2 text-xs', st === 'done' ? 'text-emerald-500' : 'text-foreground')}>
+   903→                        {st === 'done'
+   904→                          ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
+   905→                          : <CircleDashed className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden />}
+   906→                        {label}
+   907→                      </li>
+   908→                    );
+   909→                  })}
+   910→                </ul>
+   911→                {done && family && (
+   912→                  <p className="rounded-md border border-emerald-600/30 bg-emerald-600/10 p-2 text-[11px] leading-relaxed text-emerald-300">
+   913→                    الوسيط «{family.nameAr}» ({arch === 'x86' ? 'x86' : 'x64'} • {scheme === 'gpt' ? 'GPT/UEFI' : 'MBR/BIOS'}) أصبح مُدخلًا — تجده الآن في قسم «وسائط جاهزة».
+   914→                  </p>
+   915→                )}
+   916→              </div>
+   917→            )}
+   918→
+   919→            {/* أزرار المعالج */}
+   920→            <div className="flex flex-wrap items-center gap-2 pt-1">
+   921→              {step === 0 && (
+   922→                <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!familyId} onClick={() => setStep(1)}>
+   923→                  التالي: اختر البنية
+   924→                </Button>
+   925→              )}
+   926→              {step === 1 && (
+   927→                <>
+   928→                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={() => setStep(0)}>رجوع</Button>
+   929→                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!arch} onClick={() => setStep(2)}>التالي: نمط التقسيم</Button>
+   930→                </>
+   931→              )}
+   932→              {step === 2 && (
+   933→                <>
+   934→                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={() => setStep(1)}>رجوع</Button>
+   935→                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" disabled={!scheme || !schemeSupported} onClick={startCreation}>
+   936→                    بدء الإنشاء (محاكاة)
+   937→                  </Button>
+   938→                </>
+   939→              )}
+   940→              {step === 3 && !done && (
+   941→                <Button
+   942→                  size="sm"
+   943→                  variant="outline"
+   944→                  className="h-9 max-sm:h-11 max-sm:px-3 w-full text-rose-400"
+   945→                  onClick={() => { stopTimer(); setProgress(0); setStep(2); }}
+   946→                >
+   947→                  إلغاء الإنشاء
+   948→                </Button>
+   949→              )}
+   950→              {step === 3 && done && (
+   951→                <>
+   952→                  <Button size="sm" variant="outline" className="h-9 max-sm:h-11 max-sm:px-3" onClick={resetWizard}>
+   953→                    إنشاء وسيط آخر
+   954→                  </Button>
+   955→                  <Button size="sm" className="h-9 max-sm:h-11 max-sm:px-3 flex-1" onClick={() => setTab('ready')}>
+   956→                    عرض الوسائط الجاهزة
+   957→                  </Button>
+   958→                </>
+   959→              )}
+   960→            </div>
+   961→          </div>
+   962→        )}
+   963→
+   964→        <p className="text-[11px] text-muted-foreground leading-relaxed">
+   965→          أمانة تعليمية: هذه وسائط محاكاة داخل المشروع — لا تُوزّع ملفات Windows ولا تطلب مفاتيح حقيقية، وكل العمليات على أقراص الجهاز الافتراضي فقط.
+   966→        </p>
+   967→      </DialogContent>
+   968→    </Dialog>
+   969→  );
+   970→}
+   971→
+   972→// ============ الشاشة الرئيسية للمختبر ============
+   973→export default function LabScreen() {
+   974→  const containerRef = useRef<HTMLDivElement>(null);
+   975→  const sceneWrapRef = useRef<HTMLDivElement>(null);
+   976→  const sceneRef = useRef<PCScene | null>(null);
+   977→  const [failed, setFailed] = useState(false);
+   978→  const [errorAr, setErrorAr] = useState<string>('');
+   979→  const [dragMode, setDragMode] = useState(false);
+   980→  const [isFullscreen, setIsFullscreen] = useState(false);
+   981→  const [canType, setCanType] = useState(false);
+   982→  const [focusMode, setFocusModeState] = useState(false);
+   983→  const [fansReport, setFansReport] = useState<Array<{ labelAr: string; rpm: number; running: boolean; stateAr: string; airflowAr: string }>>([]);
+   984→  const [assetsReady, setAssetsReady] = useState(false); // (إضافة تدقيق V6) مؤشر تجهيز النماذج — كان المشهد يظهر فارغًا بلا رسالة
+   985→
+   986→  const sim = useLabStore((s) => s.sim);
+   987→  const selected = useLabStore((s) => s.selected);
+   988→  const xray = useLabStore((s) => s.xray);
+   989→  const exploded = useLabStore((s) => s.exploded);
+   990→  const isolated = useLabStore((s) => s.isolated);
+   991→  const quality = useLabStore((s) => s.quality);
+   992→  const sidePanelsHidden = useLabStore((s) => s.sidePanelsHidden);
+   993→  const bootStartedAt = useLabStore((s) => s.bootStartedAt);
+   994→  const notepad = useLabStore((s) => s.notepad);
+   995→  const airflowVisible = useLabStore((s) => s.airflowVisible);
+   996→  const toggleXray = useLabStore((s) => s.toggleXray);
+   997→  const toggleExploded = useLabStore((s) => s.toggleExploded);
+   998→  const setIsolated = useLabStore((s) => s.setIsolated);
+   999→  const setAirflow = useLabStore((s) => s.setAirflow);
+  1000→  const resetSimulation = useLabStore((s) => s.resetSimulation);
+  1001→  const select = useLabStore((s) => s.select);
+  1002→  const damagePart = useLabStore((s) => s.damagePart);
+  1003→  const setNotepad = useLabStore((s) => s.setNotepad);
+  1004→  const clearNotepad = useLabStore((s) => s.clearNotepad);
+  1005→
+  1006→  // (إصلاح U8) مرجع الجودة: إنشاء المشهد يعمل مرة واحدة بمعتمدات [] — يقرأ الجودة
+  1007→  // من المرجع بدل القيمة الملتقطة وقت الإنشاء، مع بقاء مؤثر المزامنة المنفصل كما هو.
+  1008→  const qualityRef = useRef(quality);
+  1009→  // (إصلاح U6) سجل مؤقتات السلاسل الزمنية (مثل إعادة تشغيل بيئة الاسترداد) —
+  1010→  // تُلغى كلها عند التخلص من المشهد/مغادرة الشاشة حتى لا تعمل بعد رحيل الشاشة.
+  1011→  const pendingTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  1012→  const trackTimeout = useCallback((fn: () => void, ms: number) => {
+  1013→    const id = setTimeout(() => {
+  1014→      pendingTimeoutsRef.current.delete(id);
+  1015→      fn();
+  1016→    }, ms);
+  1017→    pendingTimeoutsRef.current.add(id);
+  1018→    return id;
+  1019→  }, []);
+  1020→  const clearPendingTimeouts = useCallback(() => {
+  1021→    for (const id of pendingTimeoutsRef.current) clearTimeout(id);
+  1022→    pendingTimeoutsRef.current.clear();
+  1023→  }, []);
+  1024→
+  1025→  // إنشاء المشهد مرة واحدة — كل حالات الفشل تمر عبر callback واحد
+  1026→  useEffect(() => {
+  1027→    const el = containerRef.current;
+  1028→    if (!el) return;
+  1029→    const fail = (message: string) => {
+  1030→      setFailed(true);
+  1031→      setErrorAr(message);
+  1032→    };
+  1033→    const callbacks = {
+  1034→      onSelect: (id: ComponentId | null) => useLabStore.getState().select(id),
+  1035→      onPeripheral: (kind: string) => {
+  1036→        const store = useLabStore.getState();
+  1037→        if (kind === 'monitor-power' || kind === 'monitor') store.toggleMonitor();
+  1038→      },
+  1039→      // إفلات قطعة مسحوبة: التحقق المنطقي أولًا ثم الحركة (توجيه v3 §6)
+  1040→      onPartDrop: (id: ComponentId, zone: 'tray' | 'case' | null) => {
+  1041→        const st = useLabStore.getState();
+  1042→        const status = st.sim.parts[id];
+  1043→        if (zone === 'tray' && status === 'separated') st.extractPart(id);
+  1044→        else if (zone === 'case' && (status === 'awaiting' || status === 'removed')) st.installPart(id);
+  1045→        // غير ذلك: لا تغيير منطقي — يعاد الهدف الصحيح أدناه
+  1046→        const after = useLabStore.getState().sim;
+  1047→        sceneRef.current?.syncState(after);
+  1048→      },
+  1049→      // (V6-B) شارة وضع التحكم بالشاشة
+  1050→      onFocusMode: (on: boolean) => {
+  1051→        setFocusModeState(on);
+  1052→        useLabStore.getState().setInputMode(on ? 'monitor' : 'lab');
+  1053→      },
+  1054→      // (V6 §3) الحرارة المُحاكاة → المتجر (مصدر الحقيقة)
+  1055→      onThermal: (cpu, gpu) => useLabStore.getState().setThermal(cpu, gpu),
+  1056→      // إطفاء حراري تعليمي
+  1057→      onThermalShutdown: (cpu) => {
+  1058→        const st = useLabStore.getState();
+  1059→        if (st.sim.flags.powerOn) {
+  1060→          st.toggleFlag('powerOn');
+  1061→          toast.error(`إطفاء حراري تعليمي: حرارة المعالج بلغت ${cpu.toFixed(0)}°C — تحقق من المبرد ومراوح الهيكل`);
+  1062→        }
+  1063→      },
+  1064→      // (V6-D) إعدادات UEFI من داخل النظام الافتراضي
+  1065→      onFirmwareChange: (patch) => {
+  1066→        const st = useLabStore.getState();
+  1067→        const key = Object.keys(patch)[0];
+  1068→        if (key === 'bootOrder' && Array.isArray(patch.bootOrder)) st.patchFirmware({ bootOrder: patch.bootOrder as string[] });
+  1069→        else if (key === 'secureBoot') st.patchFirmware({ secureBoot: Boolean(patch.secureBoot) });
+  1070→        else if (key === 'tpm') st.patchFirmware({ tpm: Boolean(patch.tpm) });
+  1071→        else if (key === 'xmp') st.patchFirmware({ xmp: Boolean(patch.xmp) });
+  1072→        else if (key === 'setupRequested') st.patchFirmware({ setupRequested: Boolean(patch.setupRequested) });
+  1073→        else if (key === 'bootMode') st.patchFirmware({ bootMode: patch.bootMode === 'bios' ? 'bios' : 'uefi' });
+  1074→      },
+  1075→      onBootDevice: (deviceId) => {
+  1076→        const st = useLabStore.getState();
+  1077→        st.bootFromDevice(deviceId);
+  1078→        st.patchFirmware({ setupRequested: false });
+  1079→      },
+  1080→      // (V6-E/F16) بيئة الاسترداد
+  1081→      onStartupRepair: () => useLabStore.getState().runStartupRepair(),
+  1082→      onRecoveryRestart: () => {
+  1083→        const st = useLabStore.getState();
+  1084→        st.toggleFlag('powerOn'); // إطفاء
+  1085→        // (إصلاح U6) المؤقت متتبّع في pendingTimeoutsRef ويُلغى عند مغادرة الشاشة
+  1086→        trackTimeout(() => {
+  1087→          // حارس: إن شُغّل الجهاز يدويًا أثناء الانتظار فلا نطفئه من جديد
+  1088→          if (useLabStore.getState().sim.flags.powerOn) return;
+  1089→          useLabStore.getState().toggleFlag('powerOn'); // تشغيل من جديد
+  1090→        }, 900);
+  1091→      },
+  1092→      onError: fail,
+  1093→    };
+  1094→    let scene: PCScene | null = null;
+  1095→    if (!isWebGLAvailable()) {
+  1096→      queueMicrotask(() => fail('متصفحك لا يدعم WebGL — لن يمكن عرض المشهد ثلاثي الأبعاد. استخدم متصفحًا حديثًا أو فعّل تسريع العتاد.'));
+  1097→      return;
+  1098→    }
+  1099→    // (V5) تحميل النماذج الحقيقية قبل إنشاء المشهد — الفشل يبقي المجسمات الإجرائية
+  1100→    let cancelled = false;
+  1101→    void (async () => {
+  1102→      try {
+  1103→        await preloadGlbAssets();
+  1104→      } catch {
+  1105→        // تجاهل: buildAllParts ستستخدم المجسمات الإجرائية
+  1106→      }
+  1107→      if (cancelled) return;
+  1108→      setAssetsReady(true);
+  1109→      try {
+  1110→        scene = new PCScene({ container: el, quality: qualityRef.current, callbacks });
+  1111→        sceneRef.current = scene;
+  1112→        const st = useLabStore.getState();
+  1113→        scene.syncState(st.sim);
+  1114→        scene.setXray(st.xray);
+  1115→        scene.setExploded(st.exploded);
+  1116→        scene.setAirflow(st.airflowVisible);
+  1117→        scene.setBootClock(st.bootStartedAt);
+  1118→        scene.setNotepad(st.notepad);
+  1119→        scene.setDragEnabled(false);
+  1120→        // خطاف فحص تطويري فقط (غير مستخدم في الإنتاج الوظيفي)
+  1121→        if (typeof window !== 'undefined') {
+  1122→          (window as unknown as Record<string, unknown>).__pcrs = { scene };
+  1123→        }
+  1124→      } catch {
+  1125→        queueMicrotask(() => fail('تعذر إنشاء المشهد ثلاثي الأبعاد — قد تكون موارد الجهاز منخفضة.'));
+  1126→      }
+  1127→    })();
+  1128→    return () => {
+  1129→      cancelled = true;
+  1130→      clearPendingTimeouts(); // (إصلاح U6) إلغاء المؤقتات المعلقة عند مغادرة الشاشة/إلغاء التركيب
+  1131→      scene?.dispose();
+  1132→      sceneRef.current = null;
+  1133→    };
+  1134→  }, []);
+  1135→
+  1136→  // مزامنة الحالة مع المشهد
+  1137→  useEffect(() => {
+  1138→    qualityRef.current = quality; // (إصلاح U8) إبقاء المرجع متزامنًا مع تغيّر الجودة
+  1139→    sceneRef.current?.setQuality(quality);
+  1140→  }, [quality]);
+  1141→  useEffect(() => {
+  1142→    sceneRef.current?.setXray(xray);
+  1143→  }, [xray]);
+  1144→  useEffect(() => {
+  1145→    sceneRef.current?.setExploded(exploded);
+  1146→  }, [exploded]);
+  1147→  useEffect(() => {
+  1148→    sceneRef.current?.highlight(selected);
+  1149→  }, [selected]);
+  1150→  useEffect(() => {
+  1151→    sceneRef.current?.isolate(isolated);
+  1152→  }, [isolated]);
+  1153→  useEffect(() => {
+  1154→    sceneRef.current?.syncState(sim);
+  1155→  }, [sim]);
+  1156→  useEffect(() => {
+  1157→    sceneRef.current?.setBootClock(bootStartedAt);
+  1158→  }, [bootStartedAt]);
+  1159→  useEffect(() => {
+  1160→    sceneRef.current?.setNotepad(notepad);
+  1161→  }, [notepad]);
+  1162→  useEffect(() => {
+  1163→    sceneRef.current?.setAirflow(airflowVisible);
+  1164→  }, [airflowVisible]);
+  1165→  useEffect(() => {
+  1166→    sceneRef.current?.setDragEnabled(dragMode);
+  1167→  }, [dragMode]);
+  1168→
+  1169→  // هل النظام الافتراضي يقبل الكتابة الآن؟ (يحدد فعالية حقل «دفتر النظام»)
+  1170→  useEffect(() => {
+  1171→    const update = () => {
+  1172→      const st = useLabStore.getState();
+  1173→      const elapsed = st.bootStartedAt !== null ? Math.max(0, Date.now() - st.bootStartedAt) : 0;
+  1174→      setCanType(computeMonitorView(st.sim, elapsed).canType);
+  1175→    };
+  1176→    update();
+  1177→    const iv = setInterval(update, 800);
+  1178→    return () => clearInterval(iv);
+  1179→  }, [sim, bootStartedAt]);
+  1180→
+  1181→  // (V6 §3) قراءة حية لتقرير المراوح من المشهد (سرعات/حالات لكل مروحة)
+  1182→  useEffect(() => {
+  1183→    const iv = setInterval(() => {
+  1184→      const scene = sceneRef.current;
+  1185→      if (scene) setFansReport(scene.getFanReport());
+  1186→    }, 1000);
+  1187→    return () => clearInterval(iv);
+  1188→  }, []);
+  1189→
+  1190→  // ===== اختصارات لوحة المفاتيح الحقيقية (توجيه v3 §5 + v6 §4.3) =====
+  1191→  // في وضع التحكم بالشاشة: كل المفاتيح توجّه إلى النظام الافتراضي (عدا Esc للخروج).
+  1192→  // في وضع المختبر: الاختصارات لا تُلتقط أثناء الكتابة في input/textarea/مفاتيح معدلة.
+  1193→  useEffect(() => {
+  1194→    const onKey = (e: KeyboardEvent) => {
+  1195→      const st = useLabStore.getState();
+  1196→
+  1197→      // (V6-B) وضع التحكم بالشاشة: أولوية الإدخال للنظام الافتراضي
+  1198→      if (st.inputMode === 'monitor') {
+  1199→        // مفاتيح المتصفح المحفوظة تمر دائمًا (تحديث/ملء شاشة/أدوات المطور)
+  1200→        if (e.key === 'F5' || e.key === 'F11' || e.key === 'F12' || ((e.ctrlKey || e.metaKey) && ['r', 'l', 't', 'w', 'j'].includes(e.key.toLowerCase()))) return;
+  1201→        const consumed = sceneRef.current?.handleMonitorKey(e);
+  1202→        if (consumed) e.preventDefault();
+  1203→        return;
+  1204→      }
+  1205→
+  1206→      const t = e.target as HTMLElement | null;
+  1207→      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  1208→      if (e.ctrlKey || e.metaKey || e.altKey) return;
+  1209→      switch (e.code) {
+  1210→        case 'KeyR': // إعادة ضبط منظور الكاميرا
+  1211→          sceneRef.current?.resetCamera();
+  1212→          break;
+  1213→        case 'KeyF': { // تركيز الكاميرا على القطعة المحددة
+  1214→          const sel = st.selected;
+  1215→          if (sel && sel !== 'case') sceneRef.current?.focusComponent(sel);
+  1216→          break;
+  1217→        }
+  1218→        case 'KeyX': // تبديل الأشعة السينية
+  1219→          st.toggleXray();
+  1220→          break;
+  1221→        case 'KeyE': // تبديل العرض التفجيري
+  1222→          st.toggleExploded();
+  1223→          break;
+  1224→        case 'KeyH': // إظهار/إخفاء تلميحات التحكم
+  1225→          st.setHintsVisible(!st.hintsVisible);
+  1226→          break;
+  1227→        case 'KeyM': // (V6-B) تفعيل وضع التحكم بالشاشة
+  1228→          sceneRef.current?.setFocusMode(true);
+  1229→          break;
+  1230→        case 'Digit1': // منظير أمامي
+  1231→          sceneRef.current?.setViewPreset('front');
+  1232→          break;
+  1233→        case 'Digit2': // منظير جانبي
+  1234→          sceneRef.current?.setViewPreset('side');
+  1235→          break;
+  1236→        case 'Digit3': // منظير علوي
+  1237→          sceneRef.current?.setViewPreset('top');
+  1238→          break;
+  1239→        case 'Delete': // (V6-D) الدخول إلى إعدادات UEFI أثناء الإقلاع
+  1240→          st.requestSetup();
+  1241→          break;
+  1242→        case 'Escape': {
+  1243→          // (إصلاح تدقيق V6) حوار مفتوح يعالج Esc نفسه — لا تُلغِ التحديد معًا (تأثير مزدوج)
+  1244→          const openDialog = document.querySelector('[role="alertdialog"], [data-state="open"][role="dialog"]');
+  1245→          if (openDialog) break;
+  1246→          st.select(null);
+  1247→          st.setIsolated(null);
+  1248→          break;
+  1249→        }
+  1250→        default:
+  1251→          break;
+  1252→      }
+  1253→    };
+  1254→    window.addEventListener('keydown', onKey);
+  1255→    return () => window.removeEventListener('keydown', onKey);
+  1256→  }, []);
+  1257→
+  1258→  // ملء الشاشة (Fullscreen API) — إعادة الضبط عبر Esc أو الزر نفسه
+  1259→  useEffect(() => {
+  1260→    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+  1261→    document.addEventListener('fullscreenchange', onFs);
+  1262→    return () => document.removeEventListener('fullscreenchange', onFs);
+  1263→  }, []);
+  1264→  const toggleFullscreen = useCallback(() => {
+  1265→    const el = sceneWrapRef.current;
+  1266→    if (!el) return;
+  1267→    if (document.fullscreenElement) {
+  1268→      document.exitFullscreen().catch(() => {});
+  1269→    } else if (el.requestFullscreen) {
+  1270→      el.requestFullscreen().catch(() => toast.error('تعذر تفعيل ملء الشاشة — قد يمنعه المتصفح.'));
+  1271→    }
+  1272→  }, []);
+  1273→
+  1274→  const resetCamera = useCallback(() => sceneRef.current?.resetCamera(), []);
+  1275→  const focusSelected = useCallback(() => {
+  1276→    if (selected) sceneRef.current?.focusComponent(selected);
+  1277→  }, [selected]);
+  1278→  const toggleScreenControl = useCallback(() => {
+  1279→    const scene = sceneRef.current;
+  1280→    if (!scene) return;
+  1281→    scene.setFocusMode(!scene.isFocusMode());
+  1282→  }, []);
+  1283→
+  1284→  if (failed) {
+  1285→    return <FallbackView messageAr={errorAr} />;
+  1286→  }
+  1287→
+  1288→  const panelOpen = sim.flags.panelOpen;
+  1289→
+  1290→  return (
+  1291→    <div className="flex flex-col gap-3">
+  1292→      {/* شريط أدوات المشهد — صغير وواضح (توجيه v3 2.1) */}
+  1293→      <div className="flex flex-wrap items-center gap-1 rounded-lg border bg-card/60 p-1.5" role="toolbar" aria-label="أدوات المشهد ثلاثي الأبعاد">
+  1294→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('front')} title="منظور أمامي (1)">
+  1295→          <View className="h-3.5 w-3.5" aria-hidden /> أمامي
+  1296→        </Button>
+  1297→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('side')} title="منظور جانبي (2)">
+  1298→          <FlipHorizontal2 className="h-3.5 w-3.5" aria-hidden /> جانبي
+  1299→        </Button>
+  1300→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('top')} title="منظور علوي (3)">
+  1301→          <ChevronsUp className="h-3.5 w-3.5" aria-hidden /> علوي
+  1302→        </Button>
+  1303→        <Separator orientation="vertical" className="mx-1 h-5" />
+  1304→        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => sceneRef.current?.zoomStep(1)} title="تكبير">
+  1305→          <ZoomIn className="h-3.5 w-3.5" aria-hidden />
+  1306→        </Button>
+  1307→        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => sceneRef.current?.zoomStep(-1)} title="إبعاد">
+  1308→          <ZoomOut className="h-3.5 w-3.5" aria-hidden />
+  1309→        </Button>
+  1310→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={resetCamera} title="إعادة ضبط الكاميرا (R أو دبل-كليك)">
+  1311→          <Camera className="h-3.5 w-3.5" aria-hidden /> إعادة الضبط
+  1312→        </Button>
+  1313→        <Separator orientation="vertical" className="mx-1 h-5" />
+  1314→        <Button size="sm" variant={panelOpen ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={() => useLabStore.getState().toggleFlag('panelOpen')} title="فتح/إغلاق الغطاء الجانبي">
+  1315→          {panelOpen ? <DoorClosed className="h-3.5 w-3.5" aria-hidden /> : <DoorOpen className="h-3.5 w-3.5" aria-hidden />} الغطاء
+  1316→        </Button>
+  1317→        <Button size="sm" variant={xray ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleXray} title="الأشعة السينية — مخطط القطع (X)">
+  1318→          <X className={cn('h-3.5 w-3.5', !xray && 'opacity-60')} aria-hidden /> أشعة
+  1319→        </Button>
+  1320→        <Button size="sm" variant={exploded ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleExploded} title="العرض التفجيري (E)">
+  1321→          <Bomb className="h-3.5 w-3.5" aria-hidden /> تفجيري
+  1322→        </Button>
+  1323→        <Button size="sm" variant={airflowVisible ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={() => setAirflow(!airflowVisible)} title="أسهم اتجاه تدفق الهواء">
+  1324→          <Wind className="h-3.5 w-3.5" aria-hidden /> هواء
+  1325→        </Button>
+  1326→        <Button size="sm" variant={focusMode ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleScreenControl} title="وضع التحكم بالشاشة المجسمة: الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي (M)">
+  1327→          <MonitorUp className="h-3.5 w-3.5" aria-hidden /> التحكم بالشاشة
+  1328→        </Button>
+  1329→        {/* (V6-D) وسائط التثبيت — البوابة الرسمية لمعالج تثبيت Windows ومختبر الأقراص */}
+  1330→        <UsbMediaDialog />
+  1331→        <Separator orientation="vertical" className="mx-1 h-5" />
+  1332→        <Button
+  1333→          size="sm"
+  1334→          variant={dragMode ? 'default' : 'ghost'}
+  1335→          className="h-7 gap-1 px-2 text-[11px]"
+  1336→          onClick={() => setDragMode(!dragMode)}
+  1337→          title="وضع الفك/التركيب: سحب القطع بالماوس مباشرة"
+  1338→        >
+  1339→          <Hand className="h-3.5 w-3.5" aria-hidden /> وضع السحب
+  1340→        </Button>
+  1341→        <Button
+  1342→          size="sm"
+  1343→          variant="ghost"
+  1344→          className="h-7 gap-1 px-2 text-[11px]"
+  1345→          disabled={!selected || selected === 'case'}
+  1346→          onClick={focusSelected}
+  1347→          title="تقريب الكاميرا نحو القطعة المحددة (F)"
+  1348→        >
+  1349→          <Focus className="h-3.5 w-3.5" aria-hidden /> توجيه
+  1350→        </Button>
+  1351→        {selected && selected !== 'case' && sim.parts[selected] !== 'damaged' ? (
+  1352→          <AlertDialog>
+  1353→            <AlertDialogTrigger asChild>
+  1354→              <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px] text-rose-400 hover:bg-rose-600/10" title="إحداث تلف تدريبي مقصود">
+  1355→                <MonitorX className="h-3.5 w-3.5" aria-hidden /> تلف تدريبي
+  1356→              </Button>
+  1357→            </AlertDialogTrigger>
+  1358→            <AlertDialogContent dir="rtl">
+  1359→              <AlertDialogHeader>
+  1360→                <AlertDialogTitle>إحداث تلف تدريبي مقصود؟</AlertDialogTitle>
+  1361→                <AlertDialogDescription>
+  1362→                  وضع الاستكشاف: ستتلوّن القطعة بالأحمر وتُعتبر تالفة في التشخيص (TRAINING_DAMAGE). يمكنك استبدالها بقطعة سليمة من المخزن التعليمي في أي وقت.
+  1363→                </AlertDialogDescription>
+  1364→              </AlertDialogHeader>
+  1365→              <AlertDialogFooter>
+  1366→                <AlertDialogCancel>إلغاء</AlertDialogCancel>
+  1367→                <AlertDialogAction onClick={() => damagePart(selected)}>تأكيد التلف التدريبي</AlertDialogAction>
+  1368→              </AlertDialogFooter>
+  1369→            </AlertDialogContent>
+  1370→          </AlertDialog>
+  1371→        ) : null}
+  1372→        {isolated ? (
+  1373→          <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px]" onClick={() => setIsolated(null)} title="إلغاء عزل القطعة (Esc)">
+  1374→            <EyeOff className="h-3.5 w-3.5" aria-hidden /> إلغاء العزل
+  1375→          </Button>
+  1376→        ) : null}
+  1377→        <Separator orientation="vertical" className="mx-1 h-5" />
+  1378→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={toggleFullscreen} title="ملء الشاشة / العودة">
+  1379→          {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" aria-hidden /> : <Maximize2 className="h-3.5 w-3.5" aria-hidden />}
+  1380→          {isFullscreen ? 'إنهاء ملء الشاشة' : 'ملء الشاشة'}
+  1381→        </Button>
+  1382→        <Button
+  1383→          size="sm"
+  1384→          variant={sidePanelsHidden ? 'default' : 'ghost'}
+  1385→          className="h-7 gap-1 px-2 text-[11px] ms-auto"
+  1386→          onClick={() => useLabStore.getState().setSidePanelsHidden(!sidePanelsHidden)}
+  1387→          title="إخفاء اللوحات الجانبية لتوسيع المشهد"
+  1388→        >
+  1389→          <PanelRightClose className="h-3.5 w-3.5" aria-hidden />
+  1390→          {sidePanelsHidden ? 'إظهار اللوحة' : 'إخفاء اللوحة'}
+  1391→        </Button>
+  1392→        <AlertDialog>
+  1393→          <AlertDialogTrigger asChild>
+  1394→            <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px] text-rose-400 hover:bg-rose-600/10" title="إعادة الجهاز إلى الحالة الافتراضية">
+  1395→              <RotateCcw className="h-3.5 w-3.5" aria-hidden /> إعادة تهيئة
+  1396→            </Button>
+  1397→          </AlertDialogTrigger>
+  1398→          <AlertDialogContent dir="rtl">
+  1399→            <AlertDialogHeader>
+  1400→              <AlertDialogTitle>إعادة تهيئة الجهاز الافتراضي؟</AlertDialogTitle>
+  1401→              <AlertDialogDescription>
+  1402→                سيُعاد كل شيء إلى الحالة الافتراضية (كل القطع مثبتة، الجهاز مطفأ). سجل الجلسات لن يُمس.
+  1403→              </AlertDialogDescription>
+  1404→            </AlertDialogHeader>
+  1405→            <AlertDialogFooter>
+  1406→              <AlertDialogCancel>إلغاء</AlertDialogCancel>
+  1407→              <AlertDialogAction onClick={resetSimulation}>تأكيد الإعادة</AlertDialogAction>
+  1408→            </AlertDialogFooter>
+  1409→          </AlertDialogContent>
+  1410→        </AlertDialog>
+  1411→      </div>
+  1412→
+  1413→      {/* المشهد + اللوحة الجانبية */}
+  1414→      <div className={cn('grid gap-3', sidePanelsHidden ? '' : 'lg:grid-cols-[minmax(0,1fr)_360px]')}>
+  1415→        <div className="space-y-2 min-w-0">
+  1416→          <SafetyStrip />
+  1417→
+  1418→          {/* (V6 §3) قراءة حية: الحرارة المُحاكاة + سرعة كل مروحة وحالتها واتجاه تدفقها */}
+  1419→          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-card/40 px-2.5 py-1.5" dir="rtl" aria-label="قراءة المراوح والحرارة المحاكاة">
+  1420→            <Badge variant="outline" className="gap-1 text-[10px]">
+  1421→              <Thermometer className="h-3 w-3" aria-hidden />
+  1422→              CPU {sim.thermal.cpuTempC.toFixed(0)}°C / GPU {sim.thermal.gpuTempC.toFixed(0)}°C
+  1423→            </Badge>
+  1424→            <span className="text-[10px] text-muted-foreground">محاكاة تعليمية:</span>
+  1425→            {fansReport.length === 0 ? (
+  1426→              <span className="text-[10px] text-muted-foreground">…تجهيز منظومة المراوح</span>
+  1427→            ) : (
+  1428→              fansReport.map((f) => (
+  1429→                <Badge
+  1430→                  key={f.labelAr}
+  1431→                  variant="outline"
+  1432→                  className={cn(
+  1433→                    'gap-1 text-[10px]',
+  1434→                    !f.running ? 'border-slate-600/40 text-slate-400' : f.rpm > 1200 ? 'border-rose-600/40 text-rose-400' : 'border-emerald-600/40 text-emerald-400',
+  1435→                  )}
+  1436→                  title={`${f.labelAr} — ${f.airflowAr}`}
+  1437→                >
+  1438→                  <Wind className="h-3 w-3" aria-hidden />
+  1439→                  {f.labelAr}: {f.running ? `${f.rpm} RPM` : 'متوقفة'}
+  1440→                </Badge>
+  1441→              ))
+  1442→            )}
+  1443→          </div>
+  1444→
+  1445→          <div
+  1446→            ref={sceneWrapRef}
+  1447→            className={cn(
+  1448→              'relative overflow-hidden rounded-xl border bg-[#0d1218]',
+  1449→              isFullscreen ? 'h-screen' : 'h-[52vh] min-h-[380px] lg:h-[calc(100vh-320px)] lg:min-h-[460px]',
+  1450→            )}
+  1451→          >
+  1452→            <div
+  1453→              ref={containerRef}
+  1454→              dir="ltr"
+  1455→              className="h-full w-full"
+  1456→              role="application"
+  1457→              aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
+  1458→            />
+  1459→            {/* (إضافة تدقيق V6) مؤشر تجهيز النماذج قبل اكتمال التحميل */}
+  1460→            {!assetsReady ? (
+  1461→              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#0d1218] text-sm text-slate-300" dir="rtl" role="status" aria-live="polite">
+  1462→                <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-600 border-t-cyan-400" aria-hidden />
+  1463→                جارٍ تجهيز النماذج ثلاثية الأبعاد…
+  1464→                <span className="text-[11px] text-muted-foreground">فشل التحميل يعني تلقائيًا البديل الإجرائي — لن يبقى المشهد فارغًا</span>
+  1465→              </div>
+  1466→            ) : null}
+  1467→            {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن */}
+  1468→            {focusMode ? (
+  1469→              <div className="pointer-events-auto absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-2 bg-emerald-950/80 px-3 py-1.5 text-xs text-emerald-200 backdrop-blur-sm" dir="rtl">
+  1470→                <MonitorUp className="h-3.5 w-3.5" aria-hidden />
+  1471→                <span className="font-bold">وضع التحكم بالشاشة</span>
+  1472→                <span className="opacity-80">— الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي داخل الشاشة المجسمة</span>
+  1473→                <kbd className="rounded border border-emerald-500/50 px-1 font-mono">Esc</kbd>
+  1474→                <span className="opacity-80">للعودة للمختبر</span>
+  1475→                <Button size="sm" variant="secondary" className="h-6 gap-1 px-2 text-[10px]" onClick={() => sceneRef.current?.setFocusMode(false)}>
+  1476→                  <DoorClosed className="h-3 w-3" aria-hidden /> خروج
+  1477→                </Button>
+  1478→              </div>
+  1479→            ) : null}
+  1480→            <HintsOverlay dragMode={dragMode} />
+  1481→          </div>
+  1482→
+  1483→          {/* حقل إدخال حقيقي → دفتر النظام الافتراضي على الشاشة (توجيه v3 أ.2) */}
+  1484→          <div className="flex items-center gap-2">
+  1485→            <Badge variant="outline" className="gap-1 shrink-0 text-[10px]">
+  1486→              <Keyboard className="h-3 w-3" aria-hidden /> دفتر النظام
+  1487→            </Badge>
+  1488→            <Input
+  1489→              value={notepad}
+  1490→              onChange={(e) => setNotepad(e.target.value)}
+  1491→              disabled={!canType}
+  1492→              placeholder={canType ? 'اكتب بلوحة مفاتيحك — يظهر النص على الشاشة الافتراضية' : 'يعمل بعد إقلاع ناجح يدخل النظام الافتراضي'}
+  1493→              className="h-8 text-xs"
+  1494→              aria-label="إدخال نص حقيقي يظهر في دفتر النظام الافتراضي على الشاشة ثلاثية الأبعاد"
+  1495→            />
+  1496→            <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 max-sm:h-11 max-sm:w-11" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
+  1497→              <Eraser className="h-3.5 w-3.5" aria-hidden />
+  1498→              <span className="sr-only">مسح دفتر النظام</span>
+  1499→            </Button>
+  1500→          </div>
+  1501→
+  1502→          <p className="text-[11px] text-muted-foreground">
+  1503→            الجهاز المرجعي: هيكل Mid-Tower + لوحة ATX (مقبس LGA1700 / ذاكرة DDR5) — أساس اللوحة مسح حقيقي مرخص CC0 (Poly Haven).
+  1504→            اختصارات المشهد: <kbd className="rounded border px-1 font-mono">R</kbd> إعادة، <kbd className="rounded border px-1 font-mono">F</kbd> تركيز، <kbd className="rounded border px-1 font-mono">X</kbd> أشعة، <kbd className="rounded border px-1 font-mono">M</kbd> التحكم بالشاشة، <kbd className="rounded border px-1 font-mono">Delete</kbd> إعدادات UEFI، <kbd className="rounded border px-1 font-mono">1/2/3</kbd> مناظير، <kbd className="rounded border px-1 font-mono">H</kbd> تلميحات.
+  1505→          </p>
+  1506→
+  1507→          <StepsPanel />
+  1508→        </div>
+  1509→        {!sidePanelsHidden ? (
+  1510→          <div className="min-w-0">
+  1511→            <ScrollArea className="h-fit max-h-[calc(100vh-240px)] scrollbar-thin">
+  1512→              <InfoPanel />
+  1513→            </ScrollArea>
+  1514→          </div>
+  1515→        ) : null}
+  1516→      </div>
+  1517→    </div>
+  1518→  );
+  1519→}
+  1520→

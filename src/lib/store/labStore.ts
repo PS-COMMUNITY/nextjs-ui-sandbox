@@ -52,18 +52,17 @@ import {
   type PersistShape,
 } from '@/lib/services/persistence';
 
-export type ScreenId =
-  | 'home'
-  | 'lab'
-  | 'tech'
-  | 'catalog'
-  | 'training'
-  | 'builder'
-  | 'diagnostics'
-  | 'power'
-  | 'lessons'
-  | 'reports'
-  | 'settings';
+/**
+ * أنماط ورشة العمل الواحدة — التطبيق كله مشهد 3D حيّ (v7):
+ *  - lab:      المختبر الحر (فك/تركيب/تشغيل/تثبيت نظام)
+ *  - tech:     جلسة الفني ذو المراحل التسع (بنفس المشهد الحيّ)
+ *  - missions: المهام الموجهة العملية (بنفس المشهد الحيّ)
+ * الأدوات المرجعية (الكتالوج/التشخيص/الطاقة/التوافق/التقارير/الإعدادات)
+ * صارت نوافذ فوق المشهد عبر openTool — لا صفحات منفصلة تجمد المشهد.
+ */
+export type ScreenId = 'lab' | 'tech' | 'missions';
+
+export type ToolId = 'catalog' | 'diagnostics' | 'power' | 'builder' | 'reports' | 'settings';
 
 export type GraphicsQuality = 'low' | 'medium' | 'high';
 
@@ -87,6 +86,7 @@ interface LabStore {
   inputMode: InputMode;           // V6-B: وضع المختبر أو وضع التحكم بالشاشة
   // === واجهة ===
   screen: ScreenId;
+  tool: ToolId | null;            // النافذة المرجعية المفتوحة فوق المشهد (إن وجدت)
   selected: ComponentId | null;
   xray: boolean;
   exploded: boolean;
@@ -109,6 +109,8 @@ interface LabStore {
   // === أفعال ===
   hydrate: () => void;
   setScreen: (s: ScreenId) => void;
+  openTool: (t: ToolId) => void;
+  closeTool: () => void;
   select: (id: ComponentId | null) => void;
   toggleXray: () => void;
   toggleExploded: () => void;
@@ -262,7 +264,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
   hintsVisible: true,
   airflowVisible: false,
   inputMode: 'lab',
-  screen: 'home',
+  screen: 'lab',
+  tool: null,
   selected: null,
   xray: false,
   exploded: false,
@@ -323,6 +326,8 @@ export const useLabStore = create<LabStore>((set, get) => ({
   },
 
   setScreen: (screen) => set({ screen, selected: screen === 'lab' ? get().selected : null }),
+  openTool: (tool) => set({ tool }),
+  closeTool: () => set({ tool: null }),
   select: (selected) => set({ selected }),
   toggleXray: () => set({ xray: !get().xray }),
   toggleExploded: () => set({ exploded: !get().exploded }),
@@ -832,7 +837,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   },
 
   startMission: (id) => {
-    set({ activeMissionId: id, missionStepIndex: 0, screen: 'training' });
+    set({ activeMissionId: id, missionStepIndex: 0, screen: 'missions' });
     get().logEvent('lesson', `بدء مهمة: ${id}`, true);
     schedulePersist(get);
   },
@@ -884,7 +889,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
       activeMissionId: null,
       missionStepIndex: 0,
       lastDiagnosis: null,
-      screen: 'home',
+      screen: 'lab',
       selected: null,
       xray: false,
       exploded: false,
