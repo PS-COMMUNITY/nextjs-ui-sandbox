@@ -21,6 +21,8 @@ import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory'
 import { createScreenPainter, type ScreenPainter } from './screenTexture';
 import { bootableDevices, computeMonitorView } from '../simulation/monitorEngine';
 import { FanSystem } from './fans';
+import { buildBenchAdditions } from './bench';
+import { SCREW_FLAGS, type BenchTool } from './visualTypes';
 import { VirtualOS } from '../os/vos';
 import { registerVosApps } from '../os/apps';
 import { drawInstaller, getSetupState, resetSetup } from '../os/installer';
@@ -28,7 +30,7 @@ import { gpuSeat } from './glbParts';
 import { BOARD, CASE, COLORS, DEFAULT_CAMERA, DESK, EXPLODE_VECTORS, MONITOR_CAMERA, MOUNTS, SEPARATE_FACTOR, TRAY, VIEW_PRESETS } from './layout';
 import type { ViewPresetId } from './layout';
 import type { FlagVisuals, PCSceneCallbacks, PartVisuals, PeripheralKind, SceneQuality } from './visualTypes';
-import { COMPONENT_IDS, copySimulation, isInstalled } from '../types';
+import { COMPONENT_IDS, copySimulation, isInstalled, MACHINE_FLAGS } from '../types';
 import type { ComponentId, MachineFlag, SimulationState } from '../types';
 
 // ======================================================================
@@ -58,10 +60,13 @@ const HOVER_THROTTLE_MS = 100;  // أقصى معدل لفحص التحويم
 const MONITOR_REDRAW_MS = 400;  // معدل إعادة رسم نسيج الشاشة الافتراضية
 const DAMAGED_HEX = 0xef4444;   // لون توهج القطعة التالفة تدريبيًا
 
-/** نتيجة التقاط النقرة: قطعة PC أو طرفية خارجية */
+/** نتيجة التقاط النقرة: قطعة PC أو طرفية أو نقطة فعالة (برغي/مزلاج/أداة/زر) */
 type PickedInfo =
   | { type: 'part'; id: ComponentId }
   | { type: 'periph'; kind: PeripheralKind; detail?: string }
+  | { type: 'flag'; flag: MachineFlag }
+  | { type: 'tool'; tool: BenchTool }
+  | { type: 'powerButton' }
   | null;
 
 /** منطقة إفلات قطعة مسحوبة */
@@ -246,6 +251,12 @@ export class PCScene {
   private dragOffset = new THREE.Vector3();
   private dragGrabbed = false;
 
+  // ---- (V8) أداة المقعد + حركة فك/تثبيت البراغي ----
+  private activeTool: BenchTool = 'hand';
+  private readonly hitProxyMat = new THREE.MeshBasicMaterial({ visible: false });
+  private screwAnims = new Map<ScrewRec, { out: boolean; t: number }>();
+  private flagPrev: Record<MachineFlag, boolean> | null = null;
+
   constructor(init: { container: HTMLDivElement; quality: SceneQuality; callbacks: PCSceneCallbacks }) {
     this.container = init.container;
     this.quality = init.quality;
@@ -316,6 +327,12 @@ export class PCScene {
 
       this.initDynamicState(visuals);
       this.initFlagRecords(visuals);
+      // (V8) طاولة الصيانة الحقيقية: كيبورد/فأرة/أزرار فيزيائية/مواد استهلاكية
+      // ثم وسم نقاط الالتقاط — كل برغي ومزلاج وقابس وزر صار قابلاً للنقر المباشر
+      buildBenchAdditions(visuals.root, this.quality);
+      this.tagHotspots(visuals);
+      this.addHitProxies(visuals);
+      this.visuals.sidePanel.userData['flagTarget'] = 'panelOpen';
 
       // (الجلسة 4 / V6) الشاشة الافتراضية: نسيج ديناميكي + النظام الافتراضي التفاعلي
       this.painter = createScreenPainter();
@@ -587,6 +604,17 @@ export class PCScene {
     if (!on) this.cancelDrag();
   }
 
+  /** (V8) الأداة في يد الفني: اليد تنفّد المزالج والقوابس، والمفك وحده يفك البراغي */
+  setActiveTool(tool: BenchTool): void {
+    if (this.blocked) return;
+    this.activeTool = tool;
+    this.renderer.domElement.style.cursor = tool === 'screwdriver' ? 'crosshair' : '';
+  }
+
+  getActiveTool(): BenchTool {
+    return this.activeTool;
+  }
+
   /** (8) إبراز مكوّن بتعديل emissive — إبراز واحد نشط في كل مرة */
   highlight(id: ComponentId | null): void {
     if (this.blocked) return;
@@ -759,6 +787,18 @@ export class PCScene {
     const panel = this.visuals.sidePanel;
     panel.rotation.y += (this.panelTarget - panel.rotation.y) * k;
 
+    // (V8) استكمال حركة فك/تثبيت البراغي — لفّة ورفعة ناعمة بدل القفز المفاجئ
+    if (this.screwAnims.size > 0) {
+      for (const [rec, anim] of this.screwAnims) {
+        anim.t = Math.min(1, anim.t + dt / 0.38);
+        const kk = PCScene.easeInOut(anim.t);
+        rec.obj.position.copy(rec.basePos);
+        rec.obj.position[rec.axis] += anim.out ? rec.delta * kk : rec.delta * (1 - kk);
+        rec.obj.rotation.z = rec.baseRotZ + SCREW_SPIN * (anim.out ? kk : 1 - kk);
+        if (anim.t >= 1) this.screwAnims.delete(rec);
+      }
+    }
+
     // استكمال تنعيم الكاميرا (resetCamera / focusComponent)
     const tween = this.camTween;
     if (tween) {
@@ -841,6 +881,10 @@ export class PCScene {
    * كل الإزاحات نسبية إلى القيم الأصلية المحفوظة عند البناء.
    */
   private applyFlags(flags: Record<MachineFlag, boolean>, animate: boolean): void {
+    // (V8) لقطة سابقة للأعلام لكشف تغيّر البراغي بين المزامنات (لتوليد حركة الفك)
+    const prev = this.flagPrev;
+    this.flagPrev = { ...flags };
+
     // الغطاء الجانبي — عبر هدف تنعيمي تتبعه الحلقة
     this.panelTarget = flags.panelOpen ? PANEL_OPEN_ANGLE : 0;
     if (!animate) this.visuals.sidePanel.rotation.y = this.panelTarget;
@@ -860,10 +904,14 @@ export class PCScene {
       this.leverRec.obj.rotation.y = this.leverRec.baseRot + (flags.cpuLeverOpen ? LEVER_OPEN_ANGLE : 0);
     }
 
-    // البراغي (gpu/psu/fan/m2/mobo)
+    // البراغي (gpu/psu/fan/m2/mobo) — (V8) فك/تثبيت متحرك: البرغي الذي تغيّر علمه يستلم أنيميشن،
+    // وما تحت أنيميشن جارٍ لا تُطبّق عليه القيمة النهائية مباشرة (الأنيميشن يملكه)
     for (const [flag, recs] of this.screwMap) {
       const out = flags[flag];
+      const changed = prev ? prev[flag] !== out : false;
       for (const rec of recs) {
+        if (changed) this.screwAnims.set(rec, { out, t: 0 });
+        if (this.screwAnims.has(rec)) continue;
         rec.obj.position.copy(rec.basePos);
         if (out) {
           rec.obj.position[rec.axis] += rec.delta;
@@ -1023,6 +1071,8 @@ export class PCScene {
         tool.position.set(-3.1, TRAY.tableTopY - b2.min.y, 3.55);
         tool.rotation.y = 0.5;
         tool.name = 'desk-screwdriver';
+        // (V8) المفك على الطاولة أداة فعلية: النقر عليه يلتقطه لفك البراغي
+        tool.userData['benchTool'] = 'screwdriver';
         root.add(tool);
       },
       undefined,
@@ -1062,6 +1112,8 @@ export class PCScene {
           obj.position.set(pos[0], pos[1] - b2.min.y, pos[2]);
           obj.rotation.y = rotY;
           obj.name = name;
+          // (V8) طقم المفكات أيضًا أداة قابلة للالتقاط من الطاولة
+          if (name === 'tool-screwdriver-set') obj.userData['benchTool'] = 'screwdriver';
           root.add(obj);
           if (opts?.light) {
             const head = new THREE.Vector3((b2.min.x + b2.max.x) / 2, b2.max.y - 0.15, (b2.min.z + b2.max.z) / 2);
@@ -1297,19 +1349,50 @@ export class PCScene {
     const hits = this.raycaster.intersectObjects(this.visuals.root.children, true);
     for (const hit of hits) {
       if (this.isHidden(hit.object)) continue;        // تجاهل ما خفيه العزل
-      if (this.isSeeThrough(hit.object)) continue;    // الزجاج/الشفاف لا يحجب الاختيار
+      // (V8) النقاط الفعالة أسبق من القطعة الحاملة: برغي/مزلاج/رافعة/قابس/أداة/زر فيزيائي
       let cur: THREE.Object3D | null = hit.object;
+      let hotspot: PickedInfo = null;
+      let panelGlassClosed = false;
       while (cur) {
-        // الطرفيات (زر الشاشة / زر طاقة الشاشة) — لا كيبورد ولا ماوس (توجيه v3 أ.1)
         const per: unknown = cur.userData['peripheral'];
         if (typeof per === 'string') {
-          return { type: 'periph', kind: per as PeripheralKind };
+          hotspot = { type: 'periph', kind: per as PeripheralKind };
+          break;
         }
-        const cid: unknown = cur.userData['componentId'];
+        const ft: unknown = cur.userData['flagTarget'];
+        if (typeof ft === 'string' && (MACHINE_FLAGS as readonly string[]).includes(ft)) {
+          if (ft === 'panelOpen' && this.isSeeThrough(hit.object) && !(this.lastState?.flags.panelOpen ?? false)) {
+            // زجاج الغطاء المغلق يمرّر النقر إلى القطع الداخلية — الإطار/الحواف فقط تفتح وتغلق
+            panelGlassClosed = true;
+            break;
+          }
+          hotspot = { type: 'flag', flag: ft as MachineFlag };
+          break;
+        }
+        if (cur.userData['benchTool'] === 'screwdriver') {
+          hotspot = { type: 'tool', tool: 'screwdriver' };
+          break;
+        }
+        if (cur.userData['powerButton'] === true) {
+          hotspot = { type: 'powerButton' };
+          break;
+        }
+        if (cur.userData['acSwitch'] === true) {
+          hotspot = { type: 'flag', flag: 'acConnected' };
+          break;
+        }
+        cur = cur.parent;
+      }
+      if (hotspot) return hotspot;
+      if (panelGlassClosed) continue;
+      if (this.isSeeThrough(hit.object)) continue;    // الزجاج/الشفاف لا يحجب الاختيار
+      let cur2: THREE.Object3D | null = hit.object;
+      while (cur2) {
+        const cid: unknown = cur2.userData['componentId'];
         if (typeof cid === 'string' && (COMPONENT_IDS as readonly string[]).includes(cid)) {
           return { type: 'part', id: cid as ComponentId };
         }
-        cur = cur.parent;
+        cur2 = cur2.parent;
       }
       // إصابة أولى بلا معرف (عدة/زينة) — تمرير النقر عبرها إلى ما خلفها (توجيه v4)
       continue;
@@ -1404,6 +1487,33 @@ export class PCScene {
     }
   }
 
+  /** (V8) وسم نقاط الالتقاط: كل مجسم علم يصبح قابلاً للنقر المباشر داخل المشهد */
+  private tagHotspots(visuals: PartVisuals): void {
+    if (this.latchRec) this.latchRec.obj.userData['flagTarget'] = 'pcieLatchOpen';
+    if (this.leverRec) this.leverRec.obj.userData['flagTarget'] = 'cpuLeverOpen';
+    for (const clip of this.clipRecs) clip.obj.userData['flagTarget'] = 'ramClipsOpen';
+    for (const [flag, recs] of this.screwMap) {
+      for (const rec of recs) rec.obj.userData['flagTarget'] = flag;
+    }
+    for (const plug of this.plugRecs) plug.obj.userData['flagTarget'] = plug.flag;
+  }
+
+  /** (V8) نقاط التقاط غير مرئية حول المجسمات الصغيرة — نقر دقيق على برغي بحجم 2سم */
+  private addHitProxies(visuals: PartVisuals): void {
+    const mk = (parent: THREE.Object3D, r: number): void => {
+      const p = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 6), this.hitProxyMat);
+      p.name = 'hit-proxy';
+      parent.add(p);
+    };
+    if (this.latchRec) mk(this.latchRec.obj, 0.3);
+    if (this.leverRec) mk(this.leverRec.obj, 0.3);
+    for (const clip of this.clipRecs) mk(clip.obj, 0.2);
+    for (const recs of this.screwMap.values()) {
+      for (const rec of recs) mk(rec.obj, 0.2);
+    }
+    for (const plug of this.plugRecs) mk(plug.obj, 0.24);
+  }
+
   // ====================================================================
   // الخاصة — الحجم والمؤشر
   // ====================================================================
@@ -1490,7 +1600,26 @@ export class PCScene {
       this.callbacks.onPeripheral?.(picked.kind, picked.detail);
       return;
     }
-    this.callbacks.onSelect(picked ? picked.id : null);
+    // (V8) التحكم المباشر كفني حقيقي: برغي/مزلاج/رافعة/قابس/زر طاقة/مفتاح PSU
+    if (picked && picked.type === 'flag') {
+      if (SCREW_FLAGS.has(picked.flag) && this.activeTool !== 'screwdriver') {
+        // البراغي لا تُفك بالأصابع — التقط المفك أولًا (كما في الواقع)
+        this.callbacks.onToolRequired?.('screwdriver');
+        return;
+      }
+      this.callbacks.onFlagClick?.(picked.flag);
+      return;
+    }
+    if (picked && picked.type === 'tool') {
+      this.setActiveTool(picked.tool);
+      this.callbacks.onToolPick?.(picked.tool);
+      return;
+    }
+    if (picked && picked.type === 'powerButton') {
+      this.callbacks.onPowerButton?.();
+      return;
+    }
+    this.callbacks.onSelect(picked && picked.type === 'part' ? picked.id : null);
   };
 
   /** (7) تحويم/سحب — بفحص مُقيَّد زمنيًا للتحويم (100ms) */
@@ -1521,7 +1650,11 @@ export class PCScene {
     const now = performance.now();
     if (now - this.lastHoverAt < HOVER_THROTTLE_MS) return;
     this.lastHoverAt = now;
-    this.renderer.domElement.style.cursor = this.pickAt(event.clientX, event.clientY) ? 'pointer' : '';
+    const hovering = this.pickAt(event.clientX, event.clientY);
+    // (V8) مؤشر المفك:crosshair عندما تكون الأداة باليد — إحساس أدوات حقيقي
+    this.renderer.domElement.style.cursor = hovering
+      ? 'pointer'
+      : this.activeTool === 'screwdriver' ? 'crosshair' : '';
   };
 
   /** (V6-B) عجلة الماوس → تمرير داخل النظام الافتراضي في وضع الشاشة */

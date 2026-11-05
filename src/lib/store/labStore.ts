@@ -84,6 +84,7 @@ interface LabStore {
   hintsVisible: boolean;          // تلميحات التحكم بالماوس/الكيبورد الحقيقيين (زر H)
   airflowVisible: boolean;        // أسهم تدفق الهواء
   inputMode: InputMode;           // V6-B: وضع المختبر أو وضع التحكم بالشاشة
+  benchTool: 'hand' | 'screwdriver'; // (V8) أداة يد الفني — البراغي تتطلب المفك
   // === واجهة ===
   screen: ScreenId;
   tool: ToolId | null;            // النافذة المرجعية المفتوحة فوق المشهد (إن وجدت)
@@ -119,6 +120,7 @@ interface LabStore {
   setSidePanelsHidden: (v: boolean) => void;
   toggleFlag: (f: MachineFlag) => void;
   setInputMode: (m: InputMode) => void;
+  setBenchTool: (t: 'hand' | 'screwdriver') => void; // (V8) اختيار أداة المقعد
   // V6-C/D: النظام والأقراص والبرنامج الثابت
   insertUsb: (family: WinFamilyId | null) => void;
   exitSetup: () => void;
@@ -264,6 +266,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   hintsVisible: true,
   airflowVisible: false,
   inputMode: 'lab',
+  benchTool: 'hand',
   screen: 'lab',
   tool: null,
   selected: null,
@@ -500,6 +503,7 @@ export const useLabStore = create<LabStore>((set, get) => ({
   setAirflow: (v) => set({ airflowVisible: v }),
 
   setInputMode: (inputMode) => set({ inputMode }),
+  setBenchTool: (benchTool) => set({ benchTool }),
 
   // ============ V6-C/D: النظام الافتراضي والأقراص والبرنامج الثابت ============
 

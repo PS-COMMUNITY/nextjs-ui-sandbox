@@ -73,6 +73,12 @@ const TOOLS: { id: ToolId; labelAr: string; icon: typeof LibraryBig; titleAr: st
 /** محتوى نافذة المساعدة — تحكم الماوس ولوحة المفاتيح الحقيقيين فقط */
 function HelpContent() {
   const mouseRows = [
+    { actionAr: 'نقرة على برغي', resultAr: 'فكّه/تثبيته — يتطلب اختيار المفك أولًا' },
+    { actionAr: 'نقرة على مزلاج/رافعة/قابس', resultAr: 'فتحه أو إغلاقه مباشرة بيدك' },
+    { actionAr: 'نقرة على زر الطاقة على الهيكل', resultAr: 'تشغيل/إطفاء الجهاز (كزر حقيقي)' },
+    { actionAr: 'نقرة على مفتاح PSU الخلفي', resultAr: 'توصيل/فصل الكهرباء (AC)' },
+    { actionAr: 'نقرة على المفك على الطاولة', resultAr: 'التقاط المفك لفك البراغي' },
+    { actionAr: 'نقرة على الكيبورد/الفأرة على المكتب', resultAr: 'التحكم بالشاشة المجسمة (Esc للخروج)' },
     { actionAr: 'نقرة يسار على قطعة', resultAr: 'تحديد القطعة وعرض معلوماتها' },
     { actionAr: 'سحب الزر الأيسر على فراغ', resultAr: 'تدوير الكاميرا' },
     { actionAr: 'عجلة الماوس', resultAr: 'تقريب/إبعاد' },
@@ -83,6 +89,7 @@ function HelpContent() {
   const keyRows = [
     { key: 'R', resultAr: 'إعادة ضبط منظور الكاميرا' },
     { key: 'F', resultAr: 'تركيز الكاميرا على القطعة المحددة' },
+    { key: 'S', resultAr: 'تبديل أداة اليد ↔ مفك فيليبس (البراغي تتطلب المفك)' },
     { key: 'X', resultAr: 'تبديل الأشعة السينية (مخطط القطع)' },
     { key: 'E', resultAr: 'تبديل العرض التفجيري' },
     { key: 'H', resultAr: 'إظهار/إخفاء تلميحات التحكم' },
@@ -240,7 +247,7 @@ export default function AppShell() {
                 <DialogHeader>
                   <DialogTitle>التحكم بالمختبر</DialogTitle>
                   <DialogDescription>
-                    جهازا الإدخال الحقيقيان (ماوسك ولوحة مفاتيحك) هما أدوات التحكم — لا يوجد ماوس أو كيبورد داخل المشهد.
+                    أنت الفني على طاولة الصيانة: افك البراغي بالمفك، افتح المزالج بيدك، واضغط زر الطاقة على الهيكل — كل خطوة نقرة حقيقية داخل المشهد، لا أزرار «تنفيذ» وهمية.
                   </DialogDescription>
                 </DialogHeader>
                 <HelpContent />

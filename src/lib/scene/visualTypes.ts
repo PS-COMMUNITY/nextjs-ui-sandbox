@@ -1,16 +1,25 @@
 /**
  * الأنواع البصرية المشتركة بين مصنع المجسمات (partsFactory) ومدير المشهد (PCScene).
  *
- * ملاحظة توجيه v3 (أ.1/أ.2): لا يوجد أي مجسم ثلاثي الأبعاد للوحة مفاتيح أو فأرة
- * في المشهد إطلاقًا — جهازا الإدخال الحقيقيان للمستخدم هما أدوات التحكم بالتطبيق.
+ * تحديث V8 (توجيه «تحكم كشخص حقيقي»): الإدخال الحقيقي يبقى أساس التحكم، وأُضيفت
+ * طرفيات مكتب مادية (كيبورد وفأرة على الطاولة موصولتان بكابل) نقرة عليهما تدخل
+ * وضع التحكم بالشاشة المجسمة — كما يفعل فني حقيقي يجلس على طاولة الصيانة.
  */
 import type * as THREE from 'three';
-import type { ComponentId } from '../types';
+import type { ComponentId, MachineFlag } from '../types';
 
 export type SceneQuality = 'low' | 'medium' | 'high';
 
 /** الطرفيات التفاعلية خارج الهيكل (ليست قطع PC — نقرة تُحوّل لفعل في المتجر) */
-export type PeripheralKind = 'monitor' | 'monitor-power';
+export type PeripheralKind = 'monitor' | 'monitor-power' | 'keyboard' | 'mouse';
+
+/** أدوات المقعد (V8): اليد تنفّد المزالج والقوابس، والمفك وحده يفك/يثبّت البراغي */
+export type BenchTool = 'hand' | 'screwdriver';
+
+/** الأعلام التي تُنفَّذ بمفك حصراً (براغٍ حقيقية) */
+export const SCREW_FLAGS: ReadonlySet<string> = new Set([
+  'gpuScrewsOut', 'psuScrewsOut', 'fanScrewsOut', 'm2ScrewOut', 'moboScrewsOut',
+]);
 
 /** مراجع المجسمات الفرعية التي تتحكم بها أعلام المحاكاة (MachineFlag) */
 export interface FlagVisuals {
@@ -40,8 +49,16 @@ export interface PartVisuals {
 
 export interface PCSceneCallbacks {
   onSelect: (id: ComponentId | null) => void;
-  /** نقرة على طرفية خارجية: زر شاشة / زر طاقة الشاشة */
+  /** نقرة على طرفية خارجية: زر شاشة / زر طاقة الشاشة / كيبورد المكتب والفأرة */
   onPeripheral?: (kind: PeripheralKind, detail?: string) => void;
+  /** (V8) نقرة مباشرة على نقطة فعالة في المشهد: برغي/مزلاج/رافعة/قابس/غطاء/مفتاح PSU */
+  onFlagClick?: (flag: MachineFlag) => void;
+  /** (V8) نقر برغي بلا أداة مناسبة — الواجهة توجّه المستخدم لالتقاط المفك */
+  onToolRequired?: (tool: BenchTool) => void;
+  /** (V8) التقط المستخدم أداة من الطاولة (نقر المفك داخل المشهد) */
+  onToolPick?: (tool: BenchTool) => void;
+  /** (V8) نقرة زر الطاقة الفعلي على واجهة الهيكل */
+  onPowerButton?: () => void;
   /** إفلات قطعة مسحوبة بالماوس: تمرر للمنطق التعليمي للتحقق قبل قبول الحركة */
   onPartDrop?: (id: ComponentId, zone: 'tray' | 'case' | null) => void;
   /** (V6-B) دخول/خروج وضع التحكم بالشاشة المجسمة (الواجهة تُحدّث شارتها) */

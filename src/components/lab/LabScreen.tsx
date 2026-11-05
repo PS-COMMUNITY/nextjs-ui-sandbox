@@ -36,6 +36,7 @@ import {
   Monitor,
   PackageOpen,
   HandMetal,
+  MousePointerClick,
   View,
   FlipHorizontal2,
   ChevronsUp,
@@ -125,20 +126,17 @@ function StatusBadge({ id }: { id: ComponentId }) {
   );
 }
 
-/** خطوة قائمة تحقق قابلة للتنفيذ (علم ميكانيكي أو فك/تركيب قطعة) */
+/** خطوة قائمة تحقق — (V8) الأعلام تُنفّد بالنقر داخل المشهد لا بأزرار وهمية */
 function ChecklistRow({
   item,
   mode,
-  onFlag,
   onPart,
 }: {
   item: ChecklistItem;
   mode: 'remove' | 'install';
-  onFlag: (f: MachineFlag) => void;
   onPart: (id: ComponentId) => void;
 }) {
   const isFlag = item.source !== 'safetyOff' && item.source !== 'safetyUnplug' && item.source !== 'base';
-  const canRunFlag = !item.done && isFlag && item.available;
   const canRunPart = !item.done && !isFlag && item.actionPart && item.available;
   return (
     <li
@@ -159,10 +157,12 @@ function ChecklistRow({
           <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{item.hintAr}</p>
         ) : null}
       </div>
-      {canRunFlag ? (
-        <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onFlag(item.source as MachineFlag)}>
-          <Hammer className="h-3 w-3" aria-hidden /> نفّذ
-        </Button>
+      {isFlag && !item.done ? (
+        // (V8) لا زر «نفّذ» — الخطوة تُنفّد فعليًا بالنقر على البرغي/المزلاج/القابس في المشهد
+        <span className="flex items-center gap-1 shrink-0 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary">
+          <MousePointerClick className="h-3 w-3" aria-hidden />
+          انقرها في المشهد
+        </span>
       ) : null}
       {canRunPart ? (
         <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onPart(item.actionPart!)}>
@@ -183,7 +183,6 @@ function InfoPanel() {
   const preparePart = useLabStore((s) => s.preparePart);
   const installPart = useLabStore((s) => s.installPart);
   const repairPart = useLabStore((s) => s.repairPart);
-  const toggleFlag = useLabStore((s) => s.toggleFlag);
   const setIsolated = useLabStore((s) => s.setIsolated);
   const isolated = useLabStore((s) => s.isolated);
 
@@ -273,7 +272,7 @@ function InfoPanel() {
             </p>
             <ul className="space-y-1.5">
               {removalItems.map((item) => (
-                <ChecklistRow key={item.source + item.labelAr} item={item} mode="remove" onFlag={toggleFlag} onPart={detachPart} />
+                <ChecklistRow key={item.source + item.labelAr} item={item} mode="remove" onPart={detachPart} />
               ))}
             </ul>
           </div>
@@ -287,7 +286,7 @@ function InfoPanel() {
             </p>
             <ul className="space-y-1.5">
               {installItems.map((item) => (
-                <ChecklistRow key={item.source + item.labelAr} item={item} mode="install" onFlag={toggleFlag} onPart={installPart} />
+                <ChecklistRow key={item.source + item.labelAr} item={item} mode="install" onPart={installPart} />
               ))}
             </ul>
           </div>
@@ -309,9 +308,11 @@ function InfoPanel() {
                       <p className="font-medium leading-tight">{FLAG_INFO[f].labelAr} — ما زال مفتوحًا</p>
                       <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{FLAG_INFO[f].hintAr}</p>
                     </div>
-                    <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => toggleFlag(f)}>
-                      <Hammer className="h-3 w-3" aria-hidden /> أغلق
-                    </Button>
+                    {/* (V8) الإغلاق بنقرة مباشرة على المزلاج/البرغي داخل المشهد */}
+                    <span className="flex items-center gap-1 shrink-0 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary">
+                      <MousePointerClick className="h-3 w-3" aria-hidden />
+                      انقرة في المشهد
+                    </span>
                   </li>
                 ))}
             </ul>
@@ -927,6 +928,8 @@ export default function LabScreen() {
   const bootStartedAt = useLabStore((s) => s.bootStartedAt);
   const notepad = useLabStore((s) => s.notepad);
   const airflowVisible = useLabStore((s) => s.airflowVisible);
+  const benchTool = useLabStore((s) => s.benchTool);
+  const setBenchTool = useLabStore((s) => s.setBenchTool);
   const toggleXray = useLabStore((s) => s.toggleXray);
   const toggleExploded = useLabStore((s) => s.toggleExploded);
   const setIsolated = useLabStore((s) => s.setIsolated);
@@ -969,7 +972,27 @@ export default function LabScreen() {
       onPeripheral: (kind: string) => {
         const store = useLabStore.getState();
         if (kind === 'monitor-power' || kind === 'monitor') store.toggleMonitor();
+        // (V8) كيبورد/فأرة المكتب الماديان: النقر عليهما يدخل التحكم بالشاشة كفني حقيقي
+        if (kind === 'keyboard' || kind === 'mouse') {
+          sceneRef.current?.setFocusMode(true);
+          toast.info('وضع التحكم بالشاشة — اكتب بلوحة مفاتيحك الحقيقية، Esc للخروج');
+        }
       },
+      // (V8) نقرة مباشرة على برغي/مزلاج/رافعة/قابس/مفتاح PSU — نفس مسار التحقق والسجل
+      onFlagClick: (flag: MachineFlag) => useLabStore.getState().toggleFlag(flag),
+      // (V8) نقر برغي بلا مفك — توجيه لالتقاط الأداة كما في الواقع
+      onToolRequired: () => {
+        if (useLabStore.getState().benchTool !== 'screwdriver') {
+          toast.error('البراغي لا تُفك بالأصابع — التقط المفك: انقر المفك على الطاولة أو زر «المفك» أعلى المشهد (S)');
+        }
+      },
+      // (V8) التقاط الأداة من الطاولة داخل المشهد نفسه
+      onToolPick: () => {
+        useLabStore.getState().setBenchTool('screwdriver');
+        toast.success('أمسكتَ بمفك فيليبس — انقر أي برغي لفكّه، وانقره مجددًا لتثبيته');
+      },
+      // (V8) زر الطاقة الفعلي على واجهة الهيكل — نفس مسار زر التشغيل
+      onPowerButton: () => useLabStore.getState().toggleFlag('powerOn'),
       // إفلات قطعة مسحوبة: التحقق المنطقي أولًا ثم الحركة (توجيه v3 §6)
       onPartDrop: (id: ComponentId, zone: 'tray' | 'case' | null) => {
         const st = useLabStore.getState();
@@ -1158,6 +1181,15 @@ export default function LabScreen() {
         case 'KeyH': // إظهار/إخفاء تلميحات التحكم
           st.setHintsVisible(!st.hintsVisible);
           break;
+        case 'KeyS': // (V8) تبديل أداة المقعد: يد ↔ مفك فيليبس
+          {
+            const next = st.benchTool === 'screwdriver' ? 'hand' : 'screwdriver';
+            st.setBenchTool(next);
+            sceneRef.current?.setActiveTool(next);
+            if (next === 'screwdriver') toast.success('مفك فيليبس بيدك الآن — انقر البراغي لفكّها/تثبيتها');
+            else toast.info('عدت إلى اليد — المزالج والقوابس والأزرار تنفّد بالنقر المباشر');
+          }
+          break;
         case 'KeyM': // (V6-B) تفعيل وضع التحكم بالشاشة
           sceneRef.current?.setFocusMode(true);
           break;
@@ -1257,6 +1289,32 @@ export default function LabScreen() {
           aria-label="أدوات المشهد ثلاثي الأبعاد"
           className="pointer-events-auto flex max-w-full items-center gap-1 overflow-x-auto scrollbar-thin rounded-lg border border-border/60 bg-background/85 p-1 shadow-lg backdrop-blur"
         >
+        {/* (V8) أداة يد الفني — البداية الحقيقية لأي عمل: ماذا بيدك الآن؟ */}
+        <Button
+          size="sm"
+          variant={benchTool === 'hand' ? 'default' : 'ghost'}
+          className="h-7 gap-1 px-2 text-[11px]"
+          onClick={() => {
+            setBenchTool('hand');
+            sceneRef.current?.setActiveTool('hand');
+          }}
+          title="أداة اليد: المزالج والقوابس والقوابس تنفّد بالنقر المباشر (S للتبديل)"
+        >
+          <Hand className="h-3.5 w-3.5" aria-hidden /> يد
+        </Button>
+        <Button
+          size="sm"
+          variant={benchTool === 'screwdriver' ? 'default' : 'ghost'}
+          className="h-7 gap-1 px-2 text-[11px]"
+          onClick={() => {
+            setBenchTool('screwdriver');
+            sceneRef.current?.setActiveTool('screwdriver');
+          }}
+          title="مفك فيليبس #2 — وحده يفك/يثبّت البراغي (S للتبديل) — أو التقط المفك من الطاولة بالنقر عليه"
+        >
+          <Wrench className="h-3.5 w-3.5" aria-hidden /> مفك
+        </Button>
+        <Separator orientation="vertical" className="mx-1 h-5" />
         <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('front')} title="منظور أمامي (1)">
           <View className="h-3.5 w-3.5" aria-hidden /> أمامي
         </Button>
