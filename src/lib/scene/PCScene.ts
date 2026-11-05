@@ -18,7 +18,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
-import { createScreenPainter, type ScreenPainter } from './screenTexture';
+import { createScreenPainter, SCREEN_LOGICAL_H, SCREEN_LOGICAL_W, type ScreenPainter } from './screenTexture';
 import { bootableDevices, computeMonitorView } from '../simulation/monitorEngine';
 import { FanSystem } from './fans';
 import { buildBenchAdditions } from './bench';
@@ -220,6 +220,18 @@ export class PCScene {
   private thermalAccum = 0;
   private fanConditions: import('./fans').FanConditions | null = null; // (إصلاح تدقيق V6) كائن معاد استخدامه — لا تخصيص لكل إطار
   private readonly _screenNdc = new THREE.Vector2();
+  // (v9) مستوى سطح العرض اللانهائي: إدخال الماوس في وضع الشاشة يُحسب على المستوى
+  // نفسه (لا على الشبكة) — المؤشر الافتراضي يلتصق بالحواف بدل أن يتوقف، كشاشة حقيقية
+  private readonly _screenPlane = new THREE.Plane();
+  private readonly _planeHit = new THREE.Vector3();
+  private readonly _planeNormal = new THREE.Vector3();
+  private readonly _planeCenter = new THREE.Vector3();
+  private readonly _localPt = new THREE.Vector3();
+  private readonly _invMat = new THREE.Matrix4();
+  private readonly _screenQuat = new THREE.Quaternion();
+  /** آخر موضع حقيقي للمؤشر (لتزامن المؤشر الافتراضي عند دخول وضع الشاشة) */
+  private lastPointerX = 0;
+  private lastPointerY = 0;
 
   // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
   private damagedOriginals = new Map<THREE.MeshStandardMaterial, SavedEmissive>();
@@ -367,7 +379,8 @@ export class PCScene {
         const canvas = (this.painter.texture as THREE.CanvasTexture).image as HTMLCanvasElement;
         const ctx = canvas?.getContext('2d');
         if (canvas && ctx) {
-          this.vos = new VirtualOS(ctx, canvas.width, canvas.height);
+          // (v9) فضاء VOS المنطقي 1024×576 — يطابق تحويل المقياس الأساسي للكانفس
+          this.vos = new VirtualOS(ctx, SCREEN_LOGICAL_W, SCREEN_LOGICAL_H);
           registerVosApps(this.vos);
           this.wireVosCallbacks();
         }
@@ -513,20 +526,35 @@ export class PCScene {
     this.vos.cursor.visible = on;
     this.controls.enabled = !on;
     if (on) {
+      // (v9) بناء مستوى سطح العرض من تحويله العالمي — مصدر الإدخال خلال الجلسة كلها
+      screen.updateMatrixWorld(true);
+      this._planeNormal.set(0, 0, 1).applyQuaternion(screen.getWorldQuaternion(new THREE.Quaternion())).normalize();
+      this._planeCenter.setFromMatrixPosition(screen.matrixWorld);
+      this._screenPlane.setFromNormalAndCoplanarPoint(this._planeNormal, this._planeCenter);
       // تأطير الشاشة: مسافة تحسب من أبعاد السطح الفعلية وزاوية الرؤية
+      // (v9) هامش 1.18 + إزاحة رأسية 0.3 — الشاشة تظهر أعلى المنتصف بعيدًا عن رصيف الأدوات السفلي
       this.savedCam = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
       const box = new THREE.Box3().setFromObject(screen);
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
-      // عمود السطح = أصغر بُعد — اتجاه الكاميرا من جهة المشاهد (+Z النموذج مُدار بمجموعة الشاشة)
-      const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(screen.getWorldQuaternion(new THREE.Quaternion())).normalize();
       const fov = THREE.MathUtils.degToRad(this.camera.fov);
       const aspect = Math.max(0.4, this.camera.aspect);
       const distW = size.x / 2 / (Math.tan(fov / 2) * aspect);
       const distH = size.y / 2 / Math.tan(fov / 2);
-      const dist = Math.max(distW, distH) * 1.12;
-      this.startCamTween(center.clone().addScaledVector(normal, dist), center.clone(), 0.55);
+      // (v9 ضبط) هامش 1.29 + إزاحة +0.33 أعلى المركز: توجيه الكاميرا أعلى مركز الشاشة
+      // ينزل المشهد في الإطار — أعلى النظام الافتراضي (وشرط عناوين النوافذ) يظهر
+      // تحت الشارة مباشرة ويصبح قابلاً للإمساك بالسحب
+      const dist = Math.max(distW, distH) * 1.29;
+      const camPos = center.clone().addScaledVector(this._planeNormal, dist);
+      camPos.y += 0.33;
+      const aim = center.clone();
+      aim.y += 0.33;
+      this.startCamTween(camPos, aim, 0.55);
       this.renderer.domElement.style.cursor = 'none';
+      // (v9) تزامن المؤشر الافتراضي مع موضع ماوس المستخدم الحقيقي لحظة الدخول
+      const entry = this.screenPlaneHit(this.lastPointerX, this.lastPointerY);
+      if (entry) this.vos.pointer('move', entry.x, entry.y);
+      this.vos.dirty = true;
       this.callbacks.onFocusMode?.(true);
     } else {
       if (this.savedCam) {
@@ -576,6 +604,44 @@ export class PCScene {
     const uv = hits[0].uv!;
     // PlaneGeometry: (0,0) أسفل-يسار — الكانفس: (0,0) أعلى-يسار ⇒ قلب Y فقط
     return { x: uv.x * this.vos.W, y: (1 - uv.y) * this.vos.H };
+  }
+
+  /**
+   * (v9) إدخال وضع الشاشة على مستوى العرض اللانهائي — يقيد الإحداثية داخل الشاشة
+   * بدل أن يتوقف المؤشر عند حدود الشبكة: سحب النوافذ والمؤشر يتصرفان كشاشة حقيقية.
+   * المستوى يُشتق من تحويل الشبكة الحالية في كل نداء — يحمي من استبدال المونيتور
+   * غير المتزامن (glbParts) بعد دخول وضع الشاشة.
+   * يعيد null فقط إذا فشل تقاطع الشعاع مع المستوى (شعاع موازٍ/خلفي).
+   */
+  private screenPlaneHit(clientX: number, clientY: number): { x: number; y: number; inside: boolean } | null {
+    if (!this.vos) return null;
+    const screen = this.visuals.monitor.getObjectByName('monitor-screen');
+    if (!(screen instanceof THREE.Mesh)) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const w = rect.width > 0 ? rect.width : 1;
+    const h = rect.height > 0 ? rect.height : 1;
+    this._screenNdc.set(((clientX - rect.left) / w) * 2 - 1, -((clientY - rect.top) / h) * 2 + 1);
+    this.raycaster.setFromCamera(this._screenNdc, this.camera);
+    // (v9) مستوى طازج من تحويل الشبكة الحالية — يلغي أي حالة قديمة بعد إعادة بناء المونيتور
+    screen.updateMatrixWorld(true);
+    this._planeNormal.set(0, 0, 1).applyQuaternion(screen.getWorldQuaternion(this._screenQuat)).normalize();
+    this._planeCenter.setFromMatrixPosition(screen.matrixWorld);
+    this._screenPlane.setFromNormalAndCoplanarPoint(this._planeNormal, this._planeCenter);
+    const point = this.raycaster.ray.intersectPlane(this._screenPlane, this._planeHit);
+    if (!point) return null;
+    // إلى الفضاء المحلي لسطح الشاشة (مركز الهندسة = أصل محلي للـ PlaneGeometry)
+    this._invMat.copy(screen.matrixWorld).invert();
+    this._localPt.copy(point).applyMatrix4(this._invMat);
+    // (v9 إصلاح) تحويل الوحدات: المحلي بوحدات العالم (±نصف عرض السطح) بينما VOS بالبكسل —
+    // النسبة من أبعاد هندسة PlaneGeometry الفعلية هي الجسر الصحيح بين الفضاءين
+    const params = (screen.geometry as THREE.PlaneGeometry).parameters;
+    const planeW = params?.width ?? (screen.geometry.boundingBox?.max.x ?? 0.5) * 2;
+    const planeH = params?.height ?? (screen.geometry.boundingBox?.max.y ?? 0.5) * 2;
+    const inside = Math.abs(this._localPt.x) <= planeW / 2 && Math.abs(this._localPt.y) <= planeH / 2;
+    // محلي (‑w/2..w/2) → منطقي (0..W) — الارتفاع يُقلب (أسفل الكانفس = ‑h/2 محليًا)
+    const x = THREE.MathUtils.clamp((this._localPt.x / planeW + 0.5) * this.vos.W, 0, this.vos.W - 1);
+    const y = THREE.MathUtils.clamp((0.5 - this._localPt.y / planeH) * this.vos.H, 0, this.vos.H - 1);
+    return { x, y, inside };
   }
 
   /** تقرير منظومة المراوح (للواجهة التعليمية) */
@@ -823,9 +889,10 @@ export class PCScene {
 
     this.controls.update();
 
-    // إعادة رسم نسيج الشاشة الافتراضية: فوري في وضع التحكم بالشاشة، مُقيّد في المختبر
+    // إعادة رسم نسيج الشاشة الافتراضية: (v9) في وضع التحكم بالشاشة ≈30fps للسلاسة،
+    // وفي المختبر مُقيّد لتوفير الموارد
     if (this.painter) {
-      const interval = this.focusMode ? 90 : MONITOR_REDRAW_MS;
+      const interval = this.focusMode ? 30 : MONITOR_REDRAW_MS;
       if (nowMs() - this.lastMonitorDrawAt >= interval) {
         this.drawMonitor(false);
       }
@@ -1080,8 +1147,8 @@ export class PCScene {
         tool.scale.setScalar(s);
         tool.updateMatrixWorld(true);
         const b2 = new THREE.Box3().setFromObject(tool);
-        tool.position.set(-3.1, TRAY.tableTopY - b2.min.y, 3.55);
-        tool.rotation.y = 0.5;
+        tool.position.set(-5.35, TRAY.tableTopY - b2.min.y, 3.7);
+        tool.rotation.y = 0.15;
         tool.name = 'desk-screwdriver';
         // (V8) المفك على الطاولة أداة فعلية: النقر عليه يلتقطه لفك البراغي
         tool.userData['benchTool'] = 'screwdriver';
@@ -1142,10 +1209,10 @@ export class PCScene {
       );
     };
 
-    // طقم مفكات على حافة السجادة اليسرى (طوله الطبيعي ≈ 2.2 وحدة)
-    placeTool('/models/screwdrivers_02/screwdrivers_02_1k.gltf', 'tool-screwdriver-set', 2.2, [-4.0, TRAY.tableTopY, 1.85], 1.25);
-    // كماشات قرب صينية البراغي
-    placeTool('/models/pliers/pliers_1k.gltf', 'tool-pliers', 1.5, [-4.0, TRAY.tableTopY, 2.75], -0.5);
+    // طقم مفكات على حافة المكتب اليسرى — خارج حدود الصينية (v9: لا تداخل مع خانات القطع)
+    placeTool('/models/screwdrivers_02/screwdrivers_02_1k.gltf', 'tool-screwdriver-set', 2.2, [-5.45, TRAY.tableTopY, 1.05], 1.25);
+    // كماشات على الحافة اليسرى كذلك
+    placeTool('/models/pliers/pliers_1k.gltf', 'tool-pliers', 1.5, [-5.5, TRAY.tableTopY, 2.6], -0.5);
     // مصباح مكتب على الطرف الأيمن للمكتب — ذراعه يمتد فوق المكتب المفتوح
     // (بعيدًا عن جسم الجهاز كي لا يحجب النقر على القطع — توجيه v4)
     placeTool('/models/desk_lamp_arm_01/desk_lamp_arm_01_1k.gltf', 'desk-lamp', 4.6, [7.4, 0, 3.1], -2.2, { light: true });
@@ -1554,11 +1621,15 @@ export class PCScene {
     this.pointerDownActive = true;
     this.downX = event.clientX;
     this.downY = event.clientY;
+    this.lastPointerX = event.clientX;
+    this.lastPointerY = event.clientY;
 
-    // (V6-B) وضع التحكم بالشاشة: كل إدخال المؤشر يوجّه إلى النظام الافتراضي
+    // (V6-B + v9) وضع التحكم بالشاشة: إدخال على مستوى العرض + التقاط المؤشر
+    // كي تظل سحبات النوافذ حية حتى خارج حدود اللوحة/المتصفح
     if (this.focusMode && this.vos) {
-      const hit = this.screenHit(event.clientX, event.clientY);
-      if (hit) this.vos.pointer('down', hit.x, hit.y, { button: event.button });
+      try { this.renderer.domElement.setPointerCapture(event.pointerId); } catch { /* آمن */ }
+      const hit = this.screenPlaneHit(event.clientX, event.clientY);
+      if (hit && hit.inside) this.vos.pointer('down', hit.x, hit.y, { button: event.button });
       this.drawMonitor(true);
       return;
     }
@@ -1576,10 +1647,11 @@ export class PCScene {
   private readonly onPointerUp = (event: PointerEvent): void => {
     if (this.blocked) return;
 
-    // (V6-B) توجيه رفع الزر إلى النظام الافتراضي في وضع الشاشة
+    // (V6-B + v9) رفع الزر: مستوى العرض + تحرير الالتقاط + نبضة نقرة على المؤشر الافتراضي
     if (this.focusMode && this.vos) {
-      const hit = this.screenHit(event.clientX, event.clientY);
-      if (hit) this.vos.pointer('up', hit.x, hit.y, { button: event.button });
+      try { this.renderer.domElement.releasePointerCapture(event.pointerId); } catch { /* آمن */ }
+      const hit = this.screenPlaneHit(event.clientX, event.clientY);
+      if (hit && hit.inside) this.vos.pointer('up', hit.x, hit.y, { button: event.button });
       this.drawMonitor(true);
       this.pointerDownActive = false;
       return;
@@ -1638,13 +1710,19 @@ export class PCScene {
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (this.blocked) return;
 
-    // (V6-B) حركة المؤشر الحقيقي → المؤشر الافتراضي داخل الشاشة المجسمة
+    // (V6-B + v9) حركة المؤشر الحقيقي → الافتراضي: مستوى العرض اللانهائي يعني
+    // أن المؤشر يلاحق اليد حتى خارج حدود السطح (يلتصق بالحافة) — سلاسة كاملة
     if (this.focusMode && this.vos) {
-      const hit = this.screenHit(event.clientX, event.clientY);
+      this.lastPointerX = event.clientX;
+      this.lastPointerY = event.clientY;
+      const hit = this.screenPlaneHit(event.clientX, event.clientY);
       if (hit) this.vos.pointer('move', hit.x, hit.y);
       this.drawMonitor(true);
       return;
     }
+
+    this.lastPointerX = event.clientX;
+    this.lastPointerY = event.clientY;
 
     if (this.dragId) {
       this.updateDrag(event.clientX, event.clientY);
@@ -1669,12 +1747,12 @@ export class PCScene {
       : this.activeTool === 'screwdriver' ? 'crosshair' : '';
   };
 
-  /** (V6-B) عجلة الماوس → تمرير داخل النظام الافتراضي في وضع الشاشة */
+  /** (V6-B + v9) عجلة الماوس → تمرير داخل النظام الافتراضي في وضع الشاشة */
   private readonly onWheel = (event: WheelEvent): void => {
     if (this.blocked) return;
     if (!this.focusMode || !this.vos) return;
     event.preventDefault();
-    const hit = this.screenHit(event.clientX, event.clientY);
+    const hit = this.screenPlaneHit(event.clientX, event.clientY);
     if (hit) this.vos.wheel(hit.x, hit.y, event.deltaY);
     this.drawMonitor(true);
   };
@@ -1683,8 +1761,8 @@ export class PCScene {
   private readonly onScreenDbl = (event: MouseEvent): void => {
     if (this.blocked) return;
     if (this.focusMode && this.vos) {
-      const hit = this.screenHit(event.clientX, event.clientY);
-      if (hit) this.vos.pointer('dbl', hit.x, hit.y);
+      const hit = this.screenPlaneHit(event.clientX, event.clientY);
+      if (hit && hit.inside) this.vos.pointer('dbl', hit.x, hit.y);
       this.drawMonitor(true);
       return;
     }
@@ -1697,8 +1775,8 @@ export class PCScene {
     if (this.blocked) return;
     if (!this.focusMode || !this.vos) return;
     event.preventDefault();
-    const hit = this.screenHit(event.clientX, event.clientY);
-    if (hit) this.vos.pointer('right', hit.x, hit.y);
+    const hit = this.screenPlaneHit(event.clientX, event.clientY);
+    if (hit && hit.inside) this.vos.pointer('right', hit.x, hit.y);
     this.drawMonitor(true);
   };
 

@@ -6,6 +6,10 @@
  * إدخال نص حقيقي من حقل الواجهة (توجيه v3 أ.2).
  *
  * الرسم يحدث فقط عند الطلب (dirty) — لا إنشاء كائنات داخل حلقة الرسم عدا النصوص.
+ *
+ * (v9) الدقة: الكانفس الفيزيائي 1280×720 (16:9) بينما فضاء الرسم المنطقي
+ * 1024×576 — تحويل مقياس أساسي 1.25 يجعل كل الإحداثيات القديمة صحيحة
+ * ويُحدّة حدة النص والخطوط. النسبة 16:9 تام تطابق سطح العرض المجسم.
  */
 
 import * as THREE from 'three';
@@ -18,8 +22,15 @@ export interface ScreenPainter {
   dispose(): void;
 }
 
-const W = 1024;
-const H = 576;
+/** فضاء الرسم المنطقي (كل إحداثيات الرسم وVOS بهذه الأبعاد) */
+export const SCREEN_LOGICAL_W = 1024;
+export const SCREEN_LOGICAL_H = 576;
+/** دقة الكانفس الفيزيائية — 16:9 تام مطابق لنسبة سطح العرض المجسم */
+export const SCREEN_PHYS_W = 1280;
+export const SCREEN_PHYS_H = 720;
+
+const W = SCREEN_LOGICAL_W;
+const H = SCREEN_LOGICAL_H;
 
 const BG = '#04070c';
 const PANEL = '#0b1420';
@@ -68,10 +79,13 @@ function drawBiosChrome(ctx: CanvasRenderingContext2D, title: string): void {
 
 export function createScreenPainter(): ScreenPainter | null {
   const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = SCREEN_PHYS_W;
+  canvas.height = SCREEN_PHYS_H;
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
+  // (v9) تحويل المقياس الأساسي: كل الرسم المنطقي 1024×576 يُ rasterized عند 1280×720
+  // — save/restore داخل الرسّام/‏VOS تحافظ على هذا التحويل لأنه خارج أي زوج save/restore
+  ctx.scale(SCREEN_PHYS_W / SCREEN_LOGICAL_W, SCREEN_PHYS_H / SCREEN_LOGICAL_H);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;

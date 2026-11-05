@@ -908,6 +908,8 @@ export default function LabScreen() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneWrapRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<PCScene | null>(null);
+  // (v9) حالة اللوحة الجانبية قبل دخول وضع الشاشة — تُستعاد عند الخروج
+  const panelsHiddenBeforeFocus = useRef(false);
   const [failed, setFailed] = useState(false);
   const [errorAr, setErrorAr] = useState<string>('');
   const [dragMode, setDragMode] = useState(false);
@@ -1003,10 +1005,18 @@ export default function LabScreen() {
         const after = useLabStore.getState().sim;
         sceneRef.current?.syncState(after);
       },
-      // (V6-B) شارة وضع التحكم بالشاشة
+      // (V6-B) شارة وضع التحكم بالشاشة + (v9) إخفاء اللوحة الجانبية تلقائيًا
+      // لإطار الشاشة المجسمة بأكبر مساحة رؤية ممكنة — وتُعاد حالتها عند الخروج
       onFocusMode: (on: boolean) => {
         setFocusModeState(on);
-        useLabStore.getState().setInputMode(on ? 'monitor' : 'lab');
+        const st = useLabStore.getState();
+        st.setInputMode(on ? 'monitor' : 'lab');
+        if (on) {
+          panelsHiddenBeforeFocus.current = st.sidePanelsHidden;
+          if (!st.sidePanelsHidden) st.setSidePanelsHidden(true);
+        } else if (!panelsHiddenBeforeFocus.current && st.sidePanelsHidden) {
+          st.setSidePanelsHidden(false);
+        }
       },
       // (V6 §3) الحرارة المُحاكاة → المتجر (مصدر الحقيقة)
       onThermal: (cpu, gpu) => useLabStore.getState().setThermal(cpu, gpu),
@@ -1452,6 +1462,9 @@ export default function LabScreen() {
       ) : null}
 
       {/* الرصيف السفلي العائم — التشغيل والسلامة ثم الحرارة والمراوح ثم دفتر النظام */}
+      {/* (v9) يُخفى في وضع التحكم بالشاشة: الكتابة تجري مباشرة داخل النظام الافتراضي
+          والرصيف كان يغطي ~30% من الشاشة المجسمة — يعود فور الخروج من الوضع */}
+      {!focusMode ? (
       <div className="pointer-events-none absolute bottom-2 start-2 z-20 max-lg:z-40 flex w-[min(640px,calc(100vw-1rem))] flex-col gap-1.5">
         <div className="pointer-events-auto rounded-lg border border-border/60 bg-background/85 px-2 py-1.5 shadow-lg backdrop-blur">
           <SafetyStrip />
@@ -1507,6 +1520,7 @@ export default function LabScreen() {
           </Button>
         </div>
       </div>
+      ) : null}
 
       {/* اللوحة الجانبية العائمة — محتواها يتبع نمط العمل الحالي فوق المشهد الحيّ نفسه */}
       {/* على الجوال: ورقة سفلية بارتفاع محدود حتى لا تُخفي المشهد كليًا */}

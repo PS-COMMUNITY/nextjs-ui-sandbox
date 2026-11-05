@@ -166,6 +166,11 @@ export class VirtualOS {
   startOpen = false;
   cursor = { x: 640, y: 300, visible: false };
   cursorKind: 'default' | 'pointer' | 'text' = 'default';
+  // (v9) تغذية راجعة بصرية للنقر: انضغاط المؤشر + نبضة دائرية عند موضع الضغط
+  private cursorPressed = false;
+  private clickPulse: { x: number; y: number; at: number } | null = null;
+  /** وقت الإطار الحالي (يُحدّث في render/drawSetupWith — تستخدمه نبضة النقر) */
+  private nowMs = 0;
 
   toasts: Array<{ titleAr: string; bodyAr: string; at: number }> = [];
 
@@ -350,6 +355,7 @@ export class VirtualOS {
 
     if (type === 'down') {
       const hit = f.hit(x, y);
+      this.cursorPressed = true; // (v9) إحساس الضغط على المؤشر الافتراضي
       this.activeId = hit?.id ?? null;
       this.activeStart = { x, y };
       this.downAt = Date.now();
@@ -373,6 +379,8 @@ export class VirtualOS {
     if (type === 'up') {
       const hit = f.hit(x, y);
       const now = Date.now();
+      this.cursorPressed = false; // (v9) انفضاض المؤشر
+      this.clickPulse = { x, y, at: now }; // (v9) نبضة عند موضع الرفع
       if (this.dragWin) {
         // إن لم يتحرك المؤشر فعليًا فهي نقرة عنوان (تركيز فقط)
         const moved = Math.abs(x - this.activeStart.x) + Math.abs(y - this.activeStart.y) > 4;
@@ -490,6 +498,7 @@ export class VirtualOS {
     this.rectCounter = 1;
     const ctx = this.ctx;
     this.blinkAt = now;
+    this.nowMs = now; // (v9) للنبضات الزمنية في drawCursor
 
     ctx.save();
     ctx.clearRect(0, 0, this.W, this.H);
@@ -518,6 +527,7 @@ export class VirtualOS {
     this.validateFocus(); // (إصلاح B2)
     this.frame = new UiFrame();
     this.rectCounter = 1; // (إصلاح تدقيق V6) نفس سبب render() — معرّفات مستقرة بين الإطارات
+    this.nowMs = now; // (v9) للنبضات الزمنية في drawCursor
     const ctx = this.ctx;
     ctx.save();
     ctx.clearRect(0, 0, this.W, this.H);
@@ -910,11 +920,31 @@ export class VirtualOS {
   private drawCursor(ctx: CanvasRenderingContext2D): void {
     if (!this.cursor.visible) return;
     const { x, y } = this.cursor;
+    // (v9) نبضة النقر: دائرة تتمدد وتتلاشى خلال 280ms عند آخر نقرة
+    if (this.clickPulse) {
+      const age = this.nowMs - this.clickPulse.at;
+      if (age >= 0 && age < 280) {
+        const t = age / 280;
+        ctx.beginPath();
+        ctx.arc(this.clickPulse.x, this.clickPulse.y, 6 + t * 22, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(57,199,184,${(0.75 * (1 - t)).toFixed(3)})`;
+        ctx.lineWidth = 2.5 * (1 - t) + 0.6;
+        ctx.stroke();
+      } else {
+        this.clickPulse = null;
+      }
+    }
     if (this.cursorKind === 'text') {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(x - 1, y - 9, 2, 18);
       return;
     }
+    // (v9) المؤشر ينكمش قليلًا أثناء الضغط — إحساس ملموس كأنظمة التشغيل الحقيقية
+    const s = this.cursorPressed ? 0.88 : 1;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.translate(-x, -y);
     ctx.fillStyle = this.cursorKind === 'pointer' ? OS_COLORS.accent : '#ffffff';
     ctx.strokeStyle = '#000000';
     ctx.lineWidth = 1.2;
@@ -929,6 +959,7 @@ export class VirtualOS {
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+    ctx.restore();
   }
 
   // ============ برنامج UEFI الثابت (شاشة كاملة تفاعلية) ============
