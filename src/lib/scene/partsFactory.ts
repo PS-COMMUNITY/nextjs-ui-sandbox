@@ -10,7 +10,7 @@
  *  - الخامات: خرائط إجرائية من textures.ts (PCB، معدن مصقول، شبك تهوية، ملصقات عامة).
  *
  * المصدَّرات: setComponentId / buildEnvironment / buildAllParts
- * المخرجات المرجعية: 6 spinners (شفرات مراوح) و~40 مرجع flags.
+ * المخرجات المرجعية: مراوح مسماة (rotors) لمنظومة V6 و~40 مرجع flags.
  */
 import * as THREE from 'three';
 import type { ComponentId } from '../types';
@@ -872,7 +872,7 @@ function buildCpu(): THREE.Group {
 // المبرّد البرجي (dynamic.cooler) — يبرز نحو -X من المقبس
 // ============================================================
 
-function buildCooler(spinners: THREE.Object3D[]): THREE.Group {
+function buildCooler(): THREE.Group {
   scope('cooler');
   const g = new THREE.Group();
   g.name = 'part-cooler';
@@ -927,7 +927,9 @@ function buildCooler(spinners: THREE.Object3D[]): THREE.Group {
   wrapper.rotation.z = Math.PI / 2;
   const fan = makeFan(0.25);
   wrapper.add(fan.frame, fan.blades);
-  spinners.push(fan.blades);
+  // (إصلاح تدقيق V6) تسمية الـRotor + محور الدوران المحلي — مرجع منظومة المراوح عند غياب GLB
+  fan.blades.name = 'cooler_fan_rotor';
+  fan.blades.userData.spinAxis = 'y'; // الريش الإجرائي يدور حول Y المحلي للغلاف
   g.add(wrapper);
   g.add(box(0.015, 0.03, 0.6, mat(COLORS.metalMid, 0.6, 0.4), -0.38, 0.385, 0, false));
   g.add(box(0.015, 0.03, 0.6, mat(COLORS.metalMid, 0.6, 0.4), -0.38, -0.385, 0, false));
@@ -980,7 +982,7 @@ function buildRam(): THREE.Group {
 // بطاقة الرسوميات (dynamic.gpu) — أفقية، PCB عند مستوى فتحة x16
 // ============================================================
 
-function buildGpu(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group {
+function buildGpu(flags: FlagVisuals): THREE.Group {
   scope('gpu');
   const g = new THREE.Group();
   g.name = 'part-gpu';
@@ -1017,6 +1019,7 @@ function buildGpu(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group {
 
   // حلقتا غورز حول المراوح + مروحتان (تنظران للأسفل — محور Y)
   const ringMat = mat(0x151b22, 0.4, 0.55);
+  let fanIdx = 0;
   for (const fz of [-0.55, 0.55]) {
     const ring = new THREE.Mesh(new THREE.TorusGeometry(0.295, 0.014, 6, 28), ringMat);
     ring.rotation.x = Math.PI / 2;
@@ -1026,7 +1029,9 @@ function buildGpu(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group {
     wrapper.position.set(0, -0.55, fz);
     const fan = makeFan(0.28);
     wrapper.add(fan.frame, fan.blades);
-    spinners.push(fan.blades);
+    // (إصلاح تدقيق V6) تسمية ريش البطاقة للنسخة الاحتياطية الإجرائية
+    fan.blades.name = `gpu_fan_rotor_${++fanIdx}`;
+    fan.blades.userData.spinAxis = 'y';
     g.add(wrapper);
   }
 
@@ -1117,6 +1122,16 @@ function buildPsu(flags: FlagVisuals): THREE.Group {
     }
   }
 
+  // (إصلاح تدقيق V6) ريش مروحة المزود في النسخة الإجرائية — كانت شبكة ساكنة فقط
+  // فتغيب المروحة من منظومة المراوح عند غياب GLB. الريش الأصلي يدور حول Y المحلي = Y العالمي (مروحة علوية مسطحة)
+  const psuFan = makeFan(0.4);
+  psuFan.blades.name = 'psu_fan_rotor';
+  psuFan.blades.userData.spinAxis = 'y';
+  const psuFanWrap = new THREE.Group();
+  psuFanWrap.position.set(0, 0.3, 0.1);
+  psuFanWrap.add(psuFan.frame, psuFan.blades);
+  g.add(psuFanWrap);
+
   // 4 براغي الخلف (تبقى مع مزود الطاقة) — على السطح البعيد الجديد
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
@@ -1167,15 +1182,16 @@ function buildSsd(): THREE.Group {
 // مراوح الهيكل (dynamic.fans) — أماميتان + خلفية علوية
 // ============================================================
 
-function buildFans(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group {
+function buildFans(flags: FlagVisuals): THREE.Group {
   scope('fans');
   const g = new THREE.Group();
   g.name = 'part-fans';
   const mount = MOUNTS.fans;
-  const defs: Array<{ pos: readonly [number, number, number]; rotX: number }> = [
-    { pos: [1.05, 2.9, 4.42], rotX: Math.PI / 2 },  // أمامية علوية (محور Z)
-    { pos: [1.05, 1.5, 4.42], rotX: Math.PI / 2 },  // أمامية سفلية
-    { pos: [1.05, 3.9, 0.33], rotX: -Math.PI / 2 }, // خلفية علوية (مزاحة عن الجدار — لا اختراق)
+  // (إصلاح تدقيق V6) المواضع موحّدة مع مسار GLB (كانت تختلف 0.1–0.2 بين المسارين)
+  const defs: Array<{ pos: readonly [number, number, number]; rotX: number; rotor: string }> = [
+    { pos: [1.05, 2.8, 4.42], rotX: Math.PI / 2, rotor: 'fan_rotor_front-1' },   // أمامية علوية
+    { pos: [1.05, 1.4, 4.42], rotX: Math.PI / 2, rotor: 'fan_rotor_front-2' },   // أمامية سفلية
+    { pos: [1.05, 3.7, 0.33], rotX: -Math.PI / 2, rotor: 'fan_rotor_rear' },     // خلفية علوية (طرد)
   ];
   for (const d of defs) {
     const wrapper = new THREE.Group();
@@ -1183,7 +1199,9 @@ function buildFans(flags: FlagVisuals, spinners: THREE.Object3D[]): THREE.Group 
     wrapper.rotation.x = d.rotX; // محور الدوران Y المحلي → Z عالمي
     const fan = makeFan(0.42);
     wrapper.add(fan.frame, fan.blades);
-    spinners.push(fan.blades);
+    // (إصلاح تدقيق V6) تسمية ريش مراوح الهيكل — كانت بلا أسماء فتتعطل المراوح عند غياب GLB
+    fan.blades.name = d.rotor;
+    fan.blades.userData.spinAxis = 'y';
     // 4 براغي زوايا لكل مروحة (على المحور المحلي Y = محور المروحة)
     const half = 0.42 * 1.32;
     const sy = 0.42 * 0.5 / 2 + 0.015;
@@ -1458,12 +1476,11 @@ function buildSataPower(): THREE.Group {
 // ليست قطع PC — تُنقر عبر callbacks.onPeripheral
 // ============================================================
 
-function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
+function buildMonitor(): THREE.Group {
   scope('monitor');
   const g = new THREE.Group();
   g.name = 'periph-monitor';
   g.userData['peripheral'] = 'monitor';
-  void spinners;
 
   const standMat = mat(0x2a323c, 0.6, 0.42, { map: brushedTexture('#39434e') });
   const bezelMat = mat(0x14181e, 0.45, 0.5, { map: brushedTexture('#1b2027') });
@@ -1551,54 +1568,6 @@ function buildMonitor(spinners: THREE.Object3D[]): THREE.Group {
 }
 
 // ============================================================
-// أسهم اتجاه تدفق الهواء (تُظهر/تُخفى عبر setAirflow)
-// ============================================================
-
-function makeArrow(len: number, matArrow: THREE.Material): THREE.Group {
-  const g = new THREE.Group();
-  const shaft = cyl(0.045, len - 0.16, matArrow, 'z', 0, 0, 0, false);
-  g.add(shaft);
-  const head = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.18, 10), matArrow);
-  head.rotation.x = -Math.PI / 2; // رأس نحو -Z
-  head.position.z = -(len - 0.16) / 2 - 0.09;
-  g.add(head);
-  return g;
-}
-
-function buildAirflow(): THREE.Group {
-  scope('airflow');
-  const g = new THREE.Group();
-  g.name = 'airflow-arrows';
-  g.visible = false;
-  const matArrow = mat(0x22d3ee, 0.2, 0.5, { emissive: 0x22d3ee, emissiveIntensity: 0.55, transparent: true, opacity: 0.85 });
-
-  // دخول من الأمام (+Z → داخل الهيكل): سهمان عند مستوى المراوح الأمامية
-  for (const y of [1.5, 2.9]) {
-    const a = makeArrow(1.1, matArrow);
-    a.position.set(1.05, y, 5.15);
-    g.add(a);
-  }
-  // خروج من الخلف (نحو -Z خارج الهيكل)
-  for (const y of [2.2, 3.9]) {
-    const a = makeArrow(1.0, matArrow);
-    a.position.set(1.05, y, 0.05);
-    g.add(a);
-  }
-  // سهم داخل مروحة المعالج: من الأمام نحو المبرد
-  const cpu = makeArrow(0.8, matArrow);
-  cpu.position.set(1.05, 3.45, 1.85);
-  cpu.rotation.y = Math.PI / 2; // يتجه نحو -X (داخل نحو المبرد)
-  g.add(cpu);
-  // خروج مزود الطاقة لأسفل-خلف
-  const psu = makeArrow(0.7, matArrow);
-  psu.rotation.x = Math.PI / 2; // رأس نحو +Y؟ لا: نريد نزولًا → اقلبه
-  psu.rotation.x = -Math.PI / 2; // رأس نحو -Y (داخل نحو الأسفل عند PSU)
-  psu.position.set(1.05, 0.85, 0.72);
-  g.add(psu);
-  return g;
-}
-
-// ============================================================
 // التجميع النهائي
 // ============================================================
 
@@ -1612,28 +1581,26 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
     fanScrews: [],
     moboScrews: [],
   };
-  const spinners: THREE.Object3D[] = [];
 
   // بناء الأجزاء
   const caseShell = buildCaseShell(flags);
   const sidePanel = buildSidePanel();
   const motherboard = buildMotherboard(flags);
   const cpu = buildCpu();
-  const cooler = buildCooler(spinners);
+  const cooler = buildCooler();
   const ram = buildRam();
-  const gpu = buildGpu(flags, spinners);
+  const gpu = buildGpu(flags);
   const psu = buildPsu(flags);
   const ssd = buildSsd();
   const hdd = buildHdd();
-  const fans = buildFans(flags, spinners);
+  const fans = buildFans(flags);
   const atx24 = buildAtx24();
   const eps = buildEps();
   const gpuPower = buildGpuPower();
   const sataData = buildSataData();
   const sataPower = buildSataPower();
   const trayTable = buildTrayTable();
-  const monitor = buildMonitor(spinners);
-  const airflow = buildAirflow();
+  const monitor = buildMonitor();
 
   // مواضع التثبيت الابتدائية (المدير يعيد تموضعها عند الفك/التفجير)
   const place = (grp: THREE.Group, id: ComponentId): void => {
@@ -1672,7 +1639,6 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
   root.add(caseShell, sidePanel, trayTable, caseAnchor);
   root.add(motherboard, cpu, cooler, ram, gpu, psu, ssd, hdd, fans, atx24, eps, gpuPower, sataData, sataPower);
   root.add(monitor); // لا كيبورد ولا ماوس — توجيه v3 أ.1
-  root.add(airflow);
   root.add(deskMat);
 
   const dynamic: Record<ComponentId, THREE.Group> = {
@@ -1693,7 +1659,7 @@ export function buildAllParts(quality: SceneQuality): PartVisuals {
     sataPower,
   };
 
-  const visualResult: PartVisuals = { root, dynamic, caseShell, sidePanel, flags, spinners, monitor, airflow };
+  const visualResult: PartVisuals = { root, dynamic, caseShell, sidePanel, flags, monitor };
 
   // (V5) استبدال المجسمات الإجرائية بالنماذج الحقيقية (GLB مُحمّلة مسبقًا قبل إنشاء المشهد).
   // الفشل الفردي يُبقي المجسم الإجرائي في مكانه — لا مشهد مكسور أبدًا.

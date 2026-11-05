@@ -8,9 +8,10 @@
  * وتعيد ما يمنع الانتقال إن وُجد — بلا أي تعديل جانبي.
  */
 
-import { COMPONENT_IDS, isInstalled } from '../types';
-import type { SimulationState } from '../types';
+import { COMPONENT_IDS, isInstalled, SECURE_FLAGS } from '../types';
+import type { ComponentId, MachineFlag, SimulationState } from '../types';
 import { FAULTS } from '../data/faults';
+import { FLAG_INFO } from './machineFlags';
 import { runPost } from './postEngine';
 
 export { getFault } from '../data/faults';
@@ -80,16 +81,16 @@ export const TECH_TOOLS: { id: string; nameAr: string; correct: boolean; whyAr: 
 ];
 
 // ============ الفرضيات (مرحلة خطة التشخيص — وضع تقييم بلا إفصاح) ============
-/** 14 فرضية حقيقية (من الأعطال) + 3 مشتتات تعليمية */
+/** 16 فرضية حقيقية (من الأعطال F01–F16) + 3 مشتتات تعليمية (H17–H19) */
 export const TECH_HYPOTHESES: { id: string; textAr: string; faultId: string | null }[] = [
   ...FAULTS.map((f, i): { id: string; textAr: string; faultId: string | null } => ({
     id: `H${String(i + 1).padStart(2, '0')}`,
     textAr: f.hypothesisAr,
     faultId: f.id,
   })),
-  { id: 'H15', textAr: 'بطارية CMOS فارغة ففقدت إعدادات BIOS — يظهر التاريخ القديم في كل تشغيل.', faultId: null },
-  { id: 'H16', textAr: 'تعريف كرت الشاشة تالف بعد تحديث — يفشل النظام بعد دخوله وليس قبله.', faultId: null },
-  { id: 'H17', textAr: 'قطاعات تالفة متعددة على القرص تكشفها قراءة SMART — بطء قبل الانهيار.', faultId: null },
+  { id: 'H17', textAr: 'بطارية CMOS فارغة ففقدت إعدادات BIOS — يظهر التاريخ القديم في كل تشغيل.', faultId: null },
+  { id: 'H18', textAr: 'تعريف كرت الشاشة تالف بعد تحديث — يفشل النظام بعد دخوله وليس قبله.', faultId: null },
+  { id: 'H19', textAr: 'قطاعات تالفة متعددة على القرص تكشفها قراءة SMART — بطء قبل الانهيار.', faultId: null },
 ];
 
 export function getHypothesis(id: string | null) {
@@ -185,12 +186,16 @@ export function stageGate(stage: TechStage, session: TechSession, sim: Simulatio
       if (missing) blockers.push('قطعة ما زالت في صينية القطع — أعد تركيبها');
       if (sim.flags.panelOpen) blockers.push('الغطاء الجانبي مفتوح — أغلقه');
       if (blockers.length === 0) {
-        const unfinished = COMPONENT_IDS.find((id) => id === 'gpu' && (sim.flags.pcieLatchOpen || sim.flags.gpuScrewsOut));
-        if (unfinished) blockers.push('مزلاج/براغي بطاقة الرسوميات مفتوحة — أغلقها');
-        const ramOpen = sim.flags.ramClipsOpen;
-        if (ramOpen) blockers.push('مزالج الذاكرة مفتوحة — اضغطها لتثبيت الوحدة');
-        const lever = sim.flags.cpuLeverOpen;
-        if (lever) blockers.push('رافعة مقبس المعالج مفتوحة — اخفضها');
+        // (إصلاح تدقيق V6) فحص كل مثبتات القطع — كان يفحص gpu/ram/cpu فقط ويتجاهل
+        // براغي PSU/المراوح/اللوحة/قرص M.2 (SECURE_FLAGS الكاملة)
+        const openEntry = (Object.entries(SECURE_FLAGS) as Array<[ComponentId, MachineFlag[]]>).find(
+          ([, flags]) => flags.some((f) => sim.flags[f]),
+        );
+        if (openEntry) {
+          const openFlag = openEntry[1].find((f) => sim.flags[f]);
+          const label = openFlag ? FLAG_INFO[openFlag]?.labelAr ?? openFlag : 'مثبتات القطع';
+          blockers.push(`${label} — أغلق كل مزالج وبراغي القطع المفكوكة`);
+        }
       }
       return blockers.length === 0
         ? pass('التجميعة مكتملة ومؤمّنة — جرّب التشغيل الآن.')

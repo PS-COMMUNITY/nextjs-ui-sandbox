@@ -305,6 +305,8 @@ export default function ReportsScreen() {
             </div>
           ) : (
             <ScrollArea className="max-h-96 rounded-lg border">
+              {/* (إصلاح تدقيق V6) تمرير أفقي للجدول الواسع على الشاشات الضيقة */}
+              <div className="min-w-[640px]">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-muted/50">
@@ -347,6 +349,7 @@ export default function ReportsScreen() {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </ScrollArea>
           )}
         </CardContent>

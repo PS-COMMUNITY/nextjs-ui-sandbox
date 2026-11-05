@@ -1,0 +1,993 @@
+     1→/**
+     2→ * apps.ts — تطبيقات النظام الافتراضي (V6-C): مستكشف ملفات، مفكرة، موجه أوامر
+     3→ * Sandbox، إدارة الأجهزة، إدارة الأقراص، الإعدادات، إدارة المهام.
+     4→ * ============================================================================
+     5→ * كل تطبيق يرسم نفسه بإحداثيات محلية (0,0 = أعلى يسار محتوى النافذة) ويسجّل
+     6→ * مستطيلات تفاعله عبر os.addRect — لا DOM ولا HTML ولا eval (توجيه §4.4).
+     7→ * قراءة/كتابة حالة الجهاز تمر من المتجر فقط (مصدر الحقيقة الواحد — توجيه §7).
+     8→ */
+     9→import { useLabStore } from '../store/labStore';
+    10→import { isInstalled } from '../types';
+    11→import type { ComponentId, VirtualDisk, VirtualPartition } from '../types';
+    12→import { OS_COLORS, roundRect, type VosAppDef, type VirtualOS, type VosKeyEvent, type VosWindow } from './vos';
+    13→
+    14→// ============ أدوات مشتركة ============
+    15→
+    16→function btn(
+    17→  os: VirtualOS, ctx: CanvasRenderingContext2D,
+    18→  x: number, y: number, w: number, h: number, label: string,
+    19→  onClick: () => void,
+    20→  opts: { color?: string; fg?: string; disabled?: boolean; small?: boolean } = {},
+    21→): void {
+    22→  const hovered = !opts.disabled && os.hoverAt(x, y, w, h);
+    23→  ctx.fillStyle = opts.disabled ? '#222b35' : hovered ? (opts.color ?? OS_COLORS.accent) : 'rgba(255,255,255,0.09)';
+    24→  roundRect(ctx, x, y, w, h, 6);
+    25→  ctx.fill();
+    26→  ctx.strokeStyle = opts.disabled ? '#2a3440' : hovered ? 'rgba(255,255,255,0.35)' : OS_COLORS.winBorder;
+    27→  roundRect(ctx, x, y, w, h, 6);
+    28→  ctx.stroke();
+    29→  ctx.fillStyle = opts.disabled ? '#5a6774' : (opts.fg ?? (hovered ? '#06231f' : OS_COLORS.text));
+    30→  ctx.font = opts.small ? '12px sans-serif' : 'bold 13px sans-serif';
+    31→  ctx.textAlign = 'center';
+    32→  ctx.fillText(label, x + w / 2, y + h / 2 + 4.5);
+    33→  ctx.textAlign = 'left';
+    34→  if (!opts.disabled) {
+    35→    os.addRect('button', x, y, w, h, { onClick }, 'pointer');
+    36→  }
+    37→}
+    38→
+    39→interface TextboxState { text: string; }
+    40→
+    41→function textbox(
+    42→  os: VirtualOS, ctx: CanvasRenderingContext2D,
+    43→  x: number, y: number, w: number, h: number,
+    44→  state: TextboxState,
+    45→  opts: { mono?: boolean; onEnter?: () => void; placeholder?: string; autoFocus?: boolean } = {},
+    46→): void {
+    47→  const focused = os.focusedTextbox?.get === (() => state.text);
+    48→  const hovered = os.hoverAt(x, y, w, h);
+    49→  ctx.fillStyle = OS_COLORS.inputBg;
+    50→  roundRect(ctx, x, y, w, h, 6);
+    51→  ctx.fill();
+    52→  ctx.strokeStyle = focused ? OS_COLORS.accent : hovered ? '#3d4c5c' : OS_COLORS.winBorder;
+    53→  roundRect(ctx, x, y, w, h, 6);
+    54→  ctx.stroke();
+    55→  ctx.save();
+    56→  ctx.beginPath();
+    57→  roundRect(ctx, x + 2, y + 2, w - 4, h - 4, 5);
+    58→  ctx.clip();
+    59→  ctx.fillStyle = OS_COLORS.text;
+    60→  ctx.font = opts.mono ? '13px monospace' : '13.5px sans-serif';
+    61→  const show = state.text || (opts.placeholder && !focused ? opts.placeholder : '');
+    62→  if (show) ctx.fillText(show, x + 10, y + h / 2 + 4.5);
+    63→  if (focused && os.blink) {
+    64→    const tw = ctx.measureText(state.text).width;
+    65→    ctx.fillStyle = OS_COLORS.accent;
+    66→    ctx.fillRect(x + 10 + tw + 1, y + 6, 2, h - 12);
+    67→  }
+    68→  ctx.restore();
+    69→  const focus = (): void => {
+    70→    os.focusedTextbox = {
+    71→      get: () => state.text,
+    72→      set: (t) => { state.text = t; },
+    73→      onEnter: opts.onEnter,
+    74→    };
+    75→    os.dirty = true;
+    76→  };
+    77→  os.addRect('custom', x, y, w, h, { onClick: focus }, 'text');
+    78→  if (opts.autoFocus && !os.focusedTextbox) focus();
+    79→}
+    80→
+    81→function panelHeader(ctx: CanvasRenderingContext2D, w: number, titleAr: string, subAr?: string): number {
+    82→  ctx.fillStyle = OS_COLORS.text;
+    83→  ctx.font = 'bold 15px sans-serif';
+    84→  ctx.fillText(titleAr, 14, 24);
+    85→  if (subAr) {
+    86→    ctx.fillStyle = OS_COLORS.dim;
+    87→    ctx.font = '12px sans-serif';
+    88→    ctx.fillText(subAr, 14, 42);
+    89→  }
+    90→  ctx.strokeStyle = OS_COLORS.winBorder;
+    91→  ctx.beginPath();
+    92→  ctx.moveTo(0, 52.5);
+    93→  ctx.lineTo(w, 52.5);
+    94→  ctx.stroke();
+    95→  return 64;
+    96→}
+    97→
+    98→// ============ نظام الملفات الافتراضي ============
+    99→
+   100→export interface FsNode {
+   101→  name: string;
+   102→  kind: 'folder' | 'txt' | 'log';
+   103→  children?: FsNode[];
+   104→  content?: string;
+   105→}
+   106→
+   107→function seedFs(): FsNode {
+   108→  return {
+   109→    name: 'C:',
+   110→    kind: 'folder',
+   111→    children: [
+   112→      { name: 'Windows', kind: 'folder', children: [{ name: 'System32', kind: 'folder', children: [{ name: 'drivers.log', kind: 'log', content: '[00:01] boot start ok\n[00:02] display driver: basic\n[00:03] storage ok' }] }] },
+   113→      { name: 'Program Files', kind: 'folder', children: [{ name: 'PC Lab Tools', kind: 'folder', children: [] }] },
+   114→      {
+   115→        name: 'Users', kind: 'folder',
+   116→        children: [{
+   117→          name: 'Student', kind: 'folder',
+   118→          children: [
+   119→            {
+   120→              name: 'Documents', kind: 'folder',
+   121→              children: [
+   122→                { name: 'readme.txt', kind: 'txt', content: 'مرحبًا بك في PC Lab OS.\nهذا ملف نصي حقيقي قابل للتعديل داخل المحاكاة:\nاكتب به من لوحة المفاتيح الحقيقية ثم احفظه من قائمة ملف.' },
+   123→                { name: 'notes.txt', kind: 'txt', content: 'ملاحظات التدريب:\n- POST != إقلاع\n- افصل الطاقة قبل أي عمل داخلي\n- المسامير في الصينية لا على الأرض :)' },
+   124→              ],
+   125→            },
+   126→            { name: 'Desktop', kind: 'folder', children: [] },
+   127→            { name: 'Downloads', kind: 'folder', children: [] },
+   128→          ],
+   129→        }],
+   130→      },
+   131→    ],
+   132→  };
+   133→}
+   134→
+   135→function fsGet(root: FsNode, path: string[]): FsNode | null {
+   136→  let cur: FsNode = root;
+   137→  for (const seg of path) {
+   138→    const next = cur.children?.find((c) => c.name === seg);
+   139→    if (!next) return null;
+   140→    cur = next;
+   141→  }
+   142→  return cur;
+   143→}
+   144→
+   145→// ============ 1) مستكشف الملفات ============
+   146→
+   147→const explorerApp: VosAppDef = {
+   148→  id: 'explorer',
+   149→  titleAr: 'مستكشف الملفات',
+   150→  iconColor: '#d9a03f',
+   151→  iconGlyph: '🗂',
+   152→  defaultW: 560,
+   153→  defaultH: 380,
+   154→  desktop: true,
+   155→  render: (os, win, ctx) => {
+   156→    if (!win) return;
+   157→    const w = win.maximized ? os.W : win.w;
+   158→    const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
+   159→    if (!win.state['fs']) win.state['fs'] = seedFs();
+   160→    if (!win.state['path']) win.state['path'] = ['Users', 'Student', 'Documents'];
+   161→    const fs = win.state['fs'] as FsNode;
+   162→    const path = win.state['path'] as string[];
+   163→    const sel = win.state['sel'] as string | null;
+   164→
+   165→    const top = panelHeader(ctx, w, 'مستكشف الملفات — القرص C:', 'محاكاة تعليمية: ملفات وهمية داخل Sandbox');
+   166→    // شريط المسار + زر أعلى
+   167→    btn(os, ctx, 14, top, 64, 26, '⬆ أعلى', () => { if (path.length) { path.pop(); win.state['sel'] = null; os.dirty = true; } }, { small: true });
+   168→    ctx.fillStyle = OS_COLORS.inputBg;
+   169→    roundRect(ctx, 86, top, w - 100, 26, 6);
+   170→    ctx.fill();
+   171→    ctx.strokeStyle = OS_COLORS.winBorder;
+   172→    roundRect(ctx, 86, top, w - 100, 26, 6);
+   173→    ctx.stroke();
+   174→    ctx.fillStyle = OS_COLORS.text;
+   175→    ctx.font = '12.5px monospace';
+   176→    ctx.fillText('C:\\' + path.join('\\'), 96, top + 18);
+   177→
+   178→    // قائمة العناصر
+   179→    const node = fsGet(fs, path);
+   180→    const listY = top + 38;
+   181→    if (!node) {
+   182→      ctx.fillStyle = OS_COLORS.dim;
+   183→      ctx.fillText('المسار غير موجود', 20, listY + 20);
+   184→      return;
+   185→    }
+   186→    const items = node.children ?? [];
+   187→    const rowH = 30;
+   188→    let iy = listY + 8;
+   189→    for (const item of items) {
+   190→      const hovered = os.hoverAt(10, iy, w - 20, rowH);
+   191→      if (sel === item.name || hovered) {
+   192→        ctx.fillStyle = sel === item.name ? OS_COLORS.rowSelect : OS_COLORS.rowHover;
+   193→        roundRect(ctx, 10, iy, w - 20, rowH, 5);
+   194→        ctx.fill();
+   195→      }
+   196→      ctx.font = '14px sans-serif';
+   197→      ctx.fillStyle = item.kind === 'folder' ? '#e2b355' : '#9fd6c8';
+   198→      ctx.fillText(item.kind === 'folder' ? '📁' : '📄', 20, iy + 20);
+   199→      ctx.fillStyle = OS_COLORS.text;
+   200→      ctx.fillText(item.name, 46, iy + 20);
+   201→      ctx.fillStyle = OS_COLORS.dim;
+   202→      ctx.font = '11.5px sans-serif';
+   203→      ctx.fillText(item.kind === 'folder' ? 'مجلد' : item.kind === 'log' ? 'سجل' : 'ملف نصي', w - 90, iy + 20);
+   204→      const captured = item;
+   205→      os.addRect('row', 10, iy, w - 20, rowH, {
+   206→        onClick: () => { win.state['sel'] = captured.name; os.dirty = true; },
+   207→        onDbl: () => {
+   208→          if (captured.kind === 'folder') { path.push(captured.name); win.state['sel'] = null; os.dirty = true; }
+   209→          else {
+   210→            const n = os.openApp('notepad', { fileName: captured.name, content: captured.content ?? '', path: [...path] });
+   211→            if (n) n.titleAr = `${captured.name} — المفكرة`;
+   212→          }
+   213→        },
+   214→      });
+   215→      iy += rowH;
+   216→    }
+   217→    if (items.length === 0) {
+   218→      ctx.fillStyle = OS_COLORS.dim;
+   219→      ctx.fillText('المجلد فارغ', 20, listY + 24);
+   220→    }
+   221→    if (iy > h) {
+   222→      // منطقة تمرير بسيطة: العجلة تعيد التمرير عبر onScroll على القائمة كلها
+   223→      os.addRect('scroll', 10, listY, w - 20, h - listY, { onScroll: () => { /* القائمة قصيرة في هذا النطاق التعليمي */ } }, 'default', 1);
+   224→    }
+   225→  },
+   226→};
+   227→
+   228→// ============ 2) المفكرة ============
+   229→
+   230→const notepadApp: VosAppDef = {
+   231→  id: 'notepad',
+   232→  titleAr: 'المفكرة',
+   233→  iconColor: '#5f9fd9',
+   234→  iconGlyph: '📝',
+   235→  defaultW: 540,
+   236→  defaultH: 360,
+   237→  desktop: true,
+   238→  render: (os, win, ctx) => {
+   239→    if (!win) return;
+   240→    const w = win.maximized ? os.W : win.w;
+   241→    const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
+   242→    if (typeof win.state['text'] !== 'string') {
+   243→      win.state['text'] = (win.state['content'] as string) ?? '';
+   244→      win.state['saved'] = (win.state['content'] as string) ?? '';
+   245→    }
+   246→    const st = win.state as { text: string; saved: string };
+   247→    const top = panelHeader(ctx, w, 'المفكرة — الكتابة بلوحة المفاتيح الحقيقية', 'ملف: حفظ يكتب في Documents — Enter/Backspace/الأسهم تعمل داخل الشاشة المجسمة');
+   248→
+   249→    btn(os, ctx, 14, top, 84, 26, 'حفظ في Documents', () => {
+   250→      const store = useLabStore.getState();
+   251→      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+   252→      const docs = fsGet(fsRoot, ['Users', 'Student', 'Documents']);
+   253→      const name = (win.state['fileName'] as string) ?? `note-${Date.now() % 10000}.txt`;
+   254→      if (docs) {
+   255→        const existing = docs.children?.find((c) => c.name === name);
+   256→        if (existing) existing.content = st.text;
+   257→        else docs.children?.push({ name, kind: 'txt', content: st.text });
+   258→      }
+   259→      if (win.state['fs']) win.state['fs'] = fsRoot;
+   260→      st.saved = st.text;
+   261→      os.notify('تم الحفظ', `الحفظ تعليمي داخل المحاكاة: Documents\\${name}`);
+   262→    }, { small: true });
+   263→    btn(os, ctx, 106, top, 56, 26, 'جديد', () => { st.text = ''; os.focusedTextbox = null; os.dirty = true; }, { small: true });
+   264→    btn(os, ctx, 170, top, 56, 26, 'مسح', () => { st.text = ''; os.dirty = true; }, { small: true });
+   265→
+   266→    // منطقة النص متعددة الأسطر
+   267→    const ty = top + 38;
+   268→    const th = h - ty - 26;
+   269→    ctx.fillStyle = OS_COLORS.inputBg;
+   270→    roundRect(ctx, 10, ty, w - 20, th, 6);
+   271→    ctx.fill();
+   272→    ctx.strokeStyle = os.focusedTextbox ? OS_COLORS.accent : OS_COLORS.winBorder;
+   273→    roundRect(ctx, 10, ty, w - 20, th, 6);
+   274→    ctx.stroke();
+   275→
+   276→    const lines = st.text.split('\n');
+   277→    ctx.fillStyle = OS_COLORS.text;
+   278→    ctx.font = '13.5px sans-serif';
+   279→    let ly = ty + 22;
+   280→    for (const line of lines.slice(-Math.floor((th - 16) / 19))) {
+   281→      ctx.fillText(line, 20, ly);
+   282→      ly += 19;
+   283→    }
+   284→    if (os.blink && os.focusedTextbox) {
+   285→      const lastW = ctx.measureText(lines[lines.length - 1] ?? '').width;
+   286→      ctx.fillStyle = OS_COLORS.accent;
+   287→      ctx.fillRect(20 + lastW + 1, ty + th - 24, 2, 16);
+   288→    }
+   289→
+   290→    // توجيه الكتابة: التطبيق النشط يلتقط المفاتيح (النقر داخل المنطقة يفعّل التركيز)
+   291→    const areaState: TextboxState = { text: st.text };
+   292→    const keyHandler = (ev: VosKeyEvent): boolean => {
+   293→      if (ev.key === 'Backspace') { st.text = st.text.slice(0, -1); os.dirty = true; return true; }
+   294→      if (ev.key === 'Enter') { st.text += '\n'; os.dirty = true; return true; }
+   295→      if (ev.key === 'Tab') { st.text += '    '; os.dirty = true; return true; }
+   296→      if (ev.key.length === 1 && !ev.ctrl && !ev.alt && !ev.meta) {
+   297→        st.text += ev.shift ? ev.key.toUpperCase() : ev.key;
+   298→        os.dirty = true;
+   299→        return true;
+   300→      }
+   301→      return false;
+   302→    };
+   303→    os.addRect('custom', 10, ty, w - 20, th, { onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; } }, 'text');
+   304→    // التركيز الافتراضي: نافذة المفكرة المركزة تستقبل الكتابة مباشرة
+   305→    if (os.windows.length > 0 && win.z === Math.max(...os.windows.map((x) => x.z))) {
+   306→      os.ui.keyHandler = keyHandler;
+   307→    }
+   308→    ctx.fillStyle = OS_COLORS.dim;
+   309→    ctx.font = '11.5px sans-serif';
+   310→    ctx.fillText(`${st.text.length} حرف${st.text !== st.saved ? ' — غير محفوظ' : ''}`, 14, h - 10);
+   311→  },
+   312→};
+   313→
+   314→// ============ 3) موجه الأوامر (Sandbox) ============
+   315→
+   316→const cmdApp: VosAppDef = {
+   317→  id: 'cmd',
+   318→  titleAr: 'موجه الأوامر — Sandbox تعليمي',
+   319→  iconColor: '#3d3d3d',
+   320→  iconGlyph: '⌨',
+   321→  defaultW: 620,
+   322→  defaultH: 400,
+   323→  desktop: true,
+   324→  render: (os, win, ctx) => {
+   325→    if (!win) return;
+   326→    const w = win.maximized ? os.W : win.w;
+   327→    const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
+   328→    if (!win.state['lines']) {
+   329→      win.state['lines'] = [
+   330→        'PC Lab Command Sandbox — محاكاة أوامر تعليمية آمنة',
+   331→        'الأوامر المنفذة هنا داخل المحاكاة فقط ولا تلمس نظامك الحقيقي.',
+   332→        'اكتب help لعرض الأوامر المتاحة.',
+   333→        '',
+   334→      ];
+   335→      win.state['input'] = '';
+   336→      win.state['cwd'] = 'C:\\Users\\Student';
+   337→    }
+   338→    const st = win.state as unknown as { lines: string[]; input: string; cwd: string };
+   339→
+   340→    const maxLines = Math.floor((h - 60) / 18);
+   341→    ctx.fillStyle = '#0a0f14';
+   342→    roundRect(ctx, 0, 0, w, h, 0);
+   343→    ctx.fill();
+   344→    ctx.font = '13px monospace';
+   345→    let y = 22;
+   346→    for (const line of st.lines.slice(-maxLines)) {
+   347→      ctx.fillStyle = line.startsWith('!!') ? '#e35d5d' : line.startsWith('OK') || line.includes('مكتمل') ? '#34d399' : '#c9d6e4';
+   348→      ctx.fillText(line, 12, y);
+   349→      y += 18;
+   350→    }
+   351→    // سطر الإدخال
+   352→    const prompt = `${st.cwd}> `;
+   353→    ctx.fillStyle = '#39c7b8';
+   354→    ctx.fillText(prompt + st.input, 12, y);
+   355→    if (os.blink) {
+   356→      const tw = ctx.measureText(prompt + st.input).width;
+   357→      ctx.fillStyle = '#39c7b8';
+   358→      ctx.fillRect(12 + tw + 1, y - 12, 7, 14);
+   359→    }
+   360→
+   361→    const exec = (): void => {
+   362→      const cmdLine = st.input.trim();
+   363→      st.lines.push(`${st.cwd}> ${cmdLine}`);
+   364→      st.input = '';
+   365→      if (cmdLine) runCommand(os, win!, st, cmdLine);
+   366→      os.dirty = true;
+   367→    };
+   368→
+   369→    const keyHandler = (ev: VosKeyEvent): boolean => {
+   370→      if (ev.key === 'Enter') { exec(); return true; }
+   371→      if (ev.key === 'Backspace') { st.input = st.input.slice(0, -1); os.dirty = true; return true; }
+   372→      if (ev.key.length === 1 && !ev.ctrl && !ev.alt && !ev.meta) {
+   373→        st.input += ev.key;
+   374→        os.dirty = true;
+   375→        return true;
+   376→      }
+   377→      return false;
+   378→    };
+   379→    os.addRect('custom', 0, 0, w, h, { onClick: () => { os.ui.keyHandler = keyHandler; os.dirty = true; } }, 'text');
+   380→    if (win.z === Math.max(...os.windows.map((x) => x.z))) {
+   381→      os.ui.keyHandler = keyHandler;
+   382→    }
+   383→    ctx.fillStyle = '#4a5a68';
+   384→    ctx.font = '11.5px sans-serif';
+   385→    ctx.fillText('Sandbox تعليمي: help • dir • cd • ver • systeminfo • ipconfig • driverquery • diskpart • sfc • chkdsk • exit', 12, h - 10);
+   386→  },
+   387→};
+   388→
+   389→/** منفذ الأوامر التعليمي — كل الأوامر داخل المحاكاة فقط (توجيه §12: لا أوامر نظام حقيقية) */
+   390→function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input: string; cwd: string }, raw: string): void {
+   391→  const store = useLabStore.getState();
+   392→  const [cmd, ...rest] = raw.split(/\s+/);
+   393→  const arg = rest.join(' ');
+   394→  const out = (...lines: string[]): void => { st.lines.push(...lines); };
+   395→  switch ((cmd ?? '').toLowerCase()) {
+   396→    case 'help':
+   397→      out('الأوامر المتاحة (محاكاة تعليمية):',
+   398→        '  help, cls, echo, ver, systeminfo, ipconfig, ping',
+   399→        '  dir, cd <folder>, type <file.txt>',
+   400→        '  driverquery, diskpart, tasklist',
+   401→        '  sfc /scannow, chkdsk C:',
+   402→        '  bootrec /fixmbr | /fixboot | /rebuildbcd   (فقط من بيئة الاسترداد)',
+   403→        '  shutdown /r — إعادة تشغيل الجهاز الافتراضي, exit');
+   404→      break;
+   405→    case 'cls':
+   406→      st.lines = [];
+   407→      break;
+   408→    case 'echo':
+   409→      out(arg || '');
+   410→      break;
+   411→    case 'ver':
+   412→      out(store.sim.os.installed ? `PC Lab OS (محاكاة تعليمية بنمط ${store.sim.os.installed}) — Build 6.0.0-sim` : 'لا نظام مثبت — وسيط التثبيت مطلوب');
+   413→      break;
+   414→    case 'systeminfo': {
+   415→      const t = store.sim.thermal;
+   416→      out('Host Name:                 PC-LAB-01',
+   417→        `OS Name:                   ${store.sim.os.installed ? 'Virtual Windows (' + store.sim.os.installed + ')' : '—'}`,
+   418→        'System Model:              Reference ATX Build (simulated)',
+   419→        'Processor:                 LGA1700 — 6C/12T (reference)',
+   420→        'Total Physical Memory:     32 GB DDR5',
+   421→        `CPU Temperature:           ${t.cpuTempC.toFixed(0)} °C (simulated)`,
+   422→        `GPU Temperature:           ${t.gpuTempC.toFixed(0)} °C (simulated)`,
+   423→        'ملاحظة: كل القيم بيانات محاكاة تعليمية وليست قراءات حقيقية.');
+   424→      break;
+   425→    }
+   426→    case 'ipconfig':
+   427→      out('Ethernet adapter Virtual Lab NIC:',
+   428→        '   IPv4 Address. . . : 192.168.10.50',
+   429→        '   Subnet Mask . . . : 255.255.255.0',
+   430→        '   Default Gateway . : 192.168.10.1',
+   431→        '   DNS . . . . . . . : 192.168.10.1 (بيئة افتراضية معزولة)');
+   432→      break;
+   433→    case 'ping':
+   434→      out(`Pinging ${arg || 'gateway'} [192.168.10.1] with 32 bytes of data:`,
+   435→        'Reply from 192.168.10.1: bytes=32 time<1ms TTL=64',
+   436→        'Reply from 192.168.10.1: bytes=32 time<1ms TTL=64',
+   437→        '(محاكاة شبكة افتراضية معزولة — لا اتصال خارجي)');
+   438→      break;
+   439→    case 'dir': {
+   440→      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+   441→      const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
+   442→      const node = fsGet(fsRoot, rel);
+   443→      if (!node?.children) { out('!! المجلد غير موجود'); break; }
+   444→      out(` Directory of ${st.cwd}`, '');
+   445→      for (const c of node.children) out(`  ${c.kind === 'folder' ? '<DIR>         ' : '        ' + String((c.content?.length ?? 0)).padStart(5)}  ${c.name}`);
+   446→      break;
+   447→    }
+   448→    case 'cd': {
+   449→      if (!arg || arg === '\\') { st.cwd = 'C:\\'; break; }
+   450→      if (arg === '..') { const parts = st.cwd.split('\\'); if (parts.length > 1) parts.pop(); st.cwd = parts.join('\\') || 'C:\\'; break; }
+   451→      const target = arg.replace(/^C:\\?/, '');
+   452→      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+   453→      const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
+   454→      const node = fsGet(fsRoot, [...rel, ...target.split('\\').filter(Boolean)]);
+   455→      if (node && node.kind === 'folder') st.cwd = 'C:\\' + [...rel, ...target.split('\\').filter(Boolean)].join('\\');
+   456→      else out('!! The system cannot find the path specified.');
+   457→      break;
+   458→    }
+   459→    case 'type': {
+   460→      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+   461→      const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
+   462→      const node = fsGet(fsRoot, [...rel, arg]) ?? fsGet(fsRoot, arg.replace(/^C:\\/, '').split('\\').filter(Boolean));
+   463→      if (node && node.kind !== 'folder') out(...(node.content ?? '').split('\n'));
+   464→      else out('!! File not found.');
+   465→      break;
+   466→    }
+   467→    case 'driverquery': {
+   468→      out('Module Name    Status', '-----------    ------');
+   469→      const missing = store.sim.os.driversMissing;
+   470→      out(`display        ${missing.includes('gpu') ? 'MISSING — مثلث أصفر في Device Manager' : 'OK'}`);
+   471→      out('storage        OK', 'network        OK', 'audio          OK',
+   472→        'ملاحظة: لتثبيت التعريف افتح Device Manager ← تحديث التعريف.');
+   473→      break;
+   474→    }
+   475→    case 'diskpart':
+   476→      out('Disk Management أفضل place لهذه العمليات — افتحها من قائمة ابدأ.',
+   477→        'Disk ###  Status     Size',
+   478→        'Disk 0    Online     1000 GB  (M.2 NVMe)',
+   479→        'Disk 1    Online     1000 GB  (SATA)');
+   480→      break;
+   481→    case 'tasklist':
+   482→      out('Image Name           PID   Mem Usage',
+   483→        'System                 4   0.1 MB',
+   484→        'explorer.exe        1244   42 MB',
+   485→        'pclab-sandbox.exe   2080   18 MB  (هذه المحاكاة)');
+   486→      break;
+   487→    case 'sfc':
+   488→      out('Starting system scan. This process will take some time...',
+   489→        'Verification 45% complete...',
+   490→        'Verification 100% complete.',
+   491→        'OK: Windows Resource Protection did not find any integrity violations. (محاكاة تعليمية)');
+   492→      break;
+   493→    case 'chkdsk':
+   494→      out(`Stage 1: Examining basic file system structure ... OK`,
+   495→        'Stage 2: Examining file name linkage ... OK',
+   496→        'Stage 3: Examining security descriptors ... OK',
+   497→        'OK: No further action is required. (محاكاة تعليمية — SMART/فحص الأقراص هنا بيانات تدريب)');
+   498→      break;
+   499→    case 'bootrec': {
+   500→      if (!win.state['recovery']) {
+   501→        out('!! bootrec متاح فقط من بيئة الاسترداد (Recovery) — أعد التشغيل واختر Command Prompt من هناك.');
+   502→        break;
+   503→      }
+   504→      const opt = (rest[0] ?? '').toLowerCase();
+   505→      if (opt === '/fixmbr' || opt === '/fixboot' || opt === '/rebuildbcd') {
+   506→        useLabStore.getState().repairBcd();
+   507→        out(`OK: ${opt} completed successfully. (محاكاة تعليمية)`,
+   508→          'أعد تشغيل الجهاز الآن — shutdown /r');
+   509→      } else {
+   510→        out('الاستخدام: bootrec /fixmbr | /fixboot | /rebuildbcd | /scanos');
+   511→      }
+   512→      break;
+   513→    }
+   514→    case 'shutdown':
+   515→      if (rest[0] === '/r') {
+   516→        useLabStore.getState().toggleFlag('powerOn');
+   517→        out('OK: الجهاز الافتراضي يُعيد التشغيل...');
+   518→      } else out('الاستخدام: shutdown /r — إعادة تشغيل الجهاز الافتراضي');
+   519→      break;
+   520→    case 'exit':
+   521→      os.closeWindow(win.id);
+   522→      break;
+   523→    default:
+   524→      out(`'${cmd}' is not recognized as an internal or external command.`,
+   525→          'هذه Sandbox تعليمية: اكتب help لعرض الأوامر المتاحة.');
+   526→      break;
+   527→  }
+   528→}
+   529→
+   530→// ============ 4) إدارة الأجهزة ============
+   531→
+   532→interface DevNode { id: string; nameAr: string; componentId: ComponentId | null; present: boolean; missing: boolean; }
+   533→
+   534→const devmgrApp: VosAppDef = {
+   535→  id: 'devmgr',
+   536→  titleAr: 'إدارة الأجهزة — Device Manager',
+   537→  iconColor: '#7a6bd9',
+   538→  iconGlyph: '🧩',
+   539→  defaultW: 560,
+   540→  defaultH: 400,
+   541→  desktop: true,
+   542→  render: (os, win, ctx) => {
+   543→    if (!win) return;
+   544→    const w = win.maximized ? os.W : win.w;
+   545→    const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
+   546→    const store = useLabStore.getState();
+   547→    const top = panelHeader(ctx, w, 'Device Manager', 'قراءة حية من حالة الجهاز الفعلية في المحاكاة (مصدر الحقيقة الواحد)');
+   548→
+   549→    const groups: Array<{ catAr: string; nodes: DevNode[] }> = [
+   550→      {
+   551→        catAr: 'معالجات',
+   552→        nodes: [{ id: 'cpu', nameAr: 'LGA1700 — 6C/12T (مرجعي)', componentId: 'cpu', present: isInstalled(store.sim.parts.cpu), missing: false }],
+   553→      },
+   554→      {
+   555→        catAr: 'الذاكرة',
+   556→        nodes: [{ id: 'ram', nameAr: 'DDR5 32GB (2×16) @5200', componentId: 'ram', present: isInstalled(store.sim.parts.ram), missing: false }],
+   557→      },
+   558→      {
+   559→        catAr: 'محولات العرض',
+   560→        nodes: [{ id: 'gpu', nameAr: 'بطاقة رسوميات PCIe x16 (مرجعية)', componentId: 'gpu', present: isInstalled(store.sim.parts.gpu), missing: store.sim.os.driversMissing.includes('gpu') }],
+   561→      },
+   562→      {
+   563→        catAr: 'محركات الأقراص',
+   564→        nodes: [
+   565→          { id: 'ssd', nameAr: 'M.2 NVMe SSD 1000GB', componentId: 'ssd', present: isInstalled(store.sim.parts.ssd), missing: false },
+   566→          { id: 'hdd', nameAr: 'SATA HDD 3.5" 1000GB', componentId: 'hdd', present: isInstalled(store.sim.parts.hdd), missing: false },
+   567→        ],
+   568→      },
+   569→      {
+   570→        catAr: 'التخزين والمنافذ',
+   571→        nodes: [
+   572→          { id: 'sataData', nameAr: 'SATA Controller (كابل البيانات)', componentId: 'sataData', present: isInstalled(store.sim.parts.sataData), missing: false },
+   573→          { id: 'frontPanel', nameAr: 'USB/Front Panel Headers', componentId: null, present: !store.sim.flags.frontPanelDisconnected, missing: false },
+   574→        ],
+   575→      },
+   576→    ];
+   577→
+   578→    if (typeof win.state['sel'] !== 'string') win.state['sel'] = '';
+   579→    const sel = win.state['sel'] as string;
+   580→
+   581→    const listW = Math.min(330, w * 0.62);
+   582→    let y = top + 8;
+   583→    ctx.font = '13.5px sans-serif';
+   584→    for (const g of groups) {
+   585→      ctx.fillStyle = OS_COLORS.dim;
+   586→      ctx.font = 'bold 12.5px sans-serif';
+   587→      ctx.fillText(`▸ ${g.catAr}`, 14, y + 14);
+   588→      y += 26;
+   589→      for (const node of g.nodes) {
+   590→        const selected = sel === node.id;
+   591→        if (selected || os.hoverAt(12, y, listW, 26)) {
+   592→          ctx.fillStyle = selected ? OS_COLORS.rowSelect : OS_COLORS.rowHover;
+   593→          roundRect(ctx, 12, y, listW, 26, 5);
+   594→          ctx.fill();
+   595→        }
+   596→        ctx.font = '13px sans-serif';
+   597→        if (node.missing) {
+   598→          ctx.fillStyle = OS_COLORS.warn;
+   599→          ctx.fillText('⚠', 18, y + 18);
+   600→        } else if (!node.present) {
+   601→          ctx.fillStyle = OS_COLORS.danger;
+   602→          ctx.fillText('✖', 18, y + 18);
+   603→        } else {
+   604→          ctx.fillStyle = OS_COLORS.ok;
+   605→          ctx.fillText('✔', 18, y + 18);
+   606→        }
+   607→        ctx.fillStyle = OS_COLORS.text;
+   608→        ctx.fillText(node.nameAr, 38, y + 18);
+   609→        os.addRect('row', 12, y, listW, 26, { onClick: () => { win.state['sel'] = node.id; os.dirty = true; } });
+   610→        y += 28;
+   611→      }
+   612→    }
+   613→
+   614→    // لوحة التفاصيل والأفعال (يمين)
+   615→    const dx = listW + 26;
+   616→    const dw = w - dx - 14;
+   617→    ctx.strokeStyle = OS_COLORS.winBorder;
+   618→    ctx.beginPath();
+   619→    ctx.moveTo(dx - 10, top);
+   620→    ctx.lineTo(dx - 10, h);
+   621→    ctx.stroke();
+   622→    const node = groups.flatMap((g) => g.nodes).find((n) => n.id === sel);
+   623→    ctx.font = '13px sans-serif';
+   624→    if (!node) {
+   625→      ctx.fillStyle = OS_COLORS.dim;
+   626→      ctx.fillText('اختر جهازًا من القائمة لعرض حالته وأفعاله.', dx, top + 24);
+   627→      return;
+   628→    }
+   629→    let dy = top + 6;
+   630→    ctx.fillStyle = OS_COLORS.text;
+   631→    ctx.font = 'bold 14px sans-serif';
+   632→    ctx.fillText(node.nameAr, dx, dy + 14);
+   633→    dy += 30;
+   634→    const status = node.missing ? '⚠ يعمل بتعريف أساسي — التعريف المخصص مفقود' : node.present ? '✔ يعمل بشكل صحيح' : '✖ غير مثبت في الجهاز (غياب فعلي)';
+   635→    ctx.fillStyle = node.missing ? OS_COLORS.warn : node.present ? OS_COLORS.ok : OS_COLORS.danger;
+   636→    ctx.fillText(status, dx, dy);
+   637→    dy += 30;
+   638→    ctx.fillStyle = OS_COLORS.dim;
+   639→    ctx.font = '12px sans-serif';
+   640→    ctx.fillText('الأفعال هنا محاكاة تعليمية آمنة داخل Sandbox.', dx, dy);
+   641→    dy += 26;
+   642→
+   643→    if (node.missing) {
+   644→      btn(os, ctx, dx, dy, Math.min(dw, 190), 30, 'تحديث التعريف (Update)', () => {
+   645→        const s = useLabStore.getState();
+   646→        if (node.componentId) s.fixDriver(node.componentId);
+   647→        os.notify('تم تحديث التعريف', `${node.nameAr}: استُبدل التعريف الأساسي بالتعريف الكامل (محاكاة تعليمية).`);
+   648→      });
+   649→      dy += 40;
+   650→    }
+   651→    if (!node.present && node.componentId) {
+   652→      ctx.fillStyle = OS_COLORS.warn;
+   653→      ctx.font = '12px sans-serif';
+   654→      const lines = [
+   655→        'الجهاز غائب فعليًا عن اللوحة — التعريف لن يحل المشكلة.',
+   656→        'الإصلاح الصحيح: أعد تركيب القطعة (من المختبر 3D) ثم أعد الفحص.',
+   657→      ];
+   658→      for (const l of lines) { ctx.fillText(l, dx, dy); dy += 18; }
+   659→    }
+   660→    if (node.present && !node.missing) {
+   661→      btn(os, ctx, dx, dy, Math.min(dw, 150), 28, 'تحديث التعريف', () => os.notify('Device Manager', 'التعريف محدث بالفعل — أحدث إصدار (محاكاة).'), { small: true });
+   662→      btn(os, ctx, dx + 160, dy, 130, 28, 'إلغاء التثبيت', () => os.notify('Device Manager', 'الإلغاء التعليمي: الجهاز سيُكتشف مجددًا عند إعادة الفحص (لا تغيير فعلي).'), { small: true });
+   663→    }
+   664→  },
+   665→};
+   666→
+   667→// ============ 5) إدارة الأقراص ============
+   668→
+   669→const diskmgmtApp: VosAppDef = {
+   670→  id: 'diskmgmt',
+   671→  titleAr: 'إدارة الأقراص — Disk Management',
+   672→  iconColor: '#3f9d6b',
+   673→  iconGlyph: '💽',
+   674→  defaultW: 640,
+   675→  defaultH: 420,
+   676→  desktop: true,
+   677→  render: (os, win, ctx) => {
+   678→    if (!win) return;
+   679→    const w = win.maximized ? os.W : win.w;
+   680→    const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
+   681→    const store = useLabStore.getState();
+   682→    const top = panelHeader(ctx, w, 'Disk Management — Sandbox', 'كل العمليات على أقراص المحاكاة الافتراضية فقط — لا تلمس أقراصك الحقيقية إطلاقًا');
+   683→
+   684→    if (typeof win.state['dialog'] !== 'object') win.state['dialog'] = null;
+   685→    const dialog = win.state['dialog'] as null | { kind: string; diskId?: string; partId?: string };
+   686→
+   687→    let y = top + 6;
+   688→    for (const disk of store.sim.disks) {
+   689→      const available = disk.bus === 'nvme' ? isInstalled(store.sim.parts.ssd) : (isInstalled(store.sim.parts.hdd) && isInstalled(store.sim.parts.sataData) && isInstalled(store.sim.parts.sataPower));
+   690→      ctx.fillStyle = OS_COLORS.text;
+   691→      ctx.font = 'bold 13px sans-serif';
+   692→      ctx.fillText(`قرص ${disk.id === 'm2-1' ? '0' : '1'} — ${disk.labelAr} (${disk.sizeGB} GB)`, 14, y + 14);
+   693→      ctx.fillStyle = available ? OS_COLORS.dim : OS_COLORS.danger;
+   694→      ctx.font = '12px sans-serif';
+   695→      ctx.fillText(available ? `${disk.bus.toUpperCase()} • ${disk.style ? (disk.style === 'gpt' ? 'GPT' : 'MBR') : 'غير مهيأ (Not Initialized)'}` : 'غير متاح: القطعة مفصولة (افحص المختبر)', 14, y + 32);
+   696→      y += 44;
+   697→
+   698→      if (!available) { y += 18; continue; }
+   699→
+   700→      // شريط القرص
+   701→      const barX = 14;
+   702→      const barW = w - 150;
+   703→      const barH = 54;
+   704→      ctx.fillStyle = '#0d141b';
+   705→      roundRect(ctx, barX, y, barW, barH, 6);
+   706→      ctx.fill();
+   707→      ctx.strokeStyle = OS_COLORS.winBorder;
+   708→      roundRect(ctx, barX, y, barW, barH, 6);
+   709→      ctx.stroke();
+   710→
+   711→      if (!disk.style) {
+   712→        ctx.fillStyle = '#4a3a18';
+   713→        ctx.fillRect(barX + 2, y + 2, barW - 4, barH - 4);
+   714→        ctx.fillStyle = '#eab308';
+   715→        ctx.font = 'bold 13px sans-serif';
+   716→        ctx.textAlign = 'center';
+   717→        ctx.fillText('Unallocated — غير مهيأ', barX + barW / 2, y + 26);
+   718→        ctx.font = '12px sans-serif';
+   719→        ctx.fillText(`(${disk.sizeGB} GB)`, barX + barW / 2, y + 42);
+   720→        ctx.textAlign = 'left';
+   721→        btn(os, ctx, barX + barW + 10, y + 10, 118, 30, 'تهيئة القرص…', () => { win.state['dialog'] = { kind: 'init', diskId: disk.id }; os.dirty = true; }, { small: true });
+   722→      } else {
+   723→        const total = disk.parts.reduce((a, p) => a + p.sizeGB, 0);
+   724→        const unalloc = Math.max(0, disk.sizeGB - total);
+   725→        let px = barX + 2;
+   726→        const availW = barW - 4;
+   727→        for (const part of disk.parts) {
+   728→          const pw = Math.max(6, (part.sizeGB / disk.sizeGB) * availW);
+   729→          const colors: Record<string, string> = { efi: '#2d6b4f', msr: '#2b3a4a', recovery: '#5a4a2b', primary: '#22698a' };
+   730→          ctx.fillStyle = colors[part.kind] ?? '#22698a';
+   731→          ctx.fillRect(px, y + 2, pw - 2, barH - 4);
+   732→          if (pw > 40) {
+   733→            ctx.fillStyle = '#eaf3f8';
+   734→            ctx.font = 'bold 11.5px sans-serif';
+   735→            ctx.textAlign = 'center';
+   736→            ctx.fillText(part.letter ? `(${part.letter})` : '', px + pw / 2, y + 18);
+   737→            ctx.fillText(part.kind === 'efi' ? 'EFI' : part.kind === 'msr' ? 'MSR' : part.label.slice(0, 10), px + pw / 2, y + 33);
+   738→            ctx.font = '10.5px sans-serif';
+   739→            ctx.fillText(`${part.sizeGB.toFixed(part.sizeGB < 1 ? 2 : 0)} GB`, px + pw / 2, y + 46);
+   740→            ctx.textAlign = 'left';
+   741→          }
+   742→          const captured = part;
+   743→          os.addRect('row', px, y, pw - 2, barH, {
+   744→            onClick: () => { win.state['dialog'] = { kind: 'part', diskId: disk.id, partId: captured.id }; os.dirty = true; },
+   745→          });
+   746→          px += pw;
+   747→        }
+   748→        if (unalloc > 0.01) {
+   749→          const uw = Math.max(6, (unalloc / disk.sizeGB) * availW);
+   750→          ctx.fillStyle = '#23303c';
+   751→          ctx.fillRect(px, y + 2, uw - 2, barH - 4);
+   752→          ctx.fillStyle = '#9fb0c4';
+   753→          ctx.font = '11.5px sans-serif';
+   754→          ctx.textAlign = 'center';
+   755→          ctx.fillText('Unallocated', px + uw / 2, y + 22);
+   756→          ctx.fillText(`${unalloc.toFixed(0)} GB`, px + uw / 2, y + 38);
+   757→          ctx.textAlign = 'left';
+   758→          const capDisk = disk;
+   759→          os.addRect('row', px, y, uw - 2, barH, {
+   760→            onClick: () => { win.state['dialog'] = { kind: 'newvol', diskId: capDisk.id }; os.dirty = true; },
+   761→          });
+   762→        }
+   763→        y += barH + 8;
+   764→        btn(os, ctx, 14, y, 120, 26, 'قسم جديد…', () => { win.state['dialog'] = { kind: 'newvol', diskId: disk.id }; }, { small: true });
+   765→        btn(os, ctx, 142, y, 110, 26, 'تحديث', () => { os.dirty = true; }, { small: true });
+   766→        y += 40;
+   767→      }
+   768→      y += 6;
+   769→    }
+   770→
+   771→    // ============ الحوارات (تهيئة/قسم جديد/تفاصيل قسم) ============
+   772→    if (dialog) drawDiskDialog(os, win, ctx, w, h, dialog);
+   773→  },
+   774→};
+   775→
+   776→function drawDiskDialog(os: VirtualOS, win: VosWindow, ctx: CanvasRenderingContext2D, w: number, h: number, dialog: { kind: string; diskId?: string; partId?: string }): void {
+   777→  const store = useLabStore.getState();
+   778→  const disk = store.sim.disks.find((d) => d.id === dialog.diskId);
+   779→  const part = disk?.parts.find((p) => p.id === dialog.partId);
+   780→  const dw = Math.min(420, w - 60);
+   781→  const dh = 210;
+   782→  const dx = (w - dw) / 2;
+   783→  const dy = (h - dh) / 2;
+   784→  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+   785→  ctx.fillRect(0, 0, w, h);
+   786→  ctx.fillStyle = '#131c26';
+   787→  roundRect(ctx, dx, dy, dw, dh, 10);
+   788→  ctx.fill();
+   789→  ctx.strokeStyle = OS_COLORS.accent;
+   790→  roundRect(ctx, dx, dy, dw, dh, 10);
+   791→  ctx.stroke();
+   792→
+   793→  const close = (): void => { win.state['dialog'] = null; os.dirty = true; };
+   794→
+   795→  if (dialog.kind === 'init' && disk) {
+   796→    if (typeof win.state['initStyle'] !== 'string') win.state['initStyle'] = 'gpt';
+   797→    ctx.fillStyle = OS_COLORS.text;
+   798→    ctx.font = 'bold 15px sans-serif';
+   799→    ctx.fillText(`تهيئة القرص ${disk.id} (${disk.sizeGB} GB)`, dx + 16, dy + 28);
+   800→    ctx.fillStyle = OS_COLORS.dim;
+   801→    ctx.font = '12.5px sans-serif';
+   802→    ctx.fillText('اختر نمط التقسيم — يجب أن يطابق وضع إقلاع الجهاز:', dx + 16, dy + 50);
+   803→    const style = win.state['initStyle'] as string;
+   804→    btn(os, ctx, dx + 16, dy + 66, 130, 32, 'GPT (UEFI)', () => { win.state['initStyle'] = 'gpt'; os.dirty = true; }, { color: style === 'gpt' ? OS_COLORS.accent : undefined, small: true });
+   805→    btn(os, ctx, dx + 156, dy + 66, 130, 32, 'MBR (Legacy)', () => { win.state['initStyle'] = 'mbr'; os.dirty = true; }, { color: style === 'mbr' ? OS_COLORS.accent : undefined, small: true });
+   806→    ctx.fillStyle = '#eab308';
+   807→    ctx.font = '12px sans-serif';
+   808→    ctx.fillText(style === 'gpt' ? 'GPT: مطلوب للإقلاع UEFI (يدعم أقراصًا أكبر وأقسامًا أكثر).' : 'MBR: للإقلاع BIOS/Legacy — حد 2TB و 4 أقسام رئيسية.', dx + 16, dy + 122);
+   809→    btn(os, ctx, dx + 16, dy + dh - 44, 120, 32, 'تهيئة الآن', () => {
+   810→      useLabStore.getState().initDisk(disk.id, style === 'gpt' ? 'gpt' : 'mbr');
+   811→      os.notify('تمت تهيئة القرص', `${disk.id}: نمط ${style.toUpperCase()} (محاكاة تعليمية)`);
+   812→      close();
+   813→    });
+   814→    btn(os, ctx, dx + dw - 136, dy + dh - 44, 120, 32, 'إلغاء', close);
+   815→  } else if (dialog.kind === 'newvol' && disk) {
+   816→    if (typeof win.state['nvSize'] !== 'string') win.state['nvSize'] = String(Math.floor(disk.sizeGB / 2));
+   817→    if (typeof win.state['nvFs'] !== 'string') win.state['nvFs'] = 'ntfs';
+   818→    const total = disk.parts.reduce((a, p) => a + p.sizeGB, 0);
+   819→    const unalloc = Math.max(0, disk.sizeGB - total);
+   820→    ctx.fillStyle = OS_COLORS.text;
+   821→    ctx.font = 'bold 15px sans-serif';
+   822→    ctx.fillText(`قسم جديد — المساحة المتاحة ${unalloc.toFixed(0)} GB`, dx + 16, dy + 28);
+   823→    ctx.fillStyle = OS_COLORS.dim;
+   824→    ctx.font = '12.5px sans-serif';
+   825→    ctx.fillText('الحجم (GB):', dx + 16, dy + 54);
+   826→    textbox(os, ctx, dx + 110, dy + 38, 110, 28, { get text() { return win.state['nvSize'] as string; }, set text(t: string) { win.state['nvSize'] = t.replace(/[^0-9]/g, ''); } }, { mono: true, autoFocus: true });
+   827→    ctx.fillText('نظام الملفات:', dx + 16, dy + 88);
+   828→    const fsSel = win.state['nvFs'] as string;
+   829→    btn(os, ctx, dx + 110, dy + 74, 84, 28, 'NTFS', () => { win.state['nvFs'] = 'ntfs'; os.dirty = true; }, { color: fsSel === 'ntfs' ? OS_COLORS.accent : undefined, small: true });
+   830→    btn(os, ctx, dx + 200, dy + 74, 84, 28, 'FAT32', () => { win.state['nvFs'] = 'fat32'; os.dirty = true; }, { color: fsSel === 'fat32' ? OS_COLORS.accent : undefined, small: true });
+   831→    ctx.fillStyle = '#eab308';
+   832→    ctx.font = '12px sans-serif';
+   833→    ctx.fillText('⚠ قسم جديد على قرص يقع غير مهيأ يحتاج تهيئة القرص أولًا. هذه العملية محاكاة آمنة.', dx + 16, dy + 122);
+   834→    btn(os, ctx, dx + 16, dy + dh - 44, 120, 32, 'إنشاء القسم', () => {
+   835→      const sizeGB = Math.min(unalloc, Math.max(0.1, Number(win.state['nvSize']) || 10));
+   836→      useLabStore.getState().createPartition(disk.id, sizeGB, fsSel === 'fat32' ? 'fat32' : 'ntfs');
+   837→      os.notify('قسم جديد', `أُنشئ قسم ${sizeGB.toFixed(1)} GB بملفات ${fsSel.toUpperCase()} (محاكاة)`);
+   838→      close();
+   839→    });
+   840→    btn(os, ctx, dx + dw - 136, dy + dh - 44, 120, 32, 'إلغاء', close);
+   841→  } else if (dialog.kind === 'part' && part && disk) {
+   842→    ctx.fillStyle = OS_COLORS.text;
+   843→    ctx.font = 'bold 15px sans-serif';
+   844→    ctx.fillText(`القسم: ${part.label}${part.letter ? ` (${part.letter}:)` : ''}`, dx + 16, dy + 28);
+   845→    ctx.fillStyle = OS_COLORS.dim;
+   846→    ctx.font = '12.5px sans-serif';
+   847→    ctx.fillText(`${part.kind.toUpperCase()} • ${part.fs.toUpperCase()} • ${part.sizeGB.toFixed(2)} GB • المستخدم ${(part.usedGB).toFixed(1)} GB`, dx + 16, dy + 50);
+   848→    ctx.fillText(part.hasOs ? '⚠ يحتوي ملفات نظام مثبت — حذفه يعني فقدان النظام (محاكاة).' : 'قسم بيانات — الحذف/التهيئة محاكاة تعليمية آمنة.', dx + 16, dy + 70);
+   849→    btn(os, ctx, dx + 16, dy + 96, 130, 30, 'تهيئة القسم…', () => {
+   850→      if (part.kind === 'efi' || part.kind === 'msr') {
+   851→        os.notify('غير مسموح', 'لا يمكن تهيئة أقسام EFI/MSR النظامية — سلوك موثق من سلوك إدارة الأقراص.');
+   852→        return;
+   853→      }
+   854→      useLabStore.getState().formatPartition(disk.id, part.id);
+   855→      os.notify('تمت التهيئة', `${part.label}: أعيدت التهيئة (${part.fs.toUpperCase()}) — البيانات السابقة «فُقدت» داخل المحاكاة فقط.`);
+   856→      close();
+   857→    }, { small: true });
+   858→    btn(os, ctx, dx + 156, dy + 96, 130, 30, 'حذف القسم…', () => {
+   859→      useLabStore.getState().deletePartition(disk.id, part.id);
+   860→      os.notify('تم الحذف', `${part.label}: أُزيل وأصبحت المساحة Unallocated (محاكاة — تأكيد مطلوب دائمًا في العمل الحقيقي).`);
+   861→      close();
+   862→    }, { small: true, color: OS_COLORS.danger });
+   863→    btn(os, ctx, dx + dw - 116, dy + dh - 44, 100, 32, 'إغلاق', close);
+   864→  }
+   865→}
+   866→
+   867→// ============ 6) الإعدادات / معلومات النظام ============
+   868→
+   869→const settingsApp: VosAppDef = {
+   870→  id: 'settings',
+   871→  titleAr: 'الإعدادات — حول النظام',
+   872→  iconColor: '#8a939e',
+   873→  iconGlyph: '⚙',
+   874→  defaultW: 520,
+   875→  defaultH: 380,
+   876→  desktop: true,
+   877→  render: (os, _win, ctx) => {
+   878→    const store = useLabStore.getState();
+   879→    const w = 520;
+   880→    const top = panelHeader(ctx, w, 'الإعدادات — حول هذا النظام', 'كل البيانات من مصدر الحقيقة الواحد (المحاكاة)');
+   881→    let y = top + 4;
+   882→    const row = (label: string, value: string): void => {
+   883→      ctx.fillStyle = OS_COLORS.dim;
+   884→      ctx.font = '13px sans-serif';
+   885→      ctx.fillText(label, 16, y + 16);
+   886→      ctx.fillStyle = OS_COLORS.text;
+   887→      ctx.textAlign = 'right';
+   888→      ctx.fillText(value, w - 16, y + 16);
+   889→      ctx.textAlign = 'left';
+   890→      y += 28;
+   891→    };
+   892→    row('إصدار النظام', store.sim.os.installed ? `Virtual Windows (${store.sim.os.installed}) — ${store.sim.os.edition ?? ''}` : 'لا نظام مثبت');
+   893→    row('المعالج', 'LGA1700 6C/12T (منصة مرجعية)');
+   894→    row('الذاكرة', '32GB DDR5' + (store.sim.firmware.xmp ? ' — XMP مفعّل' : ''));
+   895→    row('بطاقة الرسوميات', isInstalled(store.sim.parts.gpu) ? (store.sim.os.driversMissing.includes('gpu') ? 'تعريف أساسي (Basic Display)' : 'PCIe x16 — تعريف كامل') : 'غير مثبتة');
+   896→    row('حرارة CPU / GPU', `${store.sim.thermal.cpuTempC.toFixed(0)}°C / ${store.sim.thermal.gpuTempC.toFixed(0)}°C (محاكاة)`);
+   897→    row('Secure Boot / TPM', `${store.sim.firmware.secureBoot ? 'مفعل' : 'معطل'} / ${store.sim.firmware.tpm ? 'موجود' : 'غير موجود'}`);
+   898→    y += 8;
+   899→    btn(os, ctx, 16, y, 150, 30, 'Windows Update', () => os.notify('Windows Update', 'أنت محدث — آخر التحديثات مثبتة (محاكاة تعليمية).'), { small: true });
+   900→    btn(os, ctx, 174, y, 150, 30, 'فحص سلامة النظام', () => os.notify('فحص النظام', 'لا مشاكل اكتشفها الفحص (sfc محاكاة تعليمية).'), { small: true });
+   901→    y += 42;
+   902→    ctx.fillStyle = '#8b97a5';
+   903→    ctx.font = '12px sans-serif';
+   904→    os.wrapText(ctx, 'تنبيه أمانة: هذه واجهة محاكاة تدريب خاصة بالمشروع — ليست نظام Windows حقيقيًا ولا تعرض أو تخزن أي مفاتيح منتجات.', 16, y, w - 32, 17);
+   905→  },
+   906→};
+   907→
+   908→// ============ 7) إدارة المهام ============
+   909→
+   910→const taskmgrApp: VosAppDef = {
+   911→  id: 'taskmgr',
+   912→  titleAr: 'إدارة المهام',
+   913→  iconColor: '#4d7ec9',
+   914→  iconGlyph: '📊',
+   915→  defaultW: 520,
+   916→  defaultH: 360,
+   917→  desktop: true,
+   918→  render: (os, win, ctx, now) => {
+   919→    const store = useLabStore.getState();
+   920→    const w = win!.maximized ? os.W : win!.w;
+   921→    const h = (win!.maximized ? os.H - os.taskbarH : win!.h) - 30;
+   922→    const top = panelHeader(ctx, w, 'إدارة المهام — الأداء (محاكاة)', 'القيم مشتقة من حالة المراوح والحرارة في المحاكاة');
+   923→    const load = Math.min(1, Math.max(0.08, (store.sim.thermal.cpuTempC - 26) / 70));
+   924→    const gpuLoad = Math.min(1, Math.max(0.05, (store.sim.thermal.gpuTempC - 26) / 70));
+   925→
+   926→    const meter = (label: string, value: number, yy: number, note: string): void => {
+   927→      ctx.fillStyle = OS_COLORS.dim;
+   928→      ctx.font = '12.5px sans-serif';
+   929→      ctx.fillText(`${label} — ${(value * 100).toFixed(0)}%`, 16, yy);
+   930→      ctx.fillStyle = '#0d141b';
+   931→      roundRect(ctx, 16, yy + 8, w - 32, 16, 5);
+   932→      ctx.fill();
+   933→      ctx.fillStyle = value > 0.85 ? OS_COLORS.danger : OS_COLORS.accent;
+   934→      roundRect(ctx, 16, yy + 8, Math.max(8, (w - 32) * value), 16, 5);
+   935→      ctx.fill();
+   936→      ctx.fillStyle = '#5c6b7a';
+   937→      ctx.font = '11px sans-serif';
+   938→      ctx.fillText(note, 16, yy + 40);
+   939→    };
+   940→    meter('CPU', load, top + 4, 'يعكس الحرارة المُحاكاة للمبرد الحالي');
+   941→    meter('GPU', gpuLoad, top + 60, 'يعمل بتعريف أساسي إن كان التعريف مفقودًا');
+   942→    meter('Memory', 0.42, top + 116, '32GB DDR5 — استهلاك تدريبي ثابت');
+   943→
+   944→    let y = top + 172;
+   945→    ctx.fillStyle = OS_COLORS.text;
+   946→    ctx.font = 'bold 13px sans-serif';
+   947→    ctx.fillText('العمليات:', 16, y);
+   948→    y += 20;
+   949→    ctx.font = '12.5px monospace';
+   950→    const procs: Array<[string, string]> = [
+   951→      ['System Idle Process', '0%'],
+   952→      ['pclab-desktop.exe', `${(load * 100).toFixed(0)}%`],
+   953→      ['explorer.exe', '2%'],
+   954→      ['antimalware-sim.exe', '1%'],
+   955→    ];
+   956→    for (const [name, cpu] of procs) {
+   957→      ctx.fillStyle = OS_COLORS.text;
+   958→      ctx.fillText(name, 20, y);
+   959→      ctx.textAlign = 'right';
+   960→      ctx.fillText(cpu, w - 20, y);
+   961→      ctx.textAlign = 'left';
+   962→      y += 18;
+   963→    }
+   964→    ctx.fillStyle = '#5c6b7a';
+   965→    ctx.font = '11.5px sans-serif';
+   966→    ctx.fillText(`آخر تحديث: ${new Date(now).toLocaleTimeString()} — زمن حقيقي للواجهة، قيم محاكاة`, 16, h - 10);
+   967→  },
+   968→};
+   969→
+   970→const aboutApp: VosAppDef = {
+   971→  id: 'about',
+   972→  titleAr: 'حول PC Lab OS',
+   973→  iconColor: '#39c7b8',
+   974→  iconGlyph: 'ℹ',
+   975→  defaultW: 420,
+   976→  defaultH: 250,
+   977→  render: (os, _win, ctx) => {
+   978→    const top = panelHeader(ctx, 420, 'PC Lab OS v6.0', 'بيئة تدريب فني الصيانة');
+   979→    ctx.fillStyle = OS_COLORS.text;
+   980→    ctx.font = '13px sans-serif';
+   981→    os.wrapText(ctx, 'نظام افتراضي تعليمي داخل مختبر صيانة ثلاثي الأبعاد: سطح مكتب ونوافذ وأوامر Sandbox وإدارة أقراص افتراضية. لا يمس نظامك الحقيقي ولا يجمع أي بيانات.', 16, top, 420 - 32, 19);
+   982→  },
+   983→};
+   984→
+   985→// ============ التسجيل ============
+   986→
+   987→export function registerVosApps(os: VirtualOS): void {
+   988→  for (const app of [explorerApp, notepadApp, cmdApp, devmgrApp, diskmgmtApp, settingsApp, taskmgrApp, aboutApp]) {
+   989→    os.registerApp(app);
+   990→  }
+   991→  os.desktopIcons = ['explorer', 'notepad', 'cmd', 'devmgr', 'diskmgmt', 'settings', 'taskmgr'];
+   992→}
+   993→

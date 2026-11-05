@@ -166,6 +166,23 @@ export function computeMonitorView(sim: SimulationState, bootElapsedMs: number):
 
   // الوسيط المُدخل أولوية الإقلاع له ⇒ معالج التثبيت داخل بيئة الوسيط
   if (sim.usbMedia && sim.firmware.bootOrder[0] === 'usb') {
+    // (V6-D) حاجز توافق وضع الإقلاع: XP/Vista تقلع BIOS فقط و11 تقلع UEFI فقط —
+    // المحاكاة ترفض الإقلاع من الوسيط وتشرح السبب (سلوك واقعي موثق)
+    const fam = getFamily(sim.usbMedia);
+    if (!fam.bootModes.includes(sim.firmware.bootMode)) {
+      return {
+        ...idle,
+        screen: 'bios',
+        bootProgress: 1,
+        postLinesAr: [
+          ...buildPostSequence(sim),
+          `Boot mode mismatch: ${fam.nameEn} requires ${fam.bootModes.join('/').toUpperCase()} boot.`,
+          `This platform is set to ${sim.firmware.bootMode.toUpperCase()} — unable to boot from installation media.`,
+          'بدّل وضع الإقلاع من إعدادات البرنامج الثابت (تبويب Boot ← مفتاح Boot Mode) ثم أعد المحاولة.',
+        ],
+        bootDevicesAr: devicesAr,
+      };
+    }
     if (bootElapsedMs < BOOT_SUCCESS_MS) {
       return { ...idle, screen: 'success', bootProgress: 1 };
     }

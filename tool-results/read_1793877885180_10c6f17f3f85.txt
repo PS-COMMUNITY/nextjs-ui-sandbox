@@ -1,0 +1,727 @@
+     1→/**
+     2→ * دمج النماذج ثلاثية الأبعاد الحقيقية (V5 — High-Fidelity Hardware Assets)
+     3→ * ============================================================================
+     4→ * يستبدل المجسمات الإجرائية القديمة بنماذج GLB حقيقية منزّلة ومُرخّصة:
+     5→ *  - طقم مكوّنات PC (case/motherboard/cpu/cooler/gpu/ram/psu/ssd/fan):
+     6→ *    GitHub `Wissemm697/pc-builder` — رخصة MIT (انظر public/models/parts/CREDITS.md).
+     7→ *  - الشاشة (monitor): OpenGameArt «Low-poly monitor» — رخصة CC0 (محوّل من FBX).
+     8→ *
+     9→ * آلية العمل:
+    10→ *  1) preloadGlbAssets() — تُستدعى **قبل** إنشاء PCScene (من LabScreen) وتخزّن المشاهد.
+    11→ *  2) applyGlbParts(visuals) — تُستدعى داخل buildAllParts (تزامنيًا) فتستبدل محتوى
+    12→ *     المجموعات الديناميكية قبل أن يربط PCScene سجلات الأعلام والتحديد.
+    13→ *
+    14→ * المحافظة على منظومة التفاعل (v3/v4):
+    15→ *  - معرّفات القطع componentId تبقى على المجموعات (الالتقاط بالأشعة عبر الأجداد).
+    16→ *  - أعمال الأعلام (FlagVisuals) يُعاد بناؤها من عقد النماذج الحقيقية:
+    17→ *    رافعة المقبس، مزالج RAM، مزلاج PCIe، برغي M.2، لمبة الطاقة + براغي إجرائية صغيرة.
+    18→ *  - الدوّارات (spinners) من عقد `*_rotor` الحقيقية (مراوح GPU/المبرد/PSU/الهيكل).
+    19→ *  - فشل تحميل أي نموذج يُبقي المجسم الإجرائي مكانه (لا مشهد مكسور أبدًا).
+    20→ */
+    21→import * as THREE from 'three';
+    22→import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+    23→import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+    24→import type { FlagVisuals, PartVisuals } from './visualTypes';
+    25→
+    26→type Vec3 = [number, number, number];
+    27→
+    28→/** تعريف تحويل نموذج: أساس (صور +X +Y +Z المحلية في فضائنا) + مقياس لكل محور + مرساة */
+    29→interface PartDef {
+    30→  url: string;
+    31→  /** صورة المحاور المحلية للنموذج في فضاء المشهد: basis[0] = اتجاه +X المحلي بعد التحويل */
+    32→  basis: [Vec3, Vec3, Vec3];
+    33→  /** مقياس لكل محور محلي (وحدة مشهد / متر) */
+    34→  scale: Vec3;
+    35→  /** المرساة: ماذا يصبح عند أصل المجموعة */
+    36→  anchor: 'center' | 'minAll' | 'minY';
+    37→  /** أسماء خامات تُجبر على شفافية (زجاج الأصلي بلا transparent في بعض الصادرات) */
+    38→  forceTransparent?: string[];
+    39→  /** فرض DoubleSide (نماذج مُعكوسة الاتجاه أو أسطح رقيقة) */
+    40→  doubleSide?: boolean;
+    41→}
+    42→
+    43→/** أساس اللوحة الأم: +X النموذج (العرض) → +Z، +Y (الارتفاع) → +Y، +Z (سمك/المكوّنات) → −X */
+    44→const BOARD_BASIS: [Vec3, Vec3, Vec3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]];
+    45→
+    46→const DEFS: Record<'case' | 'motherboard' | 'cpu' | 'cooler' | 'ram' | 'gpu' | 'psu' | 'ssd' | 'fan' | 'monitor', PartDef> = {
+    47→  // صندوق: العمق +X_g→+Z (الواجهة +X_g عند 4.6)، الزجاج +Z_g→−X (جهة الكاميرا)، قاع النموذج عند Y=0
+    48→  case: { url: '/models/parts/case.glb', basis: BOARD_BASIS, scale: [10.11, 9.36, 9.55], anchor: 'minAll', forceTransparent: ['glass'] },
+    49→  // اللوحة: مركز الـbbox عند أصل المجموعة (MOUNTS.motherboard) — الوجه نحو −X
+    50→  motherboard: { url: '/models/parts/motherboard.glb', basis: BOARD_BASIS, scale: [9.31, 9.84, 1.3], anchor: 'center' },
+    51→  // المعالج: IHS (+Z_g) نحو −X (وجه المشاهد)
+    52→  cpu: { url: '/models/parts/cpu.glb', basis: BOARD_BASIS, scale: [10, 10, 10], anchor: 'center' },
+    53→  // المبرد البرجي: محور البرج +Z_g → −X (يبرز من اللوحة)، محور المروحة +X_g → +Z (النفخ من الأمام للخلف)
+    54→  cooler: { url: '/models/parts/cooler.glb', basis: BOARD_BASIS, scale: [10.4, 9.92, 9.69], anchor: 'center' },
+    55→  // شريحة RAM: الطول +Y_g → +Y (رأسيًا في الفتحات)، الارتفاع +Z_g → −X، السماكة +X_g → +Z
+    56→  ram: { url: '/models/parts/ram.glb', basis: BOARD_BASIS, scale: [10, 10, 10], anchor: 'center' },
+    57→  // بطاقة الرسومات (تصحيح هندسي V6-A): الطول +X_g → +Z (البراكيت −X_g عند الخلف)،
+    58→  // السماكة +Y_g → +Y (المراوح −Y_g نحو الأسفل)، عرض البطاقة +Z_g → −X
+    59→  // (الأصابع الذهبية عند −Z_g نحو اللوحة الأم +X). كان الأساس القديم يدير البطاقة
+    60→  // على جنبها فبدت واقفة فوق منطقة المعالج — الأساس الصحيح يجعلها أفقية في شق PCIe x16.
+    61→  gpu: { url: '/models/parts/gpu.glb', basis: [[0, 0, 1], [0, 1, 0], [-1, 0, 0]], scale: [10, 10.08, 9.94], anchor: 'center' },
+    62→  // مزود الطاقة: العمق +X_g → +Z (المفتاح −X_g عند الخلف)، المراوح −Y_g نحو الأعلى، العرض +Z_g → +X
+    63→  psu: { url: '/models/parts/psu.glb', basis: [[0, 0, 1], [0, -1, 0], [1, 0, 0]], scale: [10, 9.99, 10], anchor: 'center' },
+    64→  // M.2: الطول +X_g → +Z (أفقي أسفل المقبس)، العرض +Y_g → +Y، السماكة +Z_g → −X
+    65→  ssd: { url: '/models/parts/ssd.glb', basis: BOARD_BASIS, scale: [10, 10, 10], anchor: 'center' },
+    66→  // مروحة هيكل 120mm: محورها +X_g (يوجَّه لاحقًا داخل الغلاف المُدار)
+    67→  fan: { url: '/models/parts/fan.glb', basis: BOARD_BASIS, scale: [10, 10, 10], anchor: 'center' },
+    68→  // الشاشة: كما هي (+Z_g وجه الشاشة نحو الكاميرا بعد دوران المجموعة)، القاع عند Y=0
+    69→  monitor: { url: '/models/parts/monitor.glb', basis: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], scale: [4.2, 4.2, 4.2], anchor: 'minY' },
+    70→};
+    71→
+    72→// ============================================================
+    73→// التحميل المسبق
+    74→// ============================================================
+    75→
+    76→const cache = new Map<string, THREE.Object3D>();
+    77→let preloadPromise: Promise<void> | null = null;
+    78→
+    79→/** هل الأصول الحقيقية جاهزة؟ (يُستخدم للقرارات التشخيصية) */
+    80→export function glbAssetsReady(): boolean {
+    81→  return cache.size >= Object.keys(DEFS).length;
+    82→}
+    83→
+    84→/** تحميل كل النماذج مسبقًا — ينجح دائمًا (الفشل الفردي يتخطى النموذج) */
+    85→export function preloadGlbAssets(): Promise<void> {
+    86→  if (!preloadPromise) {
+    87→    const loader = new GLTFLoader();
+    88→    loader.setMeshoptDecoder(MeshoptDecoder);
+    89→    const jobs = Object.values(DEFS).map(
+    90→      (def) =>
+    91→        new Promise<void>((resolve) => {
+    92→          loader.load(
+    93→            def.url,
+    94→            (gltf) => {
+    95→              const scene = gltf.scene;
+    96→              const mats = new Set<THREE.Material>();
+    97→              scene.traverse((obj) => {
+    98→                if (!(obj instanceof THREE.Mesh)) return;
+    99→                const arr = Array.isArray(obj.material) ? obj.material : [obj.material];
+   100→                for (const m of arr) {
+   101→                  if (def.forceTransparent?.some((n) => (m.name || '').toLowerCase().includes(n))) {
+   102→                    m.transparent = true;
+   103→                    m.depthWrite = false;
+   104→                  }
+   105→                  if (def.doubleSide) m.side = THREE.DoubleSide;
+   106→                  if ('emissiveIntensity' in m) (m as THREE.MeshStandardMaterial).emissiveIntensity = Math.min((m as THREE.MeshStandardMaterial).emissiveIntensity ?? 0, 1);
+   107→                  mats.add(m);
+   108→                }
+   109→              });
+   110→              cache.set(def.url, scene);
+   111→              console.info('[glb] loaded:', def.url);
+   112→              resolve();
+   113→            },
+   114→            undefined,
+   115→            (err) => {
+   116→              console.warn('[glb] FAILED:', def.url, String(err));
+   117→              resolve(); // فشل التحميل → يبقى المجسم الإجرائي
+   118→            },
+   119→          );
+   120→        }),
+   121→    );
+   122→    preloadPromise = Promise.all(jobs).then(() => undefined);
+   123→  }
+   124→  return preloadPromise;
+   125→}
+   126→
+   127→// ============================================================
+   128→// مساعدات التحويل والتطبيع
+   129→// ============================================================
+   130→
+   131→function vec3(v: Vec3): THREE.Vector3 {
+   132→  return new THREE.Vector3(v[0], v[1], v[2]);
+   133→}
+   134→
+   135→/**
+   136→ * يطبع نسخة النموذج على المرساة: يعيد (الجذر + الإزاحة المطبقة).
+   137→ * التطبيع: world = R·S·p ثم إزاحة بحيث تقع نقطة المرساة عند الأصل.
+   138→ */
+   139→function normalize(src: THREE.Object3D, def: PartDef): { root: THREE.Group; offset: THREE.Vector3 } {
+   140→  const root = new THREE.Group();
+   141→  root.name = 'glb-normalized';
+   142→  root.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(vec3(def.basis[0]), vec3(def.basis[1]), vec3(def.basis[2])));
+   143→  root.scale.set(def.scale[0], def.scale[1], def.scale[2]);
+   144→  root.add(src);
+   145→  root.updateMatrixWorld(true);
+   146→  const bbox = new THREE.Box3().setFromObject(root);
+   147→  const offset = new THREE.Vector3();
+   148→  if (def.anchor === 'center') offset.copy(bbox.getCenter(new THREE.Vector3())).negate();
+   149→  else if (def.anchor === 'minAll') offset.copy(bbox.min).negate();
+   150→  else {
+   151→    // minY: القاع عند Y=0 ومركز X/Z عند الصفر
+   152→    const c = bbox.getCenter(new THREE.Vector3());
+   153→    offset.set(c.x, bbox.min.y, c.z).negate();
+   154→  }
+   155→  // الإزاحة على الجذر نفسه (تُطبَّق بعد R·S في فضاء العالم) — لا تلمس src المحلي
+   156→  root.position.copy(offset);
+   157→  return { root, offset };
+   158→}
+   159→
+   160→/** تفريغ مجموعة من أبنائها مع تحرير الهندسات (الخامات مشتركة من الـcache — لا تُحرر) */
+   161→function clearGroup(g: THREE.Object3D, keep: THREE.Object3D[] = []): void {
+   162→  for (const child of [...g.children]) {
+   163→    if (keep.includes(child)) continue;
+   164→    g.remove(child);
+   165→    child.traverse((o) => {
+   166→      if (o instanceof THREE.Mesh) o.geometry.dispose();
+   167→    });
+   168→  }
+   169→}
+   170→
+   171→/** تطبيق الظلال على كل الشبكات */
+   172→function setShadows(root: THREE.Object3D, cast: boolean, receive = false): void {
+   173→  root.traverse((o) => {
+   174→    if (o instanceof THREE.Mesh) {
+   175→      o.castShadow = cast;
+   176→      if (receive) o.receiveShadow = true;
+   177→    }
+   178→  });
+   179→}
+   180→
+   181→/**
+   182→ * غلاف pivot على مستوى المجموعة الديناميكية (فضاءها = فضاء العالم قبل التموضع):
+   183→ * يسمح بتدوير الرافعة/المزلاج حول محور عالمي صحيح حتى لو كان الأب المباشر مُدارًا.
+   184→ */
+   185→function pivotAround(node: THREE.Object3D, group: THREE.Object3D, localY: Vec3): THREE.Object3D {
+   186→  group.updateMatrixWorld(true);
+   187→  const pivot = new THREE.Object3D();
+   188→  pivot.name = `${node.name || 'node'}-pivot`;
+   189→  node.getWorldPosition(pivot.position);
+   190→  group.worldToLocal(pivot.position);
+   191→  pivot.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), vec3(localY).normalize());
+   192→  group.add(pivot);
+   193→  pivot.attach(node);
+   194→  return pivot;
+   195→}
+   196→
+   197→/** برغي إجرائي صغير (للقطع التي لا تحمل براغٍ في النموذج الأصلي — أداة تفاعل الفك) */
+   198→function makeScrewAt(axis: 'x' | 'y' | 'z', r: number, len: number): THREE.Mesh {
+   199→  const geo = new THREE.CylinderGeometry(r, r, len, 10);
+   200→  const m = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, metalness: 0.85, roughness: 0.35 });
+   201→  const mesh = new THREE.Mesh(geo, m);
+   202→  if (axis === 'x') mesh.rotation.z = Math.PI / 2;
+   203→  else if (axis === 'z') mesh.rotation.x = Math.PI / 2;
+   204→  return mesh;
+   205→}
+   206→
+   207→/** صندوق إجرائي صغير (قوابس الموصلات) */
+   208→function makePlugBox(w: number, h: number, d: number, color = 0x101418): THREE.Mesh {
+   209→  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color, metalness: 0.2, roughness: 0.6 }));
+   210→  return mesh;
+   211→}
+   212→
+   213→function findNode(root: THREE.Object3D, name: string): THREE.Object3D | null {
+   214→  return root.getObjectByName(name) ?? null;
+   215→}
+   216→
+   217→/** إيجاد شبكة سطح العرض (المادة الداكنة) في نموذج الشاشة */
+   218→function findScreenMesh(root: THREE.Object3D): THREE.Mesh | null {
+   219→  let found: THREE.Mesh | null = null;
+   220→  root.traverse((o) => {
+   221→    if (found || !(o instanceof THREE.Mesh)) return;
+   222→    const mats = Array.isArray(o.material) ? o.material : [o.material];
+   223→    if (mats.some((m) => m.name === 'Monitor2_mat')) found = o;
+   224→  });
+   225→  return found;
+   226→}
+   227→
+   228→// ============================================================
+   229→// الدمج الرئيسي
+   230→// ============================================================
+   231→
+   232→/** يستبدل المجسمات الإجرائية بالنماذج الحقيقية (تزامني — يُستدعى داخل buildAllParts) */
+   233→export function applyGlbParts(visuals: PartVisuals): void {
+   234→  try {
+   235→    swapCase(visuals);
+   236→    swapMotherboard(visuals);
+   237→    swapCpu(visuals);
+   238→    swapCooler(visuals);
+   239→    swapRam(visuals);
+   240→    swapGpu(visuals);
+   241→    swapPsu(visuals);
+   242→    swapSsd(visuals);
+   243→    swapFans(visuals);
+   244→    swapMonitor(visuals);
+   245→    // (V6-A) تثبيت البطاقة على شق PCIe x16 الحقيقي المقاس من عقد النموذج
+   246→    alignGpuToSlot(visuals);
+   247→    console.info('[glb] apply done, cached =', cache.size);
+   248→    // hdd + الكابلات (atx24/eps/gpuPower/sata*) تبقى إجرائية — لا نموذج مجاني مناسب (موثق في التقرير)
+   249→  } catch (e) {
+   250→    console.warn('[glb] apply failed:', e);
+   251→  }
+   252→}
+   253→
+   254→// ============================================================
+   255→// (V6-A) محاذاة البطاقة إلى شق PCIe x16 الحقيقي — من Anchors المقاسة
+   256→// ============================================================
+   257→
+   258→/** سجل الارتكازات المقاسة لحظة التشغيل (يقرأه PCScene للتقارير والفحوص) */
+   259→export interface GpuSeatReport {
+   260→  seated: boolean;
+   261→  /** مركز شق PCIe x16 في فضاء المشهد */
+   262→  slotPoint: Vec3 | null;
+   263→  /** مستوى فتحات التوسعة الخلفية (Z) */
+   264→  bracketZ: number | null;
+   265→  /** صندوق البطاقة بعد الجلوس (world-ish في فضاء الجذر) */
+   266→  gpuBox: { min: Vec3; max: Vec3 } | null;
+   267→  /** مسافات التخلوص المكتشفة (وحدات مشهد، 1 = 10سم) */
+   268→  clearance: { toCooler: number; toRam: number } | null;
+   269→  source: 'glb-anchors' | 'procedural-fallback';
+   270→}
+   271→
+   272→export const gpuSeat: GpuSeatReport = {
+   273→  seated: false, slotPoint: null, bracketZ: null, gpuBox: null, clearance: null,
+   274→  source: 'procedural-fallback',
+   275→};
+   276→
+   277→/** مركز صندوق إحاطة عقدة باسمها داخل مجموعة (فضاء المجموعة الأب) */
+   278→function anchorCenter(group: THREE.Object3D, name: string, out: THREE.Vector3): boolean {
+   279→  const node = findNode(group, name);
+   280→  if (!node) return false;
+   281→  group.updateMatrixWorld(true);
+   282→  const box = new THREE.Box3().setFromObject(node);
+   283→  if (!isFinite(box.min.x)) {
+   284→    // عقدة بلا شبكة: استخدم موضعها
+   285→    node.getWorldPosition(out);
+   286→    group.parent?.worldToLocal(out);
+   287→    return true;
+   288→  }
+   289→  box.getCenter(out);
+   290→  group.parent?.worldToLocal(out);
+   291→  return true;
+   292→}
+   293→
+   294→/**
+   295→ * يجلس البطاقة في شق PCIe x16 الحقيقي (توجيه V6 §2.3):
+   296→ *  1) مركز الشق من عقدة anchor_pcie_x16 في لوحة الأم الحقيقية (بديل إجرائي عند الفشل).
+   297→ *  2) مستوى البراكيت من anchor_slot_1 في هيكل الصندوق الحقيقي.
+   298→ *  3) القيود: الأطراف الذهبية (الحافة +X للبطاقة) داخل الشق، أعلى البطاقة بمستوى أعلى الشق،
+   299→ *     والبراكيت على مستوى فتحات التوسعة — ثم يفحص التخلوص من المبرد والذاكرة ويسجل النتيجة.
+   300→ */
+   301→function alignGpuToSlot(visuals: PartVisuals): void {
+   302→  const gpuGroup = visuals.dynamic.gpu;
+   303→  const boardGroup = visuals.dynamic.motherboard;
+   304→  gpuSeat.seated = false;
+   305→  gpuSeat.clearance = null;
+   306→
+   307→  const slot = new THREE.Vector3();
+   308→  const fromGlb = anchorCenter(boardGroup, 'anchor_pcie_x16', slot);
+   309→  // مستوى فتحات التوسعة الخلفية من الهيكل الحقيقي
+   310→  const bracket = new THREE.Vector3();
+   311→  const caseOk = anchorCenter(visuals.caseShell, 'anchor_slot_1', bracket);
+   312→
+   313→  let seatX: number;
+   314→  let topY: number;
+   315→  let bracketZ: number;
+   316→  if (fromGlb) {
+   317→    // الأطراف تدخل قناة الشق ~2سم (الشق بارز من وجه اللوحة)
+   318→    seatX = slot.x + 0.02;
+   319→    topY = slot.y + 0.012;
+   320→    gpuSeat.source = 'glb-anchors';
+   321→  } else {
+   322→    // بديل إجرائي: فتحة x16 في مصنع القطع (Y=2.0، وجه اللوحة 1.82)
+   323→    seatX = 1.79;
+   324→    topY = 2.01;
+   325→    slot.set(1.79, 2.0, 1.42);
+   326→  }
+   327→  bracketZ = caseOk ? bracket.z : 0.12;
+   328→  gpuSeat.slotPoint = [slot.x, slot.y, slot.z];
+   329→  gpuSeat.bracketZ = bracketZ;
+   330→
+   331→  gpuGroup.updateMatrixWorld(true);
+   332→  const box = new THREE.Box3().setFromObject(gpuGroup);
+   333→  if (isFinite(box.min.x)) {
+   334→    const dx = seatX - box.max.x;           // دفع الأطراف نحو الشق
+   335→    const dy = topY - box.max.y;            // إنزال البطاقة حتى مستوى الشق
+   336→    const dz = bracketZ + 0.004 - box.min.z; // البراكيت على مستوى الفتحات
+   337→    gpuGroup.position.x += dx;
+   338→    gpuGroup.position.y += dy;
+   339→    gpuGroup.position.z += dz;
+   340→  } else {
+   341→    // bbox غير متاح (مجسم إجرائي) — استخدم MOUNTS كما هي
+   342→    gpuGroup.position.set(1.47, 2.2, 1.42);
+   343→  }
+   344→  gpuGroup.updateMatrixWorld(true);
+   345→
+   346→  const box2 = new THREE.Box3().setFromObject(gpuGroup);
+   347→  gpuSeat.gpuBox = { min: [box2.min.x, box2.min.y, box2.min.z], max: [box2.max.x, box2.max.y, box2.max.z] };
+   348→  gpuSeat.seated = true;
+   349→
+   350→  // فحص تصادم تقريبي (توجيه V6 §2.3.7): مبرد CPU وRAM مقابل جسم البطاقة
+   351→  const coolerBox = new THREE.Box3().setFromObject(visuals.dynamic.cooler);
+   352→  const ramBox = new THREE.Box3().setFromObject(visuals.dynamic.ram);
+   353→  const gapTo = (other: THREE.Box3): number => {
+   354→    if (!isFinite(other.min.x)) return 99;
+   355→    const dy = Math.max(other.min.y - box2.max.y, box2.min.y - other.max.y);
+   356→    if (dy >= 0) return dy;
+   357→    // تداخل رأسي: قس الفجوة الأفقية
+   358→    const dz = Math.max(other.min.z - box2.max.z, box2.min.z - other.max.z);
+   359→    const dx2 = Math.max(other.min.x - box2.max.x, box2.min.x - other.max.x);
+   360→    return Math.max(dz, dx2);
+   361→  };
+   362→  gpuSeat.clearance = { toCooler: gapTo(coolerBox), toRam: gapTo(ramBox) };
+   363→  console.info(
+   364→    `[v6] GPU seated at slot (${slot.x.toFixed(2)}, ${slot.y.toFixed(2)}, ${slot.z.toFixed(2)}), bracketZ=${bracketZ.toFixed(2)}, ` +
+   365→    `clearance cooler=${(gpuSeat.clearance.toCooler * 10).toFixed(1)}cm ram=${(gpuSeat.clearance.toRam * 10).toFixed(1)}cm`,
+   366→  );
+   367→}
+   368→
+   369→// ---------- الصندوق + الغطاء الزجاجي ----------
+   370→
+   371→function swapCase(visuals: PartVisuals): void {
+   372→  const def = DEFS.case;
+   373→  const model = cache.get(def.url);
+   374→  if (!model) return;
+   375→
+   376→  // 1) الهيكل: كل العقد ما عدا الزجاج
+   377→  const shellClone = model.clone(true);
+   378→  const glassNode = findNode(shellClone, 'case_glass');
+   379→  glassNode?.removeFromParent();
+   380→  const shellRoot = new THREE.Group();
+   381→  shellRoot.add(shellClone);
+   382→  const shellN = normalize(shellRoot, def);
+   383→  clearGroup(visuals.caseShell);
+   384→  setShadows(shellN.root, true, true);
+   385→  visuals.caseShell.add(shellN.root);
+   386→
+   387→  // لمبة الطاقة الحقيقية — خامتها تُستنسخ لعزل التحكم بالإطفاء/التشغيل
+   388→  const led = findNode(visuals.caseShell, 'case_power_led');
+   389→  if (led instanceof THREE.Mesh) {
+   390→    const mats = Array.isArray(led.material) ? [led.material[0]] : [led.material];
+   391→    led.material = (mats[0] as THREE.MeshStandardMaterial).clone();
+   392→    visuals.flags.powerLed = led;
+   393→  }
+   394→
+   395→  // 2) الغطاء الزجاجي داخل المجموعة المفصلية (محور المفصلة عند (0,2.25,0.06))
+   396→  // الهدف: عند زاوية الدوران 0 يكون الزجاج في مكانه الحقيقي في الإحداثيات العالمية:
+   397→  //   world = hinge · translate(offset − hinge) · R·S
+   398→  const glassSource = findNode(model, 'case_glass');
+   399→  if (glassSource) {
+   400→    const hinge = new THREE.Vector3(0, 2.25, 0.06);
+   401→    const wrap = new THREE.Group();
+   402→    wrap.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(vec3(def.basis[0]), vec3(def.basis[1]), vec3(def.basis[2])));
+   403→    wrap.scale.set(def.scale[0], def.scale[1], def.scale[2]);
+   404→    wrap.position.copy(shellN.offset).sub(hinge);
+   405→    wrap.add(glassSource.clone(true));
+   406→    clearGroup(visuals.sidePanel);
+   407→    visuals.sidePanel.add(wrap);
+   408→    setShadows(wrap, false);
+   409→  }
+   410→}
+   411→
+   412→// ---------- اللوحة الأم ----------
+   413→
+   414→function swapMotherboard(visuals: PartVisuals): void {
+   415→  const def = DEFS.motherboard;
+   416→  const model = cache.get(def.url);
+   417→  if (!model) return;
+   418→  const group = visuals.dynamic.motherboard;
+   419→  const keep: THREE.Object3D[] = [];
+   420→  clearGroup(group, keep);
+   421→
+   422→  const board = normalize(model.clone(true), def);
+   423→  setShadows(board.root, true, true);
+   424→  group.add(board.root);
+   425→
+   426→  const flags = visuals.flags;
+   427→
+   428→  // رافعة مقبس المعالج — تدور حول محور Z العالمي (عمودي على طول الرافعة)
+   429→  const lever = findNode(group, 'socket_lever');
+   430→  if (lever) {
+   431→    const pivot = pivotAround(lever, group, [0, 0, -1]);
+   432→    pivot.name = 'flag-cpu-lever';
+   433→    flags.cpuLever = pivot;
+   434→  }
+   435→
+   436→  // مزالج RAM الأربعة — كل واحدة داخل pivot محلي-Z نحو محور الفتحة (+Y العالمي)
+   437→  flags.ramClips = [];
+   438→  for (const name of ['dimm_latch_A1', 'dimm_latch_A2', 'dimm_latch_B1', 'dimm_latch_B2']) {
+   439→    const latch = findNode(group, name);
+   440→    if (!latch) continue;
+   441→    const pivot = pivotAround(latch, group, [0, 1, 0]);
+   442→    pivot.name = 'flag-ram-clip';
+   443→    flags.ramClips.push(pivot);
+   444→  }
+   445→
+   446→  // مزلاج PCIe x16 — يدور حول محور الفتحة (±Z العالمي)
+   447→  const pcieLatch = findNode(group, 'pcie_x16_latch');
+   448→  if (pcieLatch) {
+   449→    const pivot = pivotAround(pcieLatch, group, [0, 0, -1]);
+   450→    pivot.name = 'flag-pcie-latch';
+   451→    flags.pcieLatch = pivot;
+   452→  }
+   453→
+   454→  // برغي M.2 الحقيقي
+   455→  const m2 = findNode(group, 'm2_screw');
+   456→  if (m2) flags.m2Screw = m2;
+   457→
+   458→  // براغي تثبيت اللوحة (إجرائية — النموذج لا يحمل براغٍ منفصلة): تُسحب نحو −X عند الفك
+   459→  flags.moboScrews = [];
+   460→  for (const wy of [-1.4, 0, 1.4]) {
+   461→    for (const wz of [-1.12, 1.12]) {
+   462→      const s = makeScrewAt('x', 0.035, 0.22);
+   463→      s.position.set(-0.02, wy, wz);
+   464→      s.name = 'flag-mobo-screw';
+   465→      flags.moboScrews.push(s);
+   466→      group.add(s);
+   467→    }
+   468→  }
+   469→
+   470→  // قابس رؤوس المراوح + قابس Front Panel (إجرائيان — مواضع منطقية على اللوحة)
+   471→  const fanPlug = makePlugBox(0.08, 0.08, 0.18);
+   472→  fanPlug.position.set(-0.07, 1.44, 0.775);
+   473→  fanPlug.name = 'flag-fan-header-plug';
+   474→  flags.fanHeaderPlug = fanPlug;
+   475→  group.add(fanPlug);
+   476→
+   477→  const fpPlug = makePlugBox(0.05, 0.14, 0.22);
+   478→  fpPlug.position.set(-0.115, -1.2, 0.9);
+   479→  fpPlug.name = 'flag-front-panel-plug';
+   480→  flags.frontPanelPlug = fpPlug;
+   481→  group.add(fpPlug);
+   482→}
+   483→
+   484→// ---------- المعالج ----------
+   485→
+   486→function swapCpu(visuals: PartVisuals): void {
+   487→  const def = DEFS.cpu;
+   488→  const model = cache.get(def.url);
+   489→  if (!model) return;
+   490→  const group = visuals.dynamic.cpu;
+   491→  clearGroup(group);
+   492→  const cpu = normalize(model.clone(true), def);
+   493→  setShadows(cpu.root, true);
+   494→  group.add(cpu.root);
+   495→}
+   496→
+   497→// ---------- المبرد ----------
+   498→
+   499→function swapCooler(visuals: PartVisuals): void {
+   500→  const def = DEFS.cooler;
+   501→  const model = cache.get(def.url);
+   502→  if (!model) return;
+   503→  const group = visuals.dynamic.cooler;
+   504→  clearGroup(group);
+   505→  const cooler = normalize(model.clone(true), def);
+   506→  setShadows(cooler.root, true);
+   507→  group.add(cooler.root);
+   508→  const rotor = findNode(group, 'cooler_fan_rotor');
+   509→  if (rotor) visuals.spinners.push(rotor);
+   510→}
+   511→
+   512→// ---------- ذاكرة RAM (شريحتان في الفتحتين 1 و3) ----------
+   513→
+   514→function swapRam(visuals: PartVisuals): void {
+   515→  const def = DEFS.ram;
+   516→  const model = cache.get(def.url);
+   517→  if (!model) return;
+   518→  const group = visuals.dynamic.ram;
+   519→  clearGroup(group);
+   520→  for (const dz of [-0.08, 0.08]) {
+   521→    const stick = normalize(model.clone(true), def);
+   522→    stick.root.position.z = dz;
+   523→    setShadows(stick.root, true);
+   524→    group.add(stick.root);
+   525→  }
+   526→}
+   527→
+   528→// ---------- بطاقة الرسومات ----------
+   529→
+   530→function swapGpu(visuals: PartVisuals): void {
+   531→  const def = DEFS.gpu;
+   532→  const model = cache.get(def.url);
+   533→  if (!model) return;
+   534→  const group = visuals.dynamic.gpu;
+   535→  clearGroup(group);
+   536→  const gpu = normalize(model.clone(true), def);
+   537→  gpu.root.traverse((o) => {
+   538→    if (o instanceof THREE.Mesh) {
+   539→      const mats = Array.isArray(o.material) ? o.material : [o.material];
+   540→      for (const m of mats) m.side = THREE.DoubleSide;
+   541→    }
+   542→  });
+   543→  setShadows(gpu.root, true);
+   544→  group.add(gpu.root);
+   545→
+   546→  // براغي البراكيت (إجرائية) — ترتفع عند الفك
+   547→  visuals.flags.gpuScrews = [];
+   548→  for (const dz of [-1.42, -1.34]) {
+   549→    const s = makeScrewAt('y', 0.035, 0.1);
+   550→    s.position.set(0, 0.74, dz);
+   551→    s.name = 'flag-gpu-screw';
+   552→    visuals.flags.gpuScrews.push(s);
+   553→    group.add(s);
+   554→  }
+   555→
+   556→  for (const name of ['gpu_fan_rotor_1', 'gpu_fan_rotor_2']) {
+   557→    const rotor = findNode(group, name);
+   558→    if (rotor) visuals.spinners.push(rotor);
+   559→  }
+   560→}
+   561→
+   562→// ---------- مزود الطاقة ----------
+   563→
+   564→function swapPsu(visuals: PartVisuals): void {
+   565→  const def = DEFS.psu;
+   566→  const model = cache.get(def.url);
+   567→  if (!model) return;
+   568→  const group = visuals.dynamic.psu;
+   569→  clearGroup(group);
+   570→  const psu = normalize(model.clone(true), def);
+   571→  setShadows(psu.root, true);
+   572→  group.add(psu.root);
+   573→
+   574→  // 4 براغي الوجه الخلفي (إجرائية)
+   575→  visuals.flags.psuScrews = [];
+   576→  for (const dx of [-0.45, 0.45]) {
+   577→    for (const dy of [-0.25, 0.25]) {
+   578→      const s = makeScrewAt('y', 0.03, 0.08);
+   579→      s.position.set(dx, dy, -0.74);
+   580→      s.name = 'flag-psu-screw';
+   581→      visuals.flags.psuScrews.push(s);
+   582→      group.add(s);
+   583→    }
+   584→  }
+   585→
+   586→  const rotor = findNode(group, 'psu_fan_rotor');
+   587→  if (rotor) visuals.spinners.push(rotor);
+   588→}
+   589→
+   590→// ---------- M.2 SSD ----------
+   591→
+   592→function swapSsd(visuals: PartVisuals): void {
+   593→  const def = DEFS.ssd;
+   594→  const model = cache.get(def.url);
+   595→  if (!model) return;
+   596→  const group = visuals.dynamic.ssd;
+   597→  clearGroup(group);
+   598→  const ssd = normalize(model.clone(true), def);
+   599→  setShadows(ssd.root, true);
+   600→  group.add(ssd.root);
+   601→}
+   602→
+   603→// ---------- مراوح الهيكل (أمامية ×2 + خلفية) ----------
+   604→
+   605→function swapFans(visuals: PartVisuals): void {
+   606→  const def = DEFS.fan;
+   607→  const model = cache.get(def.url);
+   608→  if (!model) return;
+   609→  const group = visuals.dynamic.fans;
+   610→  clearGroup(group);
+   611→  // براغي المراوح الإجرائية القديمة (مراجع ميتة بعد التفريغ) تُمسح قبل إعادة البناء
+   612→  visuals.flags.fanScrews = [];
+   613→
+   614→  const mount = visuals.dynamic.fans.position;
+   615→  for (const fd of [
+   616→    { id: 'front-1', pos: [1.05, 2.8, 4.42], rotX: Math.PI / 2, front: true },
+   617→    { id: 'front-2', pos: [1.05, 1.4, 4.42], rotX: Math.PI / 2, front: true },
+   618→    { id: 'rear', pos: [1.05, 3.7, 0.33], rotX: -Math.PI / 2, front: false },
+   619→  ] as Array<{ id: string; pos: Vec3; rotX: number; front: boolean }>) {
+   620→    const d = fd;
+   621→    const wrapper = new THREE.Group();
+   622→    wrapper.name = `case-fan-${d.id}`;
+   623→    wrapper.position.set(d.pos[0] - mount.x, d.pos[1] - mount.y, d.pos[2] - mount.z);
+   624→    wrapper.rotation.x = d.rotX;
+   625→    // داخل الغلاف المُدار: محور المروحة (+X_g) نحو +Y المحلي (يصبح ±Z عالميًا)
+   626→    const basis: [Vec3, Vec3, Vec3] = d.front ? [[0, 1, 0], [0, 0, 1], [1, 0, 0]] : [[0, -1, 0], [0, 0, -1], [1, 0, 0]];
+   627→    const bdef: PartDef = { ...def, basis, scale: [10, 10, 10], anchor: 'center' };
+   628→    const fan = normalize(model.clone(true), bdef);
+   629→    wrapper.add(fan.root);
+   630→
+   631→    // 4 براغي الزوايا (إجرائية — على محور المروحة المحلي Y)
+   632→    visuals.flags.fanScrews = visuals.flags.fanScrews || [];
+   633→    const half = 0.53;
+   634→    for (const sx of [-1, 1]) {
+   635→      for (const sz of [-1, 1]) {
+   636→        const s = makeScrewAt('y', 0.03, 0.06);
+   637→        s.position.set(sx * half, 0.16, sz * half);
+   638→        s.name = 'flag-fan-screw';
+   639→        visuals.flags.fanScrews.push(s);
+   640→        wrapper.add(s);
+   641→      }
+   642→    }
+   643→    group.add(wrapper);
+   644→    const rotor = findNode(wrapper, 'fan_rotor');
+   645→    if (rotor) {
+   646→      rotor.name = `fan_rotor_${d.id}`; // اسم فريد لكل مروحة (منظومة V6 للمراوح)
+   647→      visuals.spinners.push(rotor);
+   648→    }
+   649→  }
+   650→}
+   651→
+   652→// ---------- الشاشة (جسم GLB + سطح عرض Canvas + الزر والكابل الإجرائيان) ----------
+   653→
+   654→function swapMonitor(visuals: PartVisuals): void {
+   655→  const def = DEFS.monitor;
+   656→  const model = cache.get(def.url);
+   657→  if (!model) return;
+   658→  const group = visuals.monitor;
+   659→
+   660→  // إبقاء الكابل وزر الطاقة الإجرائيين (المصنوعان في buildMonitor) ثم استبدال الجسم
+   661→  const cable = group.getObjectByName('monitor-cable');
+   662→  const oldBtn = group.getObjectByName('monitor-power-btn');
+   663→
+   664→  clearGroup(group, [cable, oldBtn].filter(Boolean) as THREE.Object3D[]);
+   665→
+   666→  const mon = normalize(model.clone(true), def);
+   667→  setShadows(mon.root, true);
+   668→  group.add(mon.root);
+   669→
+   670→  // إعادة تلوين: الجسم والبيزل الفتشان → معدن داكن (CC0 يسمح بالتعديل)
+   671→  const targets = ['Monitor3_mat', 'Monitor4_mat'];
+   672→  mon.root.traverse((o) => {
+   673→    if (!(o instanceof THREE.Mesh)) return;
+   674→    const mats = Array.isArray(o.material) ? o.material : [o.material];
+   675→    for (const m of mats) {
+   676→      if (targets.includes(m.name || '')) {
+   677→        const std = m as THREE.MeshStandardMaterial;
+   678→        std.color.set(0x1c222a);
+   679→        std.metalness = 0.55;
+   680→        std.roughness = 0.45;
+   681→      }
+   682→    }
+   683→  });
+   684→
+   685→  // سطح العرض: إطار Plane فوق وجه الشاشة الحقيقي (المادة الداكنة Monitor2_mat)
+   686→  const screenMesh = findScreenMesh(mon.root);
+   687→  if (screenMesh) {
+   688→    const bbox = new THREE.Box3().setFromObject(screenMesh);
+   689→    const size = bbox.getSize(new THREE.Vector3());
+   690→    const center = bbox.getCenter(new THREE.Vector3());
+   691→    // المحور الرقيق = عمود سطح العرض
+   692→    const dims = [size.x, size.y, size.z];
+   693→    const thinAxis = dims.indexOf(Math.min(...dims)) as 0 | 1 | 2;
+   694→    const plane = new THREE.Mesh(
+   695→      new THREE.PlaneGeometry(size.x * 0.985, size.y * 0.975),
+   696→      new THREE.MeshBasicMaterial({ color: 0x05070c }),
+   697→    );
+   698→    if (thinAxis === 2) {
+   699→      plane.position.set(center.x, center.y, center.z + size.z * 0.75);
+   700→    } else if (thinAxis === 1) {
+   701→      plane.rotation.x = Math.PI / 2;
+   702→      plane.position.set(center.x, center.y + size.y * 0.75, center.z);
+   703→    } else {
+   704→      plane.rotation.y = Math.PI / 2;
+   705→      plane.position.set(center.x + size.x * 0.75, center.y, center.z);
+   706→    }
+   707→    plane.name = 'monitor-screen';
+   708→    group.add(plane);
+   709→
+   710→    // زر الطاقة + لمبة — أسفل يمين سطح العرض (قابل للنقر)
+   711→    const btn = oldBtn ?? makePlugBox(0.12, 0.09, 0.05, 0x2a323c);
+   712→    btn.userData['peripheral'] = 'monitor-power';
+   713→    btn.name = 'monitor-power-btn';
+   714→    const chinY = bbox.min.y - 0.14;
+   715→    const chinZ = center.z + size.z * 0.75 + 0.02;
+   716→    btn.position.set(bbox.max.x - 0.3, chinY, chinZ);
+   717→    group.add(btn);
+   718→    const ledMesh = new THREE.Mesh(
+   719→      new THREE.BoxGeometry(0.05, 0.045, 0.02),
+   720→      new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x22c55e, emissiveIntensity: 0.9, metalness: 0.2, roughness: 0.5 }),
+   721→    );
+   722→    ledMesh.position.set(bbox.min.x + 0.28, chinY, chinZ);
+   723→    ledMesh.name = 'monitor-chin-led';
+   724→    group.add(ledMesh);
+   725→  }
+   726→}
+   727→

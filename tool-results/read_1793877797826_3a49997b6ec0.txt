@@ -1,0 +1,1125 @@
+     1→/**
+     2→ * vos.ts — محرك النظام الافتراضي (Virtual OS) داخل الشاشة المجسمة (V6-B/C).
+     3→ * ============================================================================
+     4→ * واجهة نظام تشغيل تعليمية مرسومة بالكامل على Canvas 2D (نسيج الشاشة المجسمة):
+     5→ * سطح مكتب + نوافذ حقيقية التفاعل (تحريك/تحجيم/تصغير/تكبير/إغلاق) + قائمة
+     6→ * ابدأ + شريط مهام + إشعارات + مؤشر ماوس افتراضي.
+     7→ *
+     8→ * قواعد صارمة (توجيه V6 §4.4):
+     9→ *  - لا إدخال HTML ولا eval ولا حقن DOM: كل الإدخال عبر API داخلي واضح
+    10→ *    (pointer / wheel / key) تستقبل أحداث الماوس والكيبورد الحقيقيين بعد
+    11→ *    تحويلها من إحداثيات سطح الشاشة المجسمة.
+    12→ *  - كل عنصر مرئي له سلوك معلن (توجيه V6 §4.5) — لا أزرار زخرفية.
+    13→ *  - هذا نظام محاكاة تعليمي وليس Windows حقيقية (توضيح معلن في الواجهة).
+    14→ *
+    15→ * نمط البناء: Immediate-Mode UI (إطار يُبنى كل رسم) — الأدوات تسجّل مستطيلات
+    16→ * تفاعل (UiFrame) تُستخدم للـ hit-testing بين الرسمات. بسيط وموثوق ولا يحتفظ
+    17→ * بشجرة DOM وهمية.
+    18→ */
+    19→
+    20→// ============ أنواع مشتركة ============
+    21→
+    22→export interface VosPointerOpts {
+    23→  button?: number;          // 0 يسار، 2 يمين
+    24→  dy?: number;              // عجلة
+    25→  shift?: boolean;
+    26→  dbl?: boolean;
+    27→}
+    28→
+    29→export interface VosKeyEvent {
+    30→  key: string;
+    31→  code: string;
+    32→  ctrl: boolean;
+    33→  shift: boolean;
+    34→  alt: boolean;
+    35→  meta?: boolean;
+    36→}
+    37→
+    38→export interface VosWindow {
+    39→  id: string;
+    40→  appId: string;
+    41→  titleAr: string;
+    42→  x: number; y: number; w: number; h: number;
+    43→  minimized: boolean;
+    44→  maximized: boolean;
+    45→  z: number;
+    46→  state: Record<string, unknown>; // حالة خاصة بالتطبيق داخل هذه النافذة
+    47→  prev?: { x: number; y: number; w: number; h: number };
+    48→}
+    49→
+    50→export interface VosAppDef {
+    51→  id: string;
+    52→  titleAr: string;
+    53→  iconColor: string;
+    54→  iconGlyph: string;
+    55→  defaultW: number;
+    56→  defaultH: number;
+    57→  desktop?: boolean;         // يظهر أيقونة على سطح المكتب
+    58→  fullscreenOnly?: boolean;  // يُفتح كملء شاشة (بدون إطار نافذة)
+    59→  render: (os: VirtualOS, win: VosWindow | null, ctx: CanvasRenderingContext2D, now: number) => void;
+    60→}
+    61→
+    62→// ============ أدوات رسم مساعدة ============
+    63→
+    64→export const OS_COLORS = {
+    65→  taskbar: 'rgba(10,14,20,0.94)',
+    66→  winBg: '#141a22',
+    67→  winBorder: '#2c3846',
+    68→  titleBg: '#1d2734',
+    69→  titleFocus: '#24435a',
+    70→  titleText: '#dbe5f0',
+    71→  text: '#d7dfe9',
+    72→  dim: '#8b97a5',
+    73→  accent: '#39c7b8',
+    74→  accentSoft: 'rgba(57,199,184,0.16)',
+    75→  danger: '#e35d5d',
+    76→  warn: '#eab308',
+    77→  ok: '#34d399',
+    78→  inputBg: '#0e141b',
+    79→  rowHover: 'rgba(255,255,255,0.05)',
+    80→  rowSelect: 'rgba(57,199,184,0.18)',
+    81→};
+    82→
+    83→export function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+    84→  const rr = Math.min(r, w / 2, h / 2);
+    85→  ctx.beginPath();
+    86→  ctx.moveTo(x + rr, y);
+    87→  ctx.arcTo(x + w, y, x + w, y + h, rr);
+    88→  ctx.arcTo(x + w, y + h, x, y + h, rr);
+    89→  ctx.arcTo(x, y + h, x, y, rr);
+    90→  ctx.arcTo(x, y, x + w, y, rr);
+    91→  ctx.closePath();
+    92→}
+    93→
+    94→// ============ إطار UI الفوري ============
+    95→
+    96→interface HotRect {
+    97→  id: string;
+    98→  x: number; y: number; w: number; h: number;
+    99→  kind: 'button' | 'title' | 'resize' | 'icon' | 'row' | 'custom' | 'scroll';
+   100→  cursor: 'default' | 'pointer' | 'text';
+   101→  onClick?: (opts: VosPointerOpts) => void;
+   102→  onDbl?: () => void;
+   103→  onRight?: () => void;
+   104→  onScroll?: (dy: number) => void;
+   105→  z: number;
+   106→}
+   107→
+   108→export class UiFrame {
+   109→  rects: HotRect[] = [];
+   110→  keyHandler: ((ev: VosKeyEvent) => boolean) | null = null; // true = استُهلك
+   111→  hoverId: string | null = null;
+   112→  textCursor: boolean = false;
+   113→
+   114→  add(r: HotRect): void {
+   115→    this.rects.push(r);
+   116→  }
+   117→
+   118→  hit(x: number, y: number): HotRect | null {
+   119→    // الأعلى z أولًا ثم الأحدث (ترتيب الإضافة يعكس التراكب داخل النافذة)
+   120→    let best: HotRect | null = null;
+   121→    for (const r of this.rects) {
+   122→      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+   123→        if (!best || r.z > best.z) best = r;
+   124→      }
+   125→    }
+   126→    return best;
+   127→  }
+   128→}
+   129→
+   130→// ============ أدوات ============
+   131→
+   132→export interface ButtonOpts {
+   133→  color?: string;
+   134→  fg?: string;
+   135→  disabled?: boolean;
+   136→  font?: string;
+   137→  align?: 'center' | 'left' | 'right';
+   138→}
+   139→
+   140→export interface ScrollState {
+   141→  offset: number;
+   142→  max: number;
+   143→}
+   144→
+   145→// ============ المحرك ============
+   146→
+   147→const TASKBAR_H = 44;
+   148→const ICON_AREA = { x: 14, y: 14, cellW: 92, cellH: 96, colW: 104 };
+   149→
+   150→export class VirtualOS {
+   151→  readonly W: number;
+   152→  readonly H: number;
+   153→  private ctx: CanvasRenderingContext2D;
+   154→
+   155→  /** وضع البيئة: سطح مكتب / برنامج ثابت / معالج تثبيت / استرداد */
+   156→  mode: 'desktop' | 'firmware' | 'setup' | 'recovery' = 'desktop';
+   157→
+   158→  windows: VosWindow[] = [];
+   159→  private zCounter = 10;
+   160→  private nextWinId = 1;
+   161→
+   162→  apps = new Map<string, VosAppDef>();
+   163→  desktopIcons: string[] = [];
+   164→
+   165→  startOpen = false;
+   166→  cursor = { x: 640, y: 300, visible: false };
+   167→  cursorKind: 'default' | 'pointer' | 'text' = 'default';
+   168→
+   169→  toasts: Array<{ titleAr: string; bodyAr: string; at: number }> = [];
+   170→
+   171→  /** مربع النص المركّز عليه (للتوجيه اللوحي) */
+   172→  focusedTextbox: { get: () => string; set: (t: string) => void; onEnter?: () => void } | null = null;
+   173→  private blinkAt = 0;
+   174→
+   175→  private frame: UiFrame = new UiFrame();
+   176→  private lastFrame: UiFrame | null = null;
+   177→  private activeId: string | null = null;
+   178→  private activeStart = { x: 0, y: 0 };
+   179→  private dragWin: { id: string; dx: number; dy: number } | null = null;
+   180→  private dragResize: { id: string; sx: number; sy: number; w0: number; h0: number } | null = null;
+   181→  private downAt = 0;
+   182→  private lastClickId: string | null = null;
+   183→  private lastClickAt = 0;
+   184→  dirty = true;
+   185→
+   186→  constructor(ctx: CanvasRenderingContext2D, W: number, H: number) {
+   187→    this.ctx = ctx;
+   188→    this.W = W;
+   189→    this.H = H;
+   190→  }
+   191→
+   192→  registerApp(app: VosAppDef): void {
+   193→    this.apps.set(app.id, app);
+   194→  }
+   195→
+   196→  // ============ النوافذ ============
+   197→
+   198→  openApp(appId: string, args?: Record<string, unknown>): VosWindow | null {
+   199→    const app = this.apps.get(appId);
+   200→    if (!app) return null;
+   201→    if (app.fullscreenOnly) {
+   202→      // تطبيقات ملء الشاشة (المثبّت) تُدار كأوضاع لا نوافذ
+   203→      this.mode = 'setup';
+   204→      this.dirty = true;
+   205→      return null;
+   206→    }
+   207→    const existing = this.windows.find((w) => w.appId === appId);
+   208→    if (existing && !args) {
+   209→      existing.minimized = false;
+   210→      existing.z = ++this.zCounter;
+   211→      this.dirty = true;
+   212→      return existing;
+   213→    }
+   214→    const offset = (this.windows.length % 5) * 26;
+   215→    const win: VosWindow = {
+   216→      id: `win-${this.nextWinId++}`,
+   217→      appId,
+   218→      titleAr: app.titleAr,
+   219→      x: Math.round(this.W * 0.18) + offset,
+   220→      y: Math.round(this.H * 0.12) + offset,
+   221→      w: Math.min(app.defaultW, this.W - 40),
+   222→      h: Math.min(app.defaultH, this.H - TASKBAR_H - 40),
+   223→      minimized: false,
+   224→      maximized: false,
+   225→      z: ++this.zCounter,
+   226→      state: { ...(args ?? {}) },
+   227→    };
+   228→    this.windows.push(win);
+   229→    this.dirty = true;
+   230→    return win;
+   231→  }
+   232→
+   233→  closeWindow(id: string): void {
+   234→    const idx = this.windows.findIndex((w) => w.id === id);
+   235→    if (idx >= 0) {
+   236→      this.windows.splice(idx, 1);
+   237→      this.dirty = true;
+   238→    }
+   239→  }
+   240→
+   241→  focusWindow(id: string): void {
+   242→    const win = this.windows.find((w) => w.id === id);
+   243→    if (win) {
+   244→      win.z = ++this.zCounter;
+   245→      win.minimized = false;
+   246→      this.dirty = true;
+   247→    }
+   248→  }
+   249→
+   250→  notify(titleAr: string, bodyAr: string): void {
+   251→    this.toasts.push({ titleAr, bodyAr, at: Date.now() });
+   252→    if (this.toasts.length > 3) this.toasts.shift();
+   253→    this.dirty = true;
+   254→  }
+   255→
+   256→  /** واجهة التطبيقات: أدوات الرسم الفوري */
+   257→  get ui(): UiFrame {
+   258→    return this.frame;
+   259→  }
+   260→
+   261→  /** أصل محتوى النافذة الحالية (تُضبط قبل رسم كل تطبيق) — يُستخدم لتسجيل مستطيلات التفاعل */
+   262→  contentOrigin = { x: 0, y: 0 };
+   263→
+   264→  /** تسجيل مستطيل تفاعل بإحداثيات محلية للتطبيق (يُحول لأحداثيات الشاشة داخليًا) */
+   265→  addRect(
+   266→    kind: 'button' | 'title' | 'resize' | 'icon' | 'row' | 'custom' | 'scroll',
+   267→    x: number, y: number, w: number, h: number,
+   268→    handlers: { onClick?: (o?: VosPointerOpts) => void; onDbl?: () => void; onRight?: () => void; onScroll?: (dy: number) => void } ,
+   269→    cursor: 'default' | 'pointer' | 'text' = 'pointer',
+   270→    z = 20,
+   271→  ): string {
+   272→    const id = `r${this.rectCounter++}`;
+   273→    this.frame.add({
+   274→      id,
+   275→      x: x + this.contentOrigin.x,
+   276→      y: y + this.contentOrigin.y,
+   277→      w, h, kind, cursor, z,
+   278→      onClick: handlers.onClick ? () => handlers.onClick?.() : undefined,
+   279→      onDbl: handlers.onDbl,
+   280→      onRight: handlers.onRight,
+   281→      onScroll: handlers.onScroll,
+   282→    });
+   283→    return id;
+   284→  }
+   285→
+   286→  private rectCounter = 1;
+   287→
+   288→  /** هل المؤشر فوق مستطيل محلي؟ (للتحويم داخل التطبيقات) */
+   289→  hoverAt(x: number, y: number, w: number, h: number): boolean {
+   290→    const cx = this.cursor.x - this.contentOrigin.x;
+   291→    const cy = this.cursor.y - this.contentOrigin.y;
+   292→    return cx >= x && cx <= x + w && cy >= y && cy <= y + h;
+   293→  }
+   294→
+   295→  get ctx2d(): CanvasRenderingContext2D {
+   296→    return this.ctx;
+   297→  }
+   298→
+   299→  get taskbarH(): number {
+   300→    return TASKBAR_H;
+   301→  }
+   302→
+   303→  get blink(): boolean {
+   304→    return Math.floor(this.blinkAt / 500) % 2 === 0;
+   305→  }
+   306→
+   307→  // ============ الإدخال (API الرسمي الوحيد) ============
+   308→
+   309→  pointer(type: 'move' | 'down' | 'up' | 'dbl' | 'right', x: number, y: number, opts: VosPointerOpts = {}): void {
+   310→    this.cursor.x = Math.max(0, Math.min(this.W - 1, x));
+   311→    this.cursor.y = Math.max(0, Math.min(this.H - 1, y));
+   312→    const f = this.lastFrame;
+   313→    if (!f) return;
+   314→
+   315→    if (type === 'move') {
+   316→      const hit = f.hit(x, y);
+   317→      this.cursorKind = hit ? hit.cursor : 'default';
+   318→      f.hoverId = hit?.id ?? null;
+   319→      this.dirty = true;
+   320→      return;
+   321→    }
+   322→
+   323→    if (type === 'down') {
+   324→      const hit = f.hit(x, y);
+   325→      this.activeId = hit?.id ?? null;
+   326→      this.activeStart = { x, y };
+   327→      this.downAt = Date.now();
+   328→      if (!hit && this.startOpen) this.startOpen = false;
+   329→      if (this.ctxMenu && (!hit || !hit.id.startsWith('ctx'))) this.ctxMenu = null;
+   330→      if (hit?.kind === 'title') {
+   331→        const win = this.windows.find((w) => w.id === hit.id.split(':')[1]);
+   332→        if (win) {
+   333→          this.focusWindow(win.id);
+   334→          if (!win.maximized) this.dragWin = { id: win.id, dx: x - win.x, dy: y - win.y };
+   335→        }
+   336→      }
+   337→      if (hit?.kind === 'resize') {
+   338→        const win = this.windows.find((w) => w.id === hit.id.split(':')[1]);
+   339→        if (win) this.dragResize = { id: win.id, sx: x, sy: y, w0: win.w, h0: win.h };
+   340→      }
+   341→      this.dirty = true;
+   342→      return;
+   343→    }
+   344→
+   345→    if (type === 'up') {
+   346→      const hit = f.hit(x, y);
+   347→      const now = Date.now();
+   348→      if (this.dragWin) {
+   349→        // إن لم يتحرك المؤشر فعليًا فهي نقرة عنوان (تركيز فقط)
+   350→        const moved = Math.abs(x - this.activeStart.x) + Math.abs(y - this.activeStart.y) > 4;
+   351→        if (!moved) this.dragWin = null;
+   352→      }
+   353→      this.dragWin = null;
+   354→      this.dragResize = null;
+   355→      if (this.activeId && hit && hit.id === this.activeId) {
+   356→        if (this.lastClickId === hit.id && now - this.lastClickAt < 380) {
+   357→          hit.onDbl?.();
+   358→          this.lastClickId = null;
+   359→        } else {
+   360→          hit.onClick?.(opts);
+   361→          this.lastClickId = hit.id;
+   362→          this.lastClickAt = now;
+   363→        }
+   364→      }
+   365→      this.activeId = null;
+   366→      this.dirty = true;
+   367→      return;
+   368→    }
+   369→
+   370→    if (type === 'dbl') {
+   371→      const hit = f.hit(x, y);
+   372→      hit?.onDbl?.();
+   373→      return;
+   374→    }
+   375→
+   376→    if (type === 'right') {
+   377→      const hit = f.hit(x, y);
+   378→      if (hit?.onRight) hit.onRight();
+   379→      else if (!hit) this.desktopContextMenu(x, y);
+   380→      this.dirty = true;
+   381→      return;
+   382→    }
+   383→  }
+   384→
+   385→  wheel(x: number, y: number, dy: number): void {
+   386→    const f = this.lastFrame;
+   387→    if (!f) return;
+   388→    const hit = f.hit(x, y);
+   389→    hit?.onScroll?.(dy);
+   390→    this.dirty = true;
+   391→  }
+   392→
+   393→  /** لوحة المفاتيح الحقيقية — توجيه V6 §4.3: Enter/Backspace/Tab/Shift/Ctrl/الأسهم/Esc */
+   394→  key(ev: VosKeyEvent): void {
+   395→    // مربع نص مركّز يلتقط الكتابة أولًا
+   396→    if (this.focusedTextbox) {
+   397→      const tb = this.focusedTextbox;
+   398→      if (ev.key === 'Enter') {
+   399→        tb.onEnter?.();
+   400→        this.dirty = true;
+   401→        return;
+   402→      }
+   403→      if (ev.key === 'Backspace') {
+   404→        tb.set(tb.get().slice(0, -1));
+   405→        this.dirty = true;
+   406→        return;
+   407→      }
+   408→      if (ev.key.length === 1 && !ev.ctrl && !ev.alt && !ev.meta) {
+   409→        tb.set(tb.get() + (ev.shift ? ev.key.toUpperCase() : ev.key));
+   410→        this.dirty = true;
+   411→        return;
+   412→      }
+   413→      if (ev.key === 'Escape') {
+   414→        this.focusedTextbox = null;
+   415→        this.dirty = true;
+   416→        return;
+   417→      }
+   418→    }
+   419→
+   420→    // عام: Esc يغلق قائمة ابدأ
+   421→    if (ev.key === 'Escape' && this.startOpen) {
+   422→      this.startOpen = false;
+   423→      this.dirty = true;
+   424→      return;
+   425→    }
+   426→
+   427→    // تمرير إلى معالج مفتاح الإطار (التطبيق النشط)
+   428→    if (this.frame.keyHandler && this.frame.keyHandler(ev)) {
+   429→      this.dirty = true;
+   430→      return;
+   431→    }
+   432→    this.dirty = true;
+   433→  }
+   434→
+   435→  // ============ الرسم ============
+   436→
+   437→  /** يرسم إطارًا كاملًا ويعيد true إذا اكتمل رسم فعلي */
+   438→  render(now: number): boolean {
+   439→    this.frame = new UiFrame();
+   440→    const ctx = this.ctx;
+   441→    this.blinkAt = now;
+   442→
+   443→    ctx.save();
+   444→    ctx.clearRect(0, 0, this.W, this.H);
+   445→
+   446→    if (this.mode === 'desktop') {
+   447→      this.drawDesktop(ctx, now);
+   448→    } else if (this.mode === 'firmware') {
+   449→      this.drawFirmware(ctx, now);
+   450→    } else if (this.mode === 'recovery') {
+   451→      this.drawRecovery(ctx, now);
+   452→    }
+   453→    // mode 'setup' يرسمه تطبيق المثبّت عبر drawSetupWith
+   454→
+   455→    this.drawOverlays(ctx, now);
+   456→    this.drawCursor(ctx);
+   457→
+   458→    ctx.restore();
+   459→
+   460→    this.lastFrame = this.frame;
+   461→    this.dirty = false;
+   462→    return true;
+   463→  }
+   464→
+   465→  /** يفرض رسم وضع setup عبر تطبيق المثبّت — يستدعى من PCScene قبل render */
+   466→  drawSetupWith(fn: (ctx: CanvasRenderingContext2D, os: VirtualOS, now: number) => void, now: number): boolean {
+   467→    this.frame = new UiFrame();
+   468→    const ctx = this.ctx;
+   469→    ctx.save();
+   470→    ctx.clearRect(0, 0, this.W, this.H);
+   471→    fn(ctx, this, now);
+   472→    this.drawOverlays(ctx, now);
+   473→    this.drawCursor(ctx);
+   474→    ctx.restore();
+   475→    this.lastFrame = this.frame;
+   476→    this.dirty = false;
+   477→    return true;
+   478→  }
+   479→
+   480→  // ============ سطح المكتب ============
+   481→
+   482→  private drawDesktop(ctx: CanvasRenderingContext2D, now: number): void {
+   483→    // خلفية
+   484→    const g = ctx.createLinearGradient(0, 0, this.W, this.H);
+   485→    g.addColorStop(0, '#0f2e33');
+   486→    g.addColorStop(0.5, '#0b2228');
+   487→    g.addColorStop(1, '#07161b');
+   488→    ctx.fillStyle = g;
+   489→    ctx.fillRect(0, 0, this.W, this.H);
+   490→    // شعار هندسي خفيف
+   491→    ctx.strokeStyle = 'rgba(57,199,184,0.10)';
+   492→    ctx.lineWidth = 2;
+   493→    for (let i = 0; i < 5; i++) {
+   494→      ctx.beginPath();
+   495→      ctx.arc(this.W - 120, 90, 30 + i * 26, 0, Math.PI * 2);
+   496→      ctx.stroke();
+   497→    }
+   498→    ctx.fillStyle = 'rgba(215,223,233,0.55)';
+   499→    ctx.font = 'bold 20px monospace';
+   500→    ctx.textAlign = 'left';
+   501→    ctx.fillText('PC Lab OS — بيئة تدريب افتراضية', 18, this.H - TASKBAR_H - 14);
+   502→    ctx.fillStyle = 'rgba(139,151,165,0.75)';
+   503→    ctx.font = '13px sans-serif';
+   504→    ctx.fillText('محاكاة تعليمية — ليست نظام Windows حقيقيًا', 18, this.H - TASKBAR_H + 6);
+   505→
+   506→    // أيقونات سطح المكتب
+   507→    let col = 0;
+   508→    let row = 0;
+   509→    for (const appId of this.desktopIcons) {
+   510→      const app = this.apps.get(appId);
+   511→      if (!app) continue;
+   512→      const ix = ICON_AREA.x + col * ICON_AREA.colW;
+   513→      const iy = ICON_AREA.y + row * ICON_AREA.cellH;
+   514→      this.drawDesktopIcon(ctx, ix, iy, app.iconGlyph, app.iconColor, app.titleAr, appId);
+   515→      row++;
+   516→      if (iy + ICON_AREA.cellH > this.H - TASKBAR_H - 100) {
+   517→        row = 0;
+   518→        col++;
+   519→      }
+   520→    }
+   521→
+   522→    // شريط تنبيه التعريف المفقود (سيناريو F15) — حالة معلنة حقيقية
+   523→    const st = this.storeReader?.();
+   524→    if (st && st.os.driversMissing.length > 0) {
+   525→      ctx.fillStyle = 'rgba(234,179,8,0.14)';
+   526→      roundRect(ctx, this.W / 2 - 260, 14, 520, 40, 8);
+   527→      ctx.fill();
+   528→      ctx.strokeStyle = 'rgba(234,179,8,0.5)';
+   529→      roundRect(ctx, this.W / 2 - 260, 14, 520, 40, 8);
+   530→      ctx.stroke();
+   531→      ctx.fillStyle = '#eab308';
+   532→      ctx.font = 'bold 14px sans-serif';
+   533→      ctx.textAlign = 'center';
+   534→      ctx.fillText('تعريف بطاقة الرسوميات مفقود — الدقة منخفضة (افتح Device Manager لتحديثه)', this.W / 2, 39);
+   535→      ctx.textAlign = 'left';
+   536→    }
+   537→
+   538→    // النوافذ من الأسفل للأعلى
+   539→    const sorted = [...this.windows].sort((a, b) => a.z - b.z);
+   540→    for (const win of sorted) {
+   541→      if (!win.minimized) this.drawWindow(ctx, win, now);
+   542→    }
+   543→
+   544→    this.drawTaskbar(ctx, now);
+   545→
+   546→    if (this.startOpen) this.drawStartMenu(ctx);
+   547→  }
+   548→
+   549→  /** قارئ حالة المتجر — يُحقن من الخارج (تفادي استيراد دائري) */
+   550→  storeReader: (() => {
+   551→    os: { installed: string | null; edition: string | null; driversMissing: string[]; bcdCorrupt: boolean };
+   552→    thermal: { cpuTempC: number; gpuTempC: number };
+   553→    fans: Array<{ labelAr: string; rpm: number; running: boolean }>;
+   554→  }) | null = null;
+   555→
+   556→  private drawDesktopIcon(ctx: CanvasRenderingContext2D, x: number, y: number, glyph: string, color: string, label: string, appId: string): void {
+   557→    const id = `icon:${appId}`;
+   558→    const w = ICON_AREA.colW - 12;
+   559→    const h = 84;
+   560→    const hovered = this.frame.hoverId === id;
+   561→    if (hovered) {
+   562→      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+   563→      roundRect(ctx, x, y, w, h, 8);
+   564→      ctx.fill();
+   565→    }
+   566→    ctx.fillStyle = color;
+   567→    roundRect(ctx, x + (w - 52) / 2, y + 6, 52, 42, 8);
+   568→    ctx.fill();
+   569→    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+   570→    ctx.fillRect(x + (w - 52) / 2, y + 18, 52, 6);
+   571→    ctx.fillStyle = '#ffffff';
+   572→    ctx.font = 'bold 20px sans-serif';
+   573→    ctx.textAlign = 'center';
+   574→    ctx.fillText(glyph, x + w / 2, y + 38);
+   575→    ctx.fillStyle = '#e6edf5';
+   576→    ctx.font = '13px sans-serif';
+   577→    ctx.fillText(label, x + w / 2, y + 70);
+   578→    ctx.textAlign = 'left';
+   579→    this.frame.add({ id, x, y, w, h, kind: 'icon', cursor: 'pointer', z: 5, onDbl: () => this.openApp(appId), onClick: () => this.openApp(appId) });
+   580→  }
+   581→
+   582→  private drawWindow(ctx: CanvasRenderingContext2D, win: VosWindow, now: number): void {
+   583→    const app = this.apps.get(win.appId);
+   584→    if (!app) return;
+   585→    const focused = win.z === this.zCounter;
+   586→    const x = win.maximized ? 0 : win.x;
+   587→    const y = win.maximized ? 0 : win.y;
+   588→    const w = win.maximized ? this.W : win.w;
+   589→    const h = win.maximized ? this.H - TASKBAR_H : win.h;
+   590→
+   591→    // سحب النافذة (يُنفذ قبل الرسم — حركة فورية بسيطة وموثوقة)
+   592→    if (this.dragWin && this.dragWin.id === win.id) {
+   593→      win.x = this.cursor.x - this.dragWin.dx;
+   594→      win.y = this.cursor.y - this.dragWin.dy;
+   595→      win.x = Math.max(-win.w + 120, Math.min(this.W - 60, win.x));
+   596→      win.y = Math.max(0, Math.min(this.H - TASKBAR_H - 30, win.y));
+   597→    }
+   598→    if (this.dragResize && this.dragResize.id === win.id) {
+   599→      const dr = this.dragResize;
+   600→      win.w = Math.max(320, dr.w0 + (this.cursor.x - dr.sx));
+   601→      win.h = Math.max(200, dr.h0 + (this.cursor.y - dr.sy));
+   602→    }
+   603→
+   604→    // ظل
+   605→    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+   606→    roundRect(ctx, x + 4, y + 6, w, h, 10);
+   607→    ctx.fill();
+   608→
+   609→    ctx.fillStyle = OS_COLORS.winBg;
+   610→    roundRect(ctx, x, y, w, h, 8);
+   611→    ctx.fill();
+   612→    ctx.strokeStyle = focused ? OS_COLORS.accent : OS_COLORS.winBorder;
+   613→    ctx.lineWidth = focused ? 1.6 : 1;
+   614→    roundRect(ctx, x, y, w, h, 8);
+   615→    ctx.stroke();
+   616→
+   617→    // شريط العنوان
+   618→    const titleH = 30;
+   619→    ctx.fillStyle = focused ? OS_COLORS.titleFocus : OS_COLORS.titleBg;
+   620→    roundRect(ctx, x, y, w, titleH, 8);
+   621→    ctx.fill();
+   622→    ctx.fillStyle = OS_COLORS.titleText;
+   623→    ctx.font = 'bold 14px sans-serif';
+   624→    ctx.textAlign = 'left';
+   625→    ctx.fillText(win.titleAr, x + 12, y + 20);
+   626→
+   627→    // أزرار النافذة (سلوك معلن: تصغير/تكبير/إغلاق)
+   628→    const btnW = 26;
+   629→    const btnY = y + 5;
+   630→    const doMax = (): void => {
+   631→      if (!win.maximized) {
+   632→        win.prev = { x: win.x, y: win.y, w: win.w, h: win.h };
+   633→        win.maximized = true;
+   634→      } else if (win.prev) {
+   635→        win.maximized = false;
+   636→        Object.assign(win, win.prev);
+   637→      }
+   638→      this.dirty = true;
+   639→    };
+   640→    const btns: Array<{ id: string; label: string; color: string; act: () => void }> = [
+   641→      { id: 'min', label: '—', color: '#5a6b7d', act: () => { win.minimized = true; this.dirty = true; } },
+   642→      { id: 'max', label: win.maximized ? '❐' : '□', color: '#5a6b7d', act: doMax },
+   643→      { id: 'close', label: '✕', color: OS_COLORS.danger, act: () => this.closeWindow(win.id) },
+   644→    ];
+   645→    let bx = x + w - 10 - btnW;
+   646→    for (const b of [...btns].reverse()) {
+   647→      ctx.fillStyle = b.color;
+   648→      roundRect(ctx, bx, btnY, btnW - 4, 20, 5);
+   649→      ctx.fill();
+   650→      ctx.fillStyle = '#ffffff';
+   651→      ctx.font = 'bold 12px sans-serif';
+   652→      ctx.textAlign = 'center';
+   653→      ctx.fillText(b.label, bx + (btnW - 4) / 2, btnY + 14);
+   654→      ctx.textAlign = 'left';
+   655→      this.frame.add({ id: `wbtn:${b.id}:${win.id}`, x: bx, y: btnY, w: btnW - 4, h: 20, kind: 'button', cursor: 'pointer', z: win.z + 2, onClick: () => b.act() });
+   656→      bx -= btnW;
+   657→    }
+   658→    this.frame.add({ id: `title:${win.id}`, x, y, w: w - 3 * btnW, h: titleH, kind: 'title', cursor: 'default', z: win.z + 1, onDbl: doMax });
+   659→
+   660→    // محتوى التطبيق (قصّ داخل النافذة)
+   661→    ctx.save();
+   662→    roundRect(ctx, x + 1, y + titleH, w - 2, h - titleH - 1, 6);
+   663→    ctx.clip();
+   664→    ctx.translate(x, y + titleH);
+   665→    this.contentOrigin = { x, y: y + titleH };
+   666→    app.render(this, win, ctx, now);
+   667→    this.contentOrigin = { x: 0, y: 0 };
+   668→    ctx.restore();
+   669→
+   670→    // مقبض التحجيم — الزاوية اليمنى السفلية
+   671→    if (!win.maximized) {
+   672→      const rx = x + w - 14;
+   673→      const ry = y + h - 14;
+   674→      ctx.fillStyle = 'rgba(255,255,255,0.16)';
+   675→      ctx.beginPath();
+   676→      ctx.moveTo(rx + 12, ry);
+   677→      ctx.lineTo(rx + 12, ry + 12);
+   678→      ctx.lineTo(rx, ry + 12);
+   679→      ctx.closePath();
+   680→      ctx.fill();
+   681→      this.frame.add({ id: `resize:${win.id}`, x: rx, y: ry, w: 14, h: 14, kind: 'resize', cursor: 'default', z: win.z + 3 });
+   682→    }
+   683→  }
+   684→
+   685→  private drawTaskbar(ctx: CanvasRenderingContext2D, now: number): void {
+   686→    const y = this.H - TASKBAR_H;
+   687→    ctx.fillStyle = OS_COLORS.taskbar;
+   688→    ctx.fillRect(0, y, this.W, TASKBAR_H);
+   689→    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+   690→    ctx.beginPath();
+   691→    ctx.moveTo(0, y + 0.5);
+   692→    ctx.lineTo(this.W, y + 0.5);
+   693→    ctx.stroke();
+   694→
+   695→    const startHover = this.frame.hoverId === 'start';
+   696→    ctx.fillStyle = this.startOpen ? OS_COLORS.accent : startHover ? 'rgba(57,199,184,0.25)' : 'rgba(255,255,255,0.07)';
+   697→    roundRect(ctx, 8, y + 6, 66, 32, 7);
+   698→    ctx.fill();
+   699→    ctx.fillStyle = '#ffffff';
+   700→    ctx.font = 'bold 15px sans-serif';
+   701→    ctx.textAlign = 'center';
+   702→    ctx.fillText('ابدأ', 41, y + 28);
+   703→    ctx.textAlign = 'left';
+   704→    this.frame.add({ id: 'start', x: 8, y: y + 6, w: 66, h: 32, kind: 'button', cursor: 'pointer', z: 50, onClick: () => { this.startOpen = !this.startOpen; this.dirty = true; } });
+   705→
+   706→    let bx = 86;
+   707→    for (const win of [...this.windows].sort((a, b) => a.z - b.z)) {
+   708→      const label = win.titleAr.slice(0, 14);
+   709→      const w = Math.max(96, 20 + label.length * 8);
+   710→      if (bx + w > this.W - 140) break;
+   711→      const active = win.z === this.zCounter && !win.minimized;
+   712→      ctx.fillStyle = active ? OS_COLORS.accentSoft : win.minimized ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.09)';
+   713→      roundRect(ctx, bx, y + 7, w - 6, 30, 6);
+   714→      ctx.fill();
+   715→      ctx.fillStyle = OS_COLORS.text;
+   716→      ctx.font = '12.5px sans-serif';
+   717→      ctx.textAlign = 'left';
+   718→      ctx.fillText(label, bx + 10, y + 27);
+   719→      this.frame.add({
+   720→        id: `task:${win.id}`,
+   721→        x: bx, y: y + 7, w: w - 6, h: 30, kind: 'button', cursor: 'pointer', z: 50,
+   722→        onClick: () => {
+   723→          if (win.minimized) { win.minimized = false; this.focusWindow(win.id); }
+   724→          else if (win.z === this.zCounter) { win.minimized = true; this.dirty = true; }
+   725→          else this.focusWindow(win.id);
+   726→        },
+   727→      });
+   728→      bx += w;
+   729→    }
+   730→
+   731→    const d = new Date(now);
+   732→    const hh = String(d.getHours()).padStart(2, '0');
+   733→    const mm = String(d.getMinutes()).padStart(2, '0');
+   734→    ctx.fillStyle = OS_COLORS.text;
+   735→    ctx.font = '14px monospace';
+   736→    ctx.textAlign = 'right';
+   737→    ctx.fillText(`${hh}:${mm}`, this.W - 16, y + 28);
+   738→    ctx.textAlign = 'left';
+   739→  }
+   740→
+   741→  private drawStartMenu(ctx: CanvasRenderingContext2D): void {
+   742→    const w = 300;
+   743→    const h = Math.min(430, this.H - TASKBAR_H - 20);
+   744→    const x = 8;
+   745→    const y = this.H - TASKBAR_H - h - 8;
+   746→    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+   747→    roundRect(ctx, x + 5, y + 6, w, h, 12);
+   748→    ctx.fill();
+   749→    ctx.fillStyle = '#101820';
+   750→    roundRect(ctx, x, y, w, h, 12);
+   751→    ctx.fill();
+   752→    ctx.strokeStyle = OS_COLORS.winBorder;
+   753→    roundRect(ctx, x, y, w, h, 12);
+   754→    ctx.stroke();
+   755→    ctx.fillStyle = OS_COLORS.accent;
+   756→    ctx.font = 'bold 16px sans-serif';
+   757→    ctx.fillText('قائمة التطبيقات', x + 16, y + 30);
+   758→
+   759→    let iy = y + 50;
+   760→    for (const app of this.apps.values()) {
+   761→      if (!app.desktop && app.id !== 'about') continue;
+   762→      const hovered = this.frame.hoverId === `sm:${app.id}`;
+   763→      if (hovered) {
+   764→        ctx.fillStyle = OS_COLORS.rowHover;
+   765→        roundRect(ctx, x + 8, iy - 4, w - 16, 40, 6);
+   766→        ctx.fill();
+   767→      }
+   768→      ctx.fillStyle = app.iconColor;
+   769→      roundRect(ctx, x + 14, iy, 32, 28, 6);
+   770→      ctx.fill();
+   771→      ctx.fillStyle = '#ffffff';
+   772→      ctx.font = 'bold 15px sans-serif';
+   773→      ctx.textAlign = 'center';
+   774→      ctx.fillText(app.iconGlyph, x + 30, iy + 20);
+   775→      ctx.textAlign = 'left';
+   776→      ctx.fillStyle = OS_COLORS.text;
+   777→      ctx.font = '14px sans-serif';
+   778→      ctx.fillText(app.titleAr, x + 56, iy + 19);
+   779→      this.frame.add({ id: `sm:${app.id}`, x: x + 8, y: iy - 4, w: w - 16, h: 40, kind: 'button', cursor: 'pointer', z: 60, onClick: () => { this.startOpen = false; this.openApp(app.id); } });
+   780→      iy += 44;
+   781→      if (iy > y + h - 40) break;
+   782→    }
+   783→  }
+   784→
+   785→  private ctxMenu: { x: number; y: number; items: Array<{ label: string; act: () => void }> } | null = null;
+   786→
+   787→  private desktopContextMenu(x: number, y: number): void {
+   788→    const items: Array<{ label: string; act: () => void }> = [
+   789→      { label: 'معلومات النظام', act: () => this.openApp('settings') },
+   790→      { label: 'فتح مستكشف الملفات', act: () => this.openApp('explorer') },
+   791→      { label: 'إغلاق كل النوافذ', act: () => { this.windows = []; this.dirty = true; } },
+   792→    ];
+   793→    this.ctxMenu = { x: Math.min(x, this.W - 200), y: Math.min(y, this.H - 130), items };
+   794→    this.dirty = true;
+   795→  }
+   796→
+   797→  private drawOverlays(ctx: CanvasRenderingContext2D, now: number): void {
+   798→    // قائمة السياق المعلقة
+   799→    if (this.ctxMenu) {
+   800→      const { x, y, items } = this.ctxMenu;
+   801→      const w = 190;
+   802→      const h = items.length * 34 + 10;
+   803→      ctx.fillStyle = '#0e151d';
+   804→      roundRect(ctx, x, y, w, h, 8);
+   805→      ctx.fill();
+   806→      ctx.strokeStyle = OS_COLORS.winBorder;
+   807→      roundRect(ctx, x, y, w, h, 8);
+   808→      ctx.stroke();
+   809→      let iy = y + 8;
+   810→      for (let i = 0; i < items.length; i++) {
+   811→        const hovered = this.frame.hoverId === `ctx:${i}`;
+   812→        if (hovered) {
+   813→          ctx.fillStyle = OS_COLORS.rowHover;
+   814→          ctx.fillRect(x + 4, iy, w - 8, 32);
+   815→        }
+   816→        ctx.fillStyle = OS_COLORS.text;
+   817→        ctx.font = '13.5px sans-serif';
+   818→        ctx.fillText(items[i].label, x + 12, iy + 21);
+   819→        const item = items[i];
+   820→        this.frame.add({ id: `ctx:${i}`, x: x + 4, y: iy, w: w - 8, h: 32, kind: 'button', cursor: 'pointer', z: 200, onClick: () => { this.ctxMenu = null; item.act(); } });
+   821→        iy += 34;
+   822→      }
+   823→      this.frame.add({ id: 'ctx:backdrop', x: 0, y: 0, w: this.W, h: this.H, kind: 'custom', cursor: 'default', z: 199, onClick: () => { this.ctxMenu = null; } });
+   824→    }
+   825→
+   826→    // إشعارات
+   827→    let ty = 12;
+   828→    const keep: typeof this.toasts = [];
+   829→    for (const t of this.toasts) {
+   830→      const age = now - t.at;
+   831→      if (age > 4600) continue;
+   832→      keep.push(t);
+   833→      const alpha = age > 4000 ? 1 - (age - 4000) / 600 : 1;
+   834→      ctx.globalAlpha = alpha;
+   835→      const w = 280;
+   836→      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+   837→      roundRect(ctx, this.W - w - 8, ty + 4, w, 74, 10);
+   838→      ctx.fill();
+   839→      ctx.fillStyle = '#101a24';
+   840→      roundRect(ctx, this.W - w - 12, ty, w, 74, 10);
+   841→      ctx.fill();
+   842→      ctx.strokeStyle = OS_COLORS.accent;
+   843→      roundRect(ctx, this.W - w - 12, ty, w, 74, 10);
+   844→      ctx.stroke();
+   845→      ctx.fillStyle = OS_COLORS.accent;
+   846→      ctx.font = 'bold 13.5px sans-serif';
+   847→      ctx.fillText(t.titleAr, this.W - w + 4, ty + 24);
+   848→      ctx.fillStyle = OS_COLORS.text;
+   849→      ctx.font = '12.5px sans-serif';
+   850→      this.wrapText(ctx, t.bodyAr, this.W - w + 4, ty + 44, w - 24, 17);
+   851→      ctx.globalAlpha = 1;
+   852→      ty += 84;
+   853→    }
+   854→    this.toasts = keep;
+   855→  }
+   856→
+   857→  private drawCursor(ctx: CanvasRenderingContext2D): void {
+   858→    if (!this.cursor.visible) return;
+   859→    const { x, y } = this.cursor;
+   860→    if (this.cursorKind === 'text') {
+   861→      ctx.fillStyle = '#ffffff';
+   862→      ctx.fillRect(x - 1, y - 9, 2, 18);
+   863→      return;
+   864→    }
+   865→    ctx.fillStyle = this.cursorKind === 'pointer' ? OS_COLORS.accent : '#ffffff';
+   866→    ctx.strokeStyle = '#000000';
+   867→    ctx.lineWidth = 1.2;
+   868→    ctx.beginPath();
+   869→    ctx.moveTo(x, y);
+   870→    ctx.lineTo(x, y + 17);
+   871→    ctx.lineTo(x + 4.5, y + 12.5);
+   872→    ctx.lineTo(x + 7.5, y + 18.5);
+   873→    ctx.lineTo(x + 10, y + 17.3);
+   874→    ctx.lineTo(x + 7, y + 11.5);
+   875→    ctx.lineTo(x + 12.5, y + 11);
+   876→    ctx.closePath();
+   877→    ctx.fill();
+   878→    ctx.stroke();
+   879→  }
+   880→
+   881→  // ============ برنامج UEFI الثابت (شاشة كاملة تفاعلية) ============
+   882→
+   883→  private fwTab: 'main' | 'boot' | 'security' | 'advanced' = 'main';
+   884→  private fwFlash: number | null = null;
+   885→
+   886→  /** بيانات البرنامج الثابت تُحقن من PCScene (قراءة من مصدر الحقيقة الواحد) */
+   887→  fwData: {
+   888→    cpuAr: string; ramAr: string; boardAr: string;
+   889→    tempsAr: string; fansAr: string;
+   890→    bootOrder: string[]; secureBoot: boolean; tpm: boolean; xmp: boolean;
+   891→    devicesAr: string[];
+   892→    onBootOrder?: (order: string[]) => void;
+   893→    onToggle?: (key: 'secureBoot' | 'tpm' | 'xmp') => void;
+   894→    onExit?: (save: boolean) => void;
+   895→    onBootDevice?: (id: string) => void;
+   896→  } | null = null;
+   897→
+   898→  private drawFirmware(ctx: CanvasRenderingContext2D, _now: number): void {
+   899→    const d = this.fwData;
+   900→    ctx.fillStyle = '#0a1424';
+   901→    ctx.fillRect(0, 0, this.W, this.H);
+   902→    if (!d) return;
+   903→
+   904→    ctx.fillStyle = '#12233d';
+   905→    ctx.fillRect(0, 0, this.W, 54);
+   906→    ctx.fillStyle = '#e8eef7';
+   907→    ctx.font = 'bold 22px monospace';
+   908→    ctx.fillText('PC LAB UEFI SETUP UTILITY', 22, 35);
+   909→    ctx.fillStyle = OS_COLORS.accent;
+   910→    ctx.font = '15px monospace';
+   911→    ctx.fillText(d.boardAr, 420, 35);
+   912→
+   913→    const tabs: Array<['main' | 'boot' | 'security' | 'advanced', string]> = [['main', 'Main'], ['boot', 'Boot'], ['security', 'Security'], ['advanced', 'Advanced']];
+   914→    let tx = 24;
+   915→    for (const [id, label] of tabs) {
+   916→      const w = 110;
+   917→      const active = this.fwTab === id;
+   918→      ctx.fillStyle = active ? '#1d3a5f' : 'rgba(255,255,255,0.04)';
+   919→      roundRect(ctx, tx, 68, w, 34, 7);
+   920→      ctx.fill();
+   921→      ctx.fillStyle = active ? '#ffffff' : '#9fb0c4';
+   922→      ctx.font = 'bold 15px monospace';
+   923→      ctx.textAlign = 'center';
+   924→      ctx.fillText(label, tx + w / 2, 90);
+   925→      ctx.textAlign = 'left';
+   926→      this.frame.add({ id: `fwtab:${id}`, x: tx, y: 68, w, h: 34, kind: 'button', cursor: 'pointer', z: 10, onClick: () => { this.fwTab = id; this.dirty = true; } });
+   927→      tx += w + 10;
+   928→    }
+   929→
+   930→    const bodyY = 118;
+   931→    ctx.fillStyle = '#d7dfe9';
+   932→    ctx.font = '15px monospace';
+   933→    let y = bodyY + 26;
+   934→
+   935→    const row = (label: string, value: string, color = '#d7dfe9'): void => {
+   936→      ctx.fillStyle = '#9fb0c4';
+   937→      ctx.fillText(label, 40, y);
+   938→      ctx.fillStyle = color;
+   939→      ctx.textAlign = 'right';
+   940→      ctx.fillText(value, this.W - 40, y);
+   941→      ctx.textAlign = 'left';
+   942→      y += 30;
+   943→    };
+   944→
+   945→    if (this.fwTab === 'main') {
+   946→      row('Processor', d.cpuAr);
+   947→      row('Memory', d.ramAr);
+   948→      row('System Temperatures', d.tempsAr, '#7fd7a8');
+   949→      row('Fan Speeds (RPM, simulated)', d.fansAr, '#7fd7a8');
+   950→      row('Boot Mode', 'UEFI');
+   951→      ctx.fillStyle = '#8b97a5';
+   952→      ctx.font = '13px monospace';
+   953→      ctx.fillText('محاكاة تعليمية — البيانات ليست قراءات حقيقية', 40, y + 10);
+   954→    } else if (this.fwTab === 'boot') {
+   955→      ctx.fillStyle = '#9fb0c4';
+   956→      ctx.fillText('Boot Option Priorities — ▲▼ لإعادة الترتيب • نقر مزدوج = الإقلاع من الجهاز الآن:', 40, y);
+   957→      y += 34;
+   958→      d.bootOrder.forEach((dev, i) => {
+   959→        const label = dev === 'usb' ? 'USB Installation Media' : (d.devicesAr.find((x) => x.startsWith(dev)) ?? dev);
+   960→        const active = i === 0;
+   961→        ctx.fillStyle = active ? '#12233d' : 'rgba(255,255,255,0.03)';
+   962→        roundRect(ctx, 36, y - 20, this.W - 76, 34, 6);
+   963→        ctx.fill();
+   964→        ctx.fillStyle = active ? '#39c7b8' : '#d7dfe9';
+   965→        ctx.font = 'bold 15px monospace';
+   966→        ctx.fillText(`${i + 1}.  ${label}`, 48, y + 2);
+   967→        if (i > 0) {
+   968→          ctx.fillStyle = '#9fb0c4';
+   969→          ctx.fillText('▲', this.W - 130, y + 2);
+   970→          this.frame.add({ id: `fwup:${i}`, x: this.W - 140, y: y - 20, w: 30, h: 34, kind: 'button', cursor: 'pointer', z: 10, onClick: () => { const arr = [...d.bootOrder]; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; d.onBootOrder?.(arr); this.dirty = true; } });
+   971→        }
+   972→        if (i < d.bootOrder.length - 1) {
+   973→          ctx.fillStyle = '#9fb0c4';
+   974→          ctx.fillText('▼', this.W - 90, y + 2);
+   975→          this.frame.add({ id: `fwdn:${i}`, x: this.W - 100, y: y - 20, w: 30, h: 34, kind: 'button', cursor: 'pointer', z: 10, onClick: () => { const arr = [...d.bootOrder]; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; d.onBootOrder?.(arr); this.dirty = true; } });
+   976→        }
+   977→        this.frame.add({ id: `fwboot:${dev}`, x: 36, y: y - 20, w: this.W - 200, h: 34, kind: 'button', cursor: 'pointer', z: 9, onDbl: () => d.onBootDevice?.(dev) });
+   978→        y += 42;
+   979→      });
+   980→      ctx.fillStyle = '#8b97a5';
+   981→      ctx.font = '13px monospace';
+   982→      ctx.fillText('نقر مزدوج على جهاز = الإقلاع منه الآن (Boot Menu)', 40, y);
+   983→    } else if (this.fwTab === 'security') {
+   984→      this.fwToggle(ctx, 40, y, 'Secure Boot', d.secureBoot, () => { d.onToggle?.('secureBoot'); }, 'مطلوب لـ Windows 11 — تعطيله يحجب تثبيتها (متطلب موثق)');
+   985→      y += 56;
+   986→      this.fwToggle(ctx, 40, y, 'TPM 2.0', d.tpm, () => { d.onToggle?.('tpm'); }, 'وحدة التشفير — شرط موثق لتثبيت Windows 11');
+   987→      y += 56;
+   988→      ctx.fillStyle = '#8b97a5';
+   989→      ctx.font = '13px monospace';
+   990→      ctx.fillText('تغيير هذه الإعدادات يؤثر مباشرة على محرك التثبيت والإقلاع في المحاكاة', 40, y + 8);
+   991→    } else {
+   992→      this.fwToggle(ctx, 40, y, 'XMP Memory Profile', d.xmp, () => { d.onToggle?.('xmp'); }, 'تفعيل ملف الذاكرة العالي (مفهوم تعليمي)');
+   993→      y += 56;
+   994→      ctx.fillStyle = '#9fb0c4';
+   995→      ctx.font = '15px monospace';
+   996→      ctx.fillText('Debug LEDs: CPU → DRAM → VGA → BOOT', 40, y);
+   997→    }
+   998→
+   999→    ctx.fillStyle = '#12233d';
+  1000→    ctx.fillRect(0, this.H - 46, this.W, 46);
+  1001→    ctx.fillStyle = '#9fb0c4';
+  1002→    ctx.font = '14px monospace';
+  1003→    const saveMsg = this.fwFlash && Date.now() - this.fwFlash < 2200 ? 'Saved and exiting — أُعيد التشغيل بإعدادات جديدة' : 'Save & Exit (F10) — أو Exit بلا حفظ (Esc)';
+  1004→    ctx.fillText(saveMsg, 22, this.H - 18);
+  1005→    ctx.fillStyle = '#1d3a5f';
+  1006→    roundRect(ctx, this.W - 220, this.H - 38, 96, 28, 6);
+  1007→    ctx.fill();
+  1008→    ctx.fillStyle = '#ffffff';
+  1009→    ctx.textAlign = 'center';
+  1010→    ctx.fillText('Save & Exit', this.W - 172, this.H - 19);
+  1011→    ctx.fillStyle = '#28374a';
+  1012→    roundRect(ctx, this.W - 114, this.H - 38, 96, 28, 6);
+  1013→    ctx.fill();
+  1014→    ctx.fillStyle = '#c6d2e0';
+  1015→    ctx.fillText('Exit', this.W - 66, this.H - 19);
+  1016→    ctx.textAlign = 'left';
+  1017→    this.frame.add({ id: 'fw:save', x: this.W - 220, y: this.H - 38, w: 96, h: 28, kind: 'button', cursor: 'pointer', z: 10, onClick: () => { this.fwFlash = Date.now(); setTimeout(() => d.onExit?.(true), 500); } });
+  1018→    this.frame.add({ id: 'fw:exit', x: this.W - 114, y: this.H - 38, w: 96, h: 28, kind: 'button', cursor: 'pointer', z: 10, onClick: () => d.onExit?.(false) });
+  1019→  }
+  1020→
+  1021→  private fwToggle(ctx: CanvasRenderingContext2D, x: number, y: number, label: string, value: boolean, onToggle: () => void, noteAr: string): void {
+  1022→    ctx.fillStyle = '#9fb0c4';
+  1023→    ctx.font = '15px monospace';
+  1024→    ctx.fillText(label, x, y + 8);
+  1025→    ctx.fillStyle = '#8b97a5';
+  1026→    ctx.font = '12.5px sans-serif';
+  1027→    ctx.fillText(noteAr, x, y + 28);
+  1028→    const kx = this.W - 120;
+  1029→    ctx.fillStyle = value ? OS_COLORS.ok : '#3a4654';
+  1030→    roundRect(ctx, kx, y - 6, 58, 26, 13);
+  1031→    ctx.fill();
+  1032→    ctx.fillStyle = '#ffffff';
+  1033→    ctx.font = 'bold 12px monospace';
+  1034→    ctx.textAlign = 'center';
+  1035→    ctx.fillText(value ? 'ON' : 'OFF', kx + 29, y + 11);
+  1036→    ctx.textAlign = 'left';
+  1037→    this.frame.add({ id: `fwt:${label}`, x: kx - 8, y: y - 10, w: 74, h: 34, kind: 'button', cursor: 'pointer', z: 10, onClick: onToggle });
+  1038→  }
+  1039→
+  1040→  // ============ بيئة الاسترداد (فشل إقلاع النظام — F16) ============
+  1041→
+  1042→  recoveryData: {
+  1043→    attempts: number;
+  1044→    osNameAr: string;
+  1045→    onStartupRepair?: () => void;
+  1046→    onCommandPrompt?: () => void;
+  1047→    onRestart?: () => void;
+  1048→  } | null = null;
+  1049→
+  1050→  private drawRecovery(ctx: CanvasRenderingContext2D, _now: number): void {
+  1051→    const d = this.recoveryData;
+  1052→    ctx.fillStyle = '#06121e';
+  1053→    ctx.fillRect(0, 0, this.W, this.H);
+  1054→    if (!d) return;
+  1055→
+  1056→    ctx.fillStyle = '#0d2233';
+  1057→    ctx.fillRect(0, 0, this.W, 110);
+  1058→    ctx.fillStyle = '#ffffff';
+  1059→    ctx.font = 'bold 26px sans-serif';
+  1060→    ctx.fillText('Recovery Environment — بيئة الاسترداد', 40, 52);
+  1061→    ctx.fillStyle = '#9fb6c9';
+  1062→    ctx.font = '16px sans-serif';
+  1063→    ctx.fillText('لم يبدأ نظام التشغيل — بيانات إقلاعه (BCD) تالفة أو مفقودة', 40, 84);
+  1064→
+  1065→    ctx.fillStyle = '#e8b4b4';
+  1066→    ctx.font = '15px monospace';
+  1067→    ctx.fillText('File: \\Boot\\BCD        Status: 0xc000000f        (رسالة محاكاة تعليمية)', 40, 140);
+  1068→
+  1069→    ctx.fillStyle = '#d7dfe9';
+  1070→    ctx.font = 'bold 18px sans-serif';
+  1071→    ctx.fillText('اختر خيارًا:', 40, 190);
+  1072→
+  1073→    const opts: Array<{ label: string; note: string; act?: () => void; color?: string }> = [
+  1074→      { label: 'Startup Repair — إصلاح بدء التشغيل', note: 'محاولة إصلاح تلقائية (قد تفشل وتشرح السبب)', act: () => d.onStartupRepair?.(), color: '#39c7b8' },
+  1075→      { label: 'Command Prompt — موجه الأوامر', note: 'أوامر إصلاح الإقلاع التعليمية: bootrec /fixmbr /fixboot /rebuildbcd', act: () => d.onCommandPrompt?.(), color: '#39c7b8' },
+  1076→      { label: 'Restart — إعادة التشغيل', note: 'أعد تشغيل الجهاز بعد الإصلاح', act: () => d.onRestart?.(), color: '#e8eef7' },
+  1077→    ];
+  1078→    let y = 216;
+  1079→    for (const o of opts) {
+  1080→      const hovered = this.frame.hoverId === `rec:${o.label}`;
+  1081→      ctx.fillStyle = hovered ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.03)';
+  1082→      roundRect(ctx, 36, y, 560, 64, 9);
+  1083→      ctx.fill();
+  1084→      ctx.strokeStyle = o.color ?? '#39c7b8';
+  1085→      roundRect(ctx, 36, y, 560, 64, 9);
+  1086→      ctx.stroke();
+  1087→      ctx.fillStyle = o.color ?? '#39c7b8';
+  1088→      ctx.font = 'bold 16px sans-serif';
+  1089→      ctx.fillText(o.label, 54, y + 28);
+  1090→      ctx.fillStyle = '#8b97a5';
+  1091→      ctx.font = '13px sans-serif';
+  1092→      ctx.fillText(o.note, 54, y + 50);
+  1093→      this.frame.add({ id: `rec:${o.label}`, x: 36, y, w: 560, h: 64, kind: 'button', cursor: 'pointer', z: 10, onClick: () => o.act?.() });
+  1094→      y += 76;
+  1095→    }
+  1096→
+  1097→    if (d.attempts > 0) {
+  1098→      ctx.fillStyle = '#eab308';
+  1099→      ctx.font = '14px sans-serif';
+  1100→      ctx.fillText(`محاولات Startup Repair: ${d.attempts} — الإصلاح التلقائي لا يصلح تلف BCD العميق هنا؛ استخدم bootrec من موجه الأوامر.`, 40, y + 8);
+  1101→    }
+  1102→    ctx.fillStyle = '#5c6b7a';
+  1103→    ctx.font = '13px sans-serif';
+  1104→    ctx.fillText('بيئة استرداد محاكاة تعليمية — العتاد سليم: POST نجح بلا أخطاء (العطل F16 الموثق)', 40, this.H - 22);
+  1105→  }
+  1106→
+  1107→  wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, lineH: number): number {
+  1108→    const words = text.split(/\s+/);
+  1109→    let line = '';
+  1110→    let yy = y;
+  1111→    for (const w of words) {
+  1112→      const test = line ? `${line} ${w}` : w;
+  1113→      if (ctx.measureText(test).width > maxW && line) {
+  1114→        ctx.fillText(line, x, yy);
+  1115→        line = w;
+  1116→        yy += lineH;
+  1117→      } else {
+  1118→        line = test;
+  1119→      }
+  1120→    }
+  1121→    if (line) ctx.fillText(line, x, yy);
+  1122→    return yy;
+  1123→  }
+  1124→}
+  1125→

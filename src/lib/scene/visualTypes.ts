@@ -34,10 +34,8 @@ export interface PartVisuals {
   caseShell: THREE.Group;                      // الهيكل الثابت (جدران/واجهة/خلفية)
   sidePanel: THREE.Group;                      // الغطاء الجانبي المفصلي
   flags: FlagVisuals;
-  spinners: THREE.Object3D[];                  // مجسمات تدور (شفرات مراوح)
-  // ===== الطرفيات والإضافات =====
+  // ===== الطرفيات =====
   monitor: THREE.Group;                        // الشاشة (قاعدة/عمود/إطار) — سطع العرض يُعثر عليه باسم 'monitor-screen'
-  airflow: THREE.Group;                        // أسهم اتجاه تدفق الهواء (تُظهر/تخفى)
 }
 
 export interface PCSceneCallbacks {

@@ -116,11 +116,11 @@ export class UiFrame {
   }
 
   hit(x: number, y: number): HotRect | null {
-    // الأعلى z أولًا ثم الأحدث (ترتيب الإضافة يعكس التراكب داخل النافذة)
+    // الأعلى z أولًا وعند التساوي الأحدث (ترتيب الإضافة يطابق ترتيب الرسم فوق بعضه)
     let best: HotRect | null = null;
     for (const r of this.rects) {
       if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-        if (!best || r.z > best.z) best = r;
+        if (!best || r.z >= best.z) best = r;
       }
     }
     return best;
@@ -156,6 +156,10 @@ export class VirtualOS {
   mode: 'desktop' | 'firmware' | 'setup' | 'recovery' = 'desktop';
 
   windows: VosWindow[] = [];
+
+  /** (إصلاح تدقيق V6) نظام ملفات الجلسة المشترك بين التطبيقات — يبقى حيًا بعد إغلاق المستكشف
+   *  (كان الحفظ في المفكرة وأوامر dir/type تقرأ شجرة معزولة جديدة عند غياب نافذة المستكشف) */
+  fsRoot: object | null = null;
   private zCounter = 10;
   private nextWinId = 1;
 
@@ -437,6 +441,11 @@ export class VirtualOS {
   /** يرسم إطارًا كاملًا ويعيد true إذا اكتمل رسم فعلي */
   render(now: number): boolean {
     this.frame = new UiFrame();
+    // (إصلاح تدقيق V6) معرّفات مستقرة بين الإطارات: كانت r1، r2… تتزايد عالميًا عبر الرسوم،
+    // فتتغير هوية المستطيل نفسه بين pointerdown وpointerup (الرسم يحدث بينهما)
+    // ويسقط النقر كله على الشاشة المجسمة. التصفير مع كل إطار يجعل الإطارات المتطابقة
+// تنتج معرّفات متطابقة — والمطابقة في activeId تنجح.
+    this.rectCounter = 1;
     const ctx = this.ctx;
     this.blinkAt = now;
 
@@ -465,6 +474,7 @@ export class VirtualOS {
   /** يفرض رسم وضع setup عبر تطبيق المثبّت — يستدعى من PCScene قبل render */
   drawSetupWith(fn: (ctx: CanvasRenderingContext2D, os: VirtualOS, now: number) => void, now: number): boolean {
     this.frame = new UiFrame();
+    this.rectCounter = 1; // (إصلاح تدقيق V6) نفس سبب render() — معرّفات مستقرة بين الإطارات
     const ctx = this.ctx;
     ctx.save();
     ctx.clearRect(0, 0, this.W, this.H);
@@ -887,10 +897,12 @@ export class VirtualOS {
   fwData: {
     cpuAr: string; ramAr: string; boardAr: string;
     tempsAr: string; fansAr: string;
+    bootMode: 'bios' | 'uefi';
     bootOrder: string[]; secureBoot: boolean; tpm: boolean; xmp: boolean;
     devicesAr: string[];
     onBootOrder?: (order: string[]) => void;
     onToggle?: (key: 'secureBoot' | 'tpm' | 'xmp') => void;
+    onBootMode?: (mode: 'bios' | 'uefi') => void;
     onExit?: (save: boolean) => void;
     onBootDevice?: (id: string) => void;
   } | null = null;
@@ -905,7 +917,7 @@ export class VirtualOS {
     ctx.fillRect(0, 0, this.W, 54);
     ctx.fillStyle = '#e8eef7';
     ctx.font = 'bold 22px monospace';
-    ctx.fillText('PC LAB UEFI SETUP UTILITY', 22, 35);
+    ctx.fillText(d.bootMode === 'uefi' ? 'PC LAB UEFI SETUP UTILITY' : 'PC LAB BIOS SETUP UTILITY (Legacy/CSM)', 22, 35);
     ctx.fillStyle = OS_COLORS.accent;
     ctx.font = '15px monospace';
     ctx.fillText(d.boardAr, 420, 35);
@@ -947,7 +959,7 @@ export class VirtualOS {
       row('Memory', d.ramAr);
       row('System Temperatures', d.tempsAr, '#7fd7a8');
       row('Fan Speeds (RPM, simulated)', d.fansAr, '#7fd7a8');
-      row('Boot Mode', 'UEFI');
+      row('Boot Mode', d.bootMode === 'uefi' ? 'UEFI' : 'Legacy BIOS (CSM)', d.bootMode === 'uefi' ? '#d7dfe9' : '#e8c47a');
       ctx.fillStyle = '#8b97a5';
       ctx.font = '13px monospace';
       ctx.fillText('محاكاة تعليمية — البيانات ليست قراءات حقيقية', 40, y + 10);
@@ -980,6 +992,9 @@ export class VirtualOS {
       ctx.fillStyle = '#8b97a5';
       ctx.font = '13px monospace';
       ctx.fillText('نقر مزدوج على جهاز = الإقلاع منه الآن (Boot Menu)', 40, y);
+      y += 36;
+      // (V6-D) مفتاح وضع الإقلاع: UEFI ⇄ BIOS/Legacy — يحدد أنماط GPT/MBR المسموحة
+      this.fwToggle(ctx, 40, y, 'Boot Mode: UEFI ⇄ Legacy (CSM)', d.bootMode === 'uefi', () => { d.onBootMode?.(d.bootMode === 'uefi' ? 'bios' : 'uefi'); }, d.bootMode === 'uefi' ? 'الوضع الحالي UEFI — يقبل أقراص GPT فقط (XP/Vista لن تققلع منه). النقر يبدّل إلى BIOS/Legacy.' : 'الوضع الحالي BIOS/Legacy — يقبل أقراص MBR فقط (Windows 11 لن يققلع منه). النقر يبدّل إلى UEFI.');
     } else if (this.fwTab === 'security') {
       this.fwToggle(ctx, 40, y, 'Secure Boot', d.secureBoot, () => { d.onToggle?.('secureBoot'); }, 'مطلوب لـ Windows 11 — تعطيله يحجب تثبيتها (متطلب موثق)');
       y += 56;
@@ -1046,6 +1061,9 @@ export class VirtualOS {
     onCommandPrompt?: () => void;
     onRestart?: () => void;
   } | null = null;
+
+  /** (إصلاح F16 — تدقيق V6) موجه أوامر مفتوح من بيئة الاسترداد: يبقى مرئيًا ليمكن تنفيذ bootrec */
+  recoveryCmdOpen: boolean = false;
 
   private drawRecovery(ctx: CanvasRenderingContext2D, _now: number): void {
     const d = this.recoveryData;

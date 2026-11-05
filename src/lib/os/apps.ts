@@ -142,6 +142,12 @@ function fsGet(root: FsNode, path: string[]): FsNode | null {
   return cur;
 }
 
+/** (إصلاح تدقيق V6) نظام ملفات الجلسة المشترك: يبقى حيًا حتى بعد إغلاق المستكشف */
+function sharedFs(os: VirtualOS): FsNode {
+  if (!os.fsRoot) os.fsRoot = seedFs();
+  return os.fsRoot as FsNode;
+}
+
 // ============ 1) مستكشف الملفات ============
 
 const explorerApp: VosAppDef = {
@@ -156,9 +162,8 @@ const explorerApp: VosAppDef = {
     if (!win) return;
     const w = win.maximized ? os.W : win.w;
     const h = (win.maximized ? os.H - os.taskbarH : win.h) - 30;
-    if (!win.state['fs']) win.state['fs'] = seedFs();
     if (!win.state['path']) win.state['path'] = ['Users', 'Student', 'Documents'];
-    const fs = win.state['fs'] as FsNode;
+    const fs = sharedFs(os);
     const path = win.state['path'] as string[];
     const sel = win.state['sel'] as string | null;
 
@@ -218,10 +223,6 @@ const explorerApp: VosAppDef = {
       ctx.fillStyle = OS_COLORS.dim;
       ctx.fillText('المجلد فارغ', 20, listY + 24);
     }
-    if (iy > h) {
-      // منطقة تمرير بسيطة: العجلة تعيد التمرير عبر onScroll على القائمة كلها
-      os.addRect('scroll', 10, listY, w - 20, h - listY, { onScroll: () => { /* القائمة قصيرة في هذا النطاق التعليمي */ } }, 'default', 1);
-    }
   },
 };
 
@@ -248,7 +249,7 @@ const notepadApp: VosAppDef = {
 
     btn(os, ctx, 14, top, 84, 26, 'حفظ في Documents', () => {
       const store = useLabStore.getState();
-      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+      const fsRoot = sharedFs(os);
       const docs = fsGet(fsRoot, ['Users', 'Student', 'Documents']);
       const name = (win.state['fileName'] as string) ?? `note-${Date.now() % 10000}.txt`;
       if (docs) {
@@ -256,7 +257,6 @@ const notepadApp: VosAppDef = {
         if (existing) existing.content = st.text;
         else docs.children?.push({ name, kind: 'txt', content: st.text });
       }
-      if (win.state['fs']) win.state['fs'] = fsRoot;
       st.saved = st.text;
       os.notify('تم الحفظ', `الحفظ تعليمي داخل المحاكاة: Documents\\${name}`);
     }, { small: true });
@@ -437,7 +437,7 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
         '(محاكاة شبكة افتراضية معزولة — لا اتصال خارجي)');
       break;
     case 'dir': {
-      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+      const fsRoot = sharedFs(os);
       const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
       const node = fsGet(fsRoot, rel);
       if (!node?.children) { out('!! المجلد غير موجود'); break; }
@@ -449,7 +449,7 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
       if (!arg || arg === '\\') { st.cwd = 'C:\\'; break; }
       if (arg === '..') { const parts = st.cwd.split('\\'); if (parts.length > 1) parts.pop(); st.cwd = parts.join('\\') || 'C:\\'; break; }
       const target = arg.replace(/^C:\\?/, '');
-      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+      const fsRoot = sharedFs(os);
       const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
       const node = fsGet(fsRoot, [...rel, ...target.split('\\').filter(Boolean)]);
       if (node && node.kind === 'folder') st.cwd = 'C:\\' + [...rel, ...target.split('\\').filter(Boolean)].join('\\');
@@ -457,7 +457,7 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
       break;
     }
     case 'type': {
-      const fsRoot = (os.windows.find((x) => x.appId === 'explorer')?.state['fs'] as FsNode | undefined) ?? seedFs();
+      const fsRoot = sharedFs(os);
       const rel = st.cwd.replace('C:\\', '').split('\\').filter(Boolean);
       const node = fsGet(fsRoot, [...rel, arg]) ?? fsGet(fsRoot, arg.replace(/^C:\\/, '').split('\\').filter(Boolean));
       if (node && node.kind !== 'folder') out(...(node.content ?? '').split('\n'));
@@ -513,7 +513,8 @@ function runCommand(os: VirtualOS, win: VosWindow, st: { lines: string[]; input:
     }
     case 'shutdown':
       if (rest[0] === '/r') {
-        useLabStore.getState().toggleFlag('powerOn');
+        // (إصلاح تدقيق V6) /r تعني إعادة تشغيل — كانت تُطفئ الجهاز فقط
+        useLabStore.getState().warmRestart();
         out('OK: الجهاز الافتراضي يُعيد التشغيل...');
       } else out('الاستخدام: shutdown /r — إعادة تشغيل الجهاز الافتراضي');
       break;

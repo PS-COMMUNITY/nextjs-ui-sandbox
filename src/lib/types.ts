@@ -179,12 +179,14 @@ export interface FirmwareState {
   secureBoot: boolean;
   tpm: boolean;                        // TPM 2.0 (شرط Windows 11)
   xmp: boolean;
+  /** V6-D: وضع إقلاع المنصة — UEFI يقبل GPT فقط وBIOS/Legacy يقبل MBR فقط (قاعدة windowsCatalog.allowedPartStyles) */
+  bootMode: 'bios' | 'uefi';
   bootOrder: string[];                 // 'usb' ثم أقراص بالمعرفات
   setupRequested: boolean;             // طلب الدخول إلى إعدادات UEFI (زر/DEL)
 }
 
 export function initialFirmwareState(): FirmwareState {
-  return { secureBoot: true, tpm: true, xmp: false, bootOrder: ['usb', 'm2-1', 'hdd-1'], setupRequested: false };
+  return { secureBoot: true, tpm: true, xmp: false, bootMode: 'uefi', bootOrder: ['usb', 'm2-1', 'hdd-1'], setupRequested: false };
 }
 
 /** الحالة الحرارية المُحاكاة (بيانات تعليمية معلنة — ليست قياسًا حقيقيًا) */

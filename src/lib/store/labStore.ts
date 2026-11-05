@@ -131,6 +131,7 @@ interface LabStore {
   patchFirmware: (patch: Partial<FirmwareState>) => void;
   requestSetup: () => void;
   bootFromDevice: (deviceId: string) => void;
+  warmRestart: () => void;             // V6-D: إعادة تشغيل دافئة (إطفاء ثم إقلاع تلقائي)
   setThermal: (cpuTempC: number, gpuTempC: number) => void;
   // فك/تركيب بآلة الحالات الكاملة
   detachPart: (id: ComponentId) => void;   // installed → separated (فصل جزئي)
@@ -615,6 +616,29 @@ export const useLabStore = create<LabStore>((set, get) => ({
     schedulePersist(get);
   },
 
+  // (V6-D) إعادة تشغيل دافئة: إطفاء ثم تشغيل تلقائي بعد لحظة — سلوك زر Reset الحقيقي
+  warmRestart: () => {
+    const s = get();
+    if (!s.sim.flags.powerOn) {
+      toast.error('الجهاز مطفأ — شغّله أولًا من زر الطاقة.');
+      return;
+    }
+    const sim = { ...s.sim };
+    sim.flags.powerOn = false;
+    set({ sim, bootStartedAt: null });
+    s.logEvent('flag', 'إعادة تشغيل دافئة — إيقاف مؤقت ثم إقلاع تلقائي', true);
+    schedulePersist(get);
+    setTimeout(() => {
+      const st = get();
+      if (st.sim.flags.powerOn) return; // تشغيل يدوي حصل في الأثناء — لا تدخل
+      const sim2 = { ...st.sim };
+      sim2.flags.powerOn = true;
+      set({ sim: sim2, bootStartedAt: Date.now() });
+      st.logEvent('flag', 'اكتملت إعادة التشغيل — بدء الإقلاع من جديد', true);
+      schedulePersist(get);
+    }, 900);
+  },
+
   setThermal: (cpuTempC, gpuTempC) => {
     const s = get();
     if (Math.abs(s.sim.thermal.cpuTempC - cpuTempC) < 1 && Math.abs(s.sim.thermal.gpuTempC - gpuTempC) < 1) return;
@@ -800,6 +824,11 @@ export const useLabStore = create<LabStore>((set, get) => ({
       xray: false,
       exploded: false,
       isolated: null,
+      quality: 'medium',
+      sidePanelsHidden: false,
+      hintsVisible: true,
+      airflowVisible: false,
+      inputMode: 'lab',
       bootStartedAt: null,
       notepad: '',
     });
@@ -812,6 +841,12 @@ export const useLabStore = create<LabStore>((set, get) => ({
       const parsed = JSON.parse(json) as PersistShape;
       if (!parsed || typeof parsed !== 'object' || !parsed.simulation || !parsed.simulation.flags || !parsed.simulation.parts) {
         throw new Error('bad-shape');
+      }
+      // (إصلاح تدقيق V6) فحص إصدار الملف — كان يستقبل أي شكل صالح حتى من إصدارات أحدث غير متوافقة
+      const ACCEPTED = new Set([APP_VERSION, '5.0.0', '4.0.0']);
+      if (typeof parsed.version !== 'string' || !ACCEPTED.has(parsed.version)) {
+        toast.error(`إصدار ملف النسخة الاحتياطية غير مدعوم (${String(parsed.version ?? 'غير معروف')}) — النسخ المدعومة: 4.0.0 حتى ${APP_VERSION}`);
+        return;
       }
       set({
         sim: normalizeSimulationState(parsed.simulation),

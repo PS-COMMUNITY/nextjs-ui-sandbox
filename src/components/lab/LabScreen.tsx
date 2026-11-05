@@ -49,6 +49,9 @@ import {
   ChevronUp,
   Keyboard,
   Eraser,
+  Usb,
+  HardDrive,
+  ShieldCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { isWebGLAvailable, PCScene } from '@/lib/scene/PCScene';
@@ -56,6 +59,7 @@ import { preloadGlbAssets } from '@/lib/scene/glbParts';
 import type { ComponentId, ChecklistItem, MachineFlag, PartStatus } from '@/lib/types';
 import { assemblyStateOf, ASSEMBLY_STATE_INFO, SECURE_FLAGS } from '@/lib/types';
 import { COMPONENT_MAP } from '@/lib/data/catalog';
+import { WINDOWS_FAMILIES } from '@/lib/data/windowsCatalog';
 import {
   getRemovalChecklist,
   getInstallChecklist,
@@ -80,6 +84,14 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
 // ============ شارة الحالة (آلة الحالات الثمانية) ============
@@ -146,12 +158,12 @@ function ChecklistRow({
         ) : null}
       </div>
       {canRunFlag ? (
-        <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => onFlag(item.source as MachineFlag)}>
+        <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onFlag(item.source as MachineFlag)}>
           <Hammer className="h-3 w-3" aria-hidden /> نفّذ
         </Button>
       ) : null}
       {canRunPart ? (
-        <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => onPart(item.actionPart!)}>
+        <Button size="sm" variant="secondary" className="h-8 gap-1 px-2.5 text-[11px] shrink-0 max-sm:h-11 max-sm:px-3" onClick={() => onPart(item.actionPart!)}>
           <Hammer className="h-3 w-3" aria-hidden />
           {mode === 'remove' ? 'افصل' : 'وصّل'}
         </Button>
@@ -499,6 +511,88 @@ function FallbackView({ messageAr }: { messageAr: string }) {
   );
 }
 
+// ============ (V6-D) حوار وسائط التثبيت — نقطة الدخول الرسمية لمعالج تثبيت Windows ============
+function UsbMediaDialog() {
+  const usbMedia = useLabStore((s) => s.sim.usbMedia);
+  const bootMode = useLabStore((s) => s.sim.firmware.bootMode);
+  const insertUsb = useLabStore((s) => s.insertUsb);
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button
+          size="sm"
+          variant={usbMedia ? 'default' : 'ghost'}
+          className="h-7 gap-1 px-2 text-[11px]"
+          title="إدخال/إخراج وسيط تثبيت Windows — يفتح معالج التثبيت عند الإقلاع منه (V6-D)"
+        >
+          <Usb className="h-3.5 w-3.5" aria-hidden />
+          {usbMedia ? `الوسيط: ${WINDOWS_FAMILIES.find((f) => f.id === usbMedia)?.nameEn ?? usbMedia}` : 'وسيط USB'}
+        </Button>
+      </DialogTrigger>
+      <DialogContent dir="rtl" className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Usb className="h-4 w-4" aria-hidden />
+            وسائط تثبيت Windows — محاكاة تعليمية
+          </DialogTitle>
+          <DialogDescription>
+            اختر عائلة لإدخال وسيطها. بعد الإدخال: شغّل الجهاز، وتأكد أن أولوية الإقلاع «USB» أولًا (زر DEL أو تبويب Boot في إعدادات البرنامج الثابت) — بعد POST سيقلع الجهاز إلى معالج التثبيت على الشاشة المجسمة.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
+          <p className="font-medium mb-1">وضع إقلاع المنصة الحالي: {bootMode === 'uefi' ? 'UEFI (يقبل GPT)' : 'BIOS/Legacy (يقبل MBR)'}</p>
+          <p className="text-muted-foreground">
+            العائلات القديمة (XP/Vista) تقلع بوضع BIOS/Legacy فقط، وويندوز 11 يقلع بوضع UEFI فقط. بدّل الوضع من إعدادات البرنامج الثابت ← تبويب Boot ← مفتاح Boot Mode. متطلبات TPM 2.0 وSecure Boot من تبويب Security.
+          </p>
+        </div>
+
+        <div className="max-h-80 space-y-2 overflow-y-auto pe-1 scrollbar-thin" role="list" aria-label="قائمة عائلات Windows المتاحة">
+          {WINDOWS_FAMILIES.map((f) => (
+            <div key={f.id} className="flex items-center gap-2 rounded-lg border p-2.5" role="listitem">
+              <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium leading-tight">
+                  {f.nameEn} <span className="text-muted-foreground">({f.year})</span>
+                </p>
+                <p className="text-[11px] text-muted-foreground leading-tight mt-0.5 truncate">
+                  {f.editions.length} طبعات • حد أدنى {Math.ceil(f.minRamMB / 1024)}GB RAM / {f.minDiskGB}GB قرص
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {f.bootModes.map((m) => (
+                    <Badge key={m} variant="outline" className="text-[9px] px-1 py-0">{m === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}</Badge>
+                  ))}
+                  {f.partStyles.map((s) => (
+                    <Badge key={s} variant="outline" className="text-[9px] px-1 py-0">{s.toUpperCase()}</Badge>
+                  ))}
+                  {f.requiresTpm2 ? (
+                    <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5"><ShieldCheck className="h-2.5 w-2.5" aria-hidden />TPM 2.0 + Secure Boot</Badge>
+                  ) : null}
+                </div>
+              </div>
+              {usbMedia === f.id ? (
+                <Button size="sm" variant="secondary" className="h-8 shrink-0" onClick={() => { insertUsb(null); }}>
+                  إخراج الوسيط
+                </Button>
+              ) : (
+                <Button size="sm" className="h-8 shrink-0" onClick={() => { insertUsb(f.id); }}>
+                  إدخال
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          أمانة تعليمية: هذه وسائط محاكاة داخل المشروع — لا تُوزّع ملفات Windows ولا تطلب مفاتيح حقيقية، وكل العمليات على أقراص الجهاز الافتراضي فقط.
+        </p>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ============ الشاشة الرئيسية للمختبر ============
 export default function LabScreen() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -511,6 +605,7 @@ export default function LabScreen() {
   const [canType, setCanType] = useState(false);
   const [focusMode, setFocusModeState] = useState(false);
   const [fansReport, setFansReport] = useState<Array<{ labelAr: string; rpm: number; running: boolean; stateAr: string; airflowAr: string }>>([]);
+  const [assetsReady, setAssetsReady] = useState(false); // (إضافة تدقيق V6) مؤشر تجهيز النماذج — كان المشهد يظهر فارغًا بلا رسالة
 
   const sim = useLabStore((s) => s.sim);
   const selected = useLabStore((s) => s.selected);
@@ -580,6 +675,7 @@ export default function LabScreen() {
         else if (key === 'tpm') st.patchFirmware({ tpm: Boolean(patch.tpm) });
         else if (key === 'xmp') st.patchFirmware({ xmp: Boolean(patch.xmp) });
         else if (key === 'setupRequested') st.patchFirmware({ setupRequested: Boolean(patch.setupRequested) });
+        else if (key === 'bootMode') st.patchFirmware({ bootMode: patch.bootMode === 'bios' ? 'bios' : 'uefi' });
       },
       onBootDevice: (deviceId) => {
         const st = useLabStore.getState();
@@ -609,6 +705,7 @@ export default function LabScreen() {
         // تجاهل: buildAllParts ستستخدم المجسمات الإجرائية
       }
       if (cancelled) return;
+      setAssetsReady(true);
       try {
         scene = new PCScene({ container: el, quality, callbacks });
         sceneRef.current = scene;
@@ -740,10 +837,14 @@ export default function LabScreen() {
         case 'Delete': // (V6-D) الدخول إلى إعدادات UEFI أثناء الإقلاع
           st.requestSetup();
           break;
-        case 'Escape': // إلغاء التحديد/العزل
+        case 'Escape': {
+          // (إصلاح تدقيق V6) حوار مفتوح يعالج Esc نفسه — لا تُلغِ التحديد معًا (تأثير مزدوج)
+          const openDialog = document.querySelector('[role="alertdialog"], [data-state="open"][role="dialog"]');
+          if (openDialog) break;
           st.select(null);
           st.setIsolated(null);
           break;
+        }
         default:
           break;
       }
@@ -823,6 +924,8 @@ export default function LabScreen() {
         <Button size="sm" variant={focusMode ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleScreenControl} title="وضع التحكم بالشاشة المجسمة: الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي (M)">
           <MonitorUp className="h-3.5 w-3.5" aria-hidden /> التحكم بالشاشة
         </Button>
+        {/* (V6-D) وسائط التثبيت — البوابة الرسمية لمعالج تثبيت Windows ومختبر الأقراص */}
+        <UsbMediaDialog />
         <Separator orientation="vertical" className="mx-1 h-5" />
         <Button
           size="sm"
@@ -951,6 +1054,14 @@ export default function LabScreen() {
               role="application"
               aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
             />
+            {/* (إضافة تدقيق V6) مؤشر تجهيز النماذج قبل اكتمال التحميل */}
+            {!assetsReady ? (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#0d1218] text-sm text-slate-300" dir="rtl" role="status" aria-live="polite">
+                <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-600 border-t-cyan-400" aria-hidden />
+                جارٍ تجهيز النماذج ثلاثية الأبعاد…
+                <span className="text-[11px] text-muted-foreground">فشل التحميل يعني تلقائيًا البديل الإجرائي — لن يبقى المشهد فارغًا</span>
+              </div>
+            ) : null}
             {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن */}
             {focusMode ? (
               <div className="pointer-events-auto absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-2 bg-emerald-950/80 px-3 py-1.5 text-xs text-emerald-200 backdrop-blur-sm" dir="rtl">
@@ -980,7 +1091,7 @@ export default function LabScreen() {
               className="h-8 text-xs"
               aria-label="إدخال نص حقيقي يظهر في دفتر النظام الافتراضي على الشاشة ثلاثية الأبعاد"
             />
-            <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
+            <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 max-sm:h-11 max-sm:w-11" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
               <Eraser className="h-3.5 w-3.5" aria-hidden />
               <span className="sr-only">مسح دفتر النظام</span>
             </Button>
@@ -988,7 +1099,7 @@ export default function LabScreen() {
 
           <p className="text-[11px] text-muted-foreground">
             الجهاز المرجعي: هيكل Mid-Tower + لوحة ATX (مقبس LGA1700 / ذاكرة DDR5) — أساس اللوحة مسح حقيقي مرخص CC0 (Poly Haven).
-            اختصارات المشهد: <kbd className="rounded border px-1 font-mono">R</kbd> إعادة، <kbd className="rounded border px-1 font-mono">F</kbd> تركيز، <kbd className="rounded border px-1 font-mono">X</kbd> أشعة، <kbd className="rounded border px-1 font-mono">1/2/3</kbd> مناظير، <kbd className="rounded border px-1 font-mono">H</kbd> تلميحات.
+            اختصارات المشهد: <kbd className="rounded border px-1 font-mono">R</kbd> إعادة، <kbd className="rounded border px-1 font-mono">F</kbd> تركيز، <kbd className="rounded border px-1 font-mono">X</kbd> أشعة، <kbd className="rounded border px-1 font-mono">M</kbd> التحكم بالشاشة، <kbd className="rounded border px-1 font-mono">Delete</kbd> إعدادات UEFI، <kbd className="rounded border px-1 font-mono">1/2/3</kbd> مناظير، <kbd className="rounded border px-1 font-mono">H</kbd> تلميحات.
           </p>
 
           <StepsPanel />

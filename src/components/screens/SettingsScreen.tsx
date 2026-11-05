@@ -77,6 +77,19 @@ const SHORTCUTS: { icon: typeof Mouse; actionAr: string; resultAr: string }[] = 
   { icon: Maximize, actionAr: 'دبل-كليك', resultAr: 'إعادة الكاميرا' },
 ];
 
+// (إضافة تدقيق V6) اختصارات لوحة المفاتيح — كانت غائبة من هذه الشاشة
+const KEY_SHORTCUTS: { key: string; resultAr: string }[] = [
+  { key: 'R', resultAr: 'إعادة ضبط الكاميرا' },
+  { key: 'F', resultAr: 'تركيز على القطعة المحددة' },
+  { key: 'X', resultAr: 'الأشعة السينية' },
+  { key: 'E', resultAr: 'العرض التفجيري' },
+  { key: 'H', resultAr: 'تلميحات التحكم' },
+  { key: 'M', resultAr: 'وضع التحكم بالشاشة المجسمة' },
+  { key: '1 / 2 / 3', resultAr: 'مناظير أمامي/جانبي/علوي' },
+  { key: 'Delete', resultAr: 'الدخول إلى إعدادات UEFI/BIOS' },
+  { key: 'Esc', resultAr: 'إلغاء التحديد/العزل — والخروج من وضع الشاشة' },
+];
+
 export default function SettingsScreen() {
   const quality = useLabStore((s) => s.quality);
   const setQuality = useLabStore((s) => s.setQuality);
@@ -341,6 +354,22 @@ export default function SettingsScreen() {
               </li>
             ))}
           </ul>
+          <Separator className="my-4" />
+          <p className="mb-2 text-sm font-medium">اختصارات لوحة المفاتيح الحقيقية</p>
+          <ul className="space-y-2">
+            {KEY_SHORTCUTS.map(({ key, resultAr }) => (
+              <li
+                key={key}
+                className="flex items-center gap-3 rounded-lg border p-3 text-sm"
+              >
+                <kbd dir="ltr" className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[11px]">{key}</kbd>
+                <span className="text-muted-foreground">{resultAr}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[11px] text-muted-foreground leading-relaxed">
+            الاختصارات لا تعمل أثناء الكتابة في حقول النص، وفي وضع التحكم بالشاشة تُوجّه كل المفاتيح إلى النظام الافتراضي.
+          </p>
         </CardContent>
       </Card>
 

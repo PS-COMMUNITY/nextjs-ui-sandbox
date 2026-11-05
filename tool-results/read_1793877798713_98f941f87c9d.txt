@@ -1,0 +1,1007 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * شاشة المختبر ثلاثي الأبعاد — المشهد التفاعلي + لوحة المعلومات وأدوات التحكم.
+     5→ * آلة الحالات الكاملة: مثبتة/فصل جزئي/صينية/بانتظار/تلف تدريبي + طرفيات تفاعلية.
+     6→ *
+     7→ * توجيه v3 المطبق هنا:
+     8→ *  - جهازا إدخال المستخدم الحقيقيان فقط: الماوس (تحديد/تدوير/تكبير/تحريك/سحب قطع)
+     9→ *    ولوحة المفاتيح (اختصارات لا تُلتقط أثناء الكتابة في الحقول + حقل إدخال حقيقي).
+    10→ *  - لا كيبورد ولا ماوس ثلاثيي الأبعاد في المشهد إطلاقًا.
+    11→ *  - شريط أدوات مصغر وواضح + ملء شاشة + لوحة خطوات قابلة للطي + تلميح تحكم.
+    12→ */
+    13→import { useEffect, useRef, useState, useCallback } from 'react';
+    14→import {
+    15→  Camera,
+    16→  DoorOpen,
+    17→  DoorClosed,
+    18→  X,
+    19→  Bomb,
+    20→  Focus,
+    21→  EyeOff,
+    22→  RotateCcw,
+    23→  Power,
+    24→  PlugZap,
+    25→  Plug,
+    26→  Wrench,
+    27→  Hammer,
+    28→  ShieldAlert,
+    29→  TriangleAlert,
+    30→  CheckCircle2,
+    31→  CircleDashed,
+    32→  Wind,
+    33→  Thermometer,
+    34→  MonitorUp,
+    35→  MonitorX,
+    36→  Monitor,
+    37→  PackageOpen,
+    38→  HandMetal,
+    39→  View,
+    40→  FlipHorizontal2,
+    41→  ChevronsUp,
+    42→  ZoomIn,
+    43→  ZoomOut,
+    44→  Maximize2,
+    45→  Minimize2,
+    46→  Hand,
+    47→  PanelRightClose,
+    48→  ChevronDown,
+    49→  ChevronUp,
+    50→  Keyboard,
+    51→  Eraser,
+    52→} from 'lucide-react';
+    53→import { toast } from 'sonner';
+    54→import { isWebGLAvailable, PCScene } from '@/lib/scene/PCScene';
+    55→import { preloadGlbAssets } from '@/lib/scene/glbParts';
+    56→import type { ComponentId, ChecklistItem, MachineFlag, PartStatus } from '@/lib/types';
+    57→import { assemblyStateOf, ASSEMBLY_STATE_INFO, SECURE_FLAGS } from '@/lib/types';
+    58→import { COMPONENT_MAP } from '@/lib/data/catalog';
+    59→import {
+    60→  getRemovalChecklist,
+    61→  getInstallChecklist,
+    62→} from '@/lib/simulation/assemblyEngine';
+    63→import { computeMonitorView } from '@/lib/simulation/monitorEngine';
+    64→import { FLAG_INFO } from '@/lib/simulation/machineFlags';
+    65→import { installedCount, useLabStore } from '@/lib/store/labStore';
+    66→import { Button } from '@/components/ui/button';
+    67→import { Badge } from '@/components/ui/badge';
+    68→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    69→import { Input } from '@/components/ui/input';
+    70→import { ScrollArea } from '@/components/ui/scroll-area';
+    71→import { Separator } from '@/components/ui/separator';
+    72→import {
+    73→  AlertDialog,
+    74→  AlertDialogAction,
+    75→  AlertDialogCancel,
+    76→  AlertDialogContent,
+    77→  AlertDialogDescription,
+    78→  AlertDialogFooter,
+    79→  AlertDialogHeader,
+    80→  AlertDialogTitle,
+    81→  AlertDialogTrigger,
+    82→} from '@/components/ui/alert-dialog';
+    83→import { cn } from '@/lib/utils';
+    84→
+    85→// ============ شارة الحالة (آلة الحالات الثمانية) ============
+    86→function StatusBadge({ id }: { id: ComponentId }) {
+    87→  const sim = useLabStore((s) => s.sim);
+    88→  if (id === 'case') {
+    89→    return <Badge variant="outline" className="gap-1">هيكل الجهاز</Badge>;
+    90→  }
+    91→  const secureOpen = (SECURE_FLAGS[id] ?? []).some((f) => sim.flags[f]);
+    92→  const state = assemblyStateOf(sim.parts[id], secureOpen);
+    93→  const info = ASSEMBLY_STATE_INFO[state];
+    94→  const colorClass: Record<string, string> = {
+    95→    emerald: 'bg-emerald-600/15 text-emerald-400 border-emerald-600/40',
+    96→    amber: 'bg-amber-600/15 text-amber-400 border-amber-600/40',
+    97→    slate: 'bg-slate-600/15 text-slate-300 border-slate-600/40',
+    98→    cyan: 'bg-cyan-600/15 text-cyan-400 border-cyan-600/40',
+    99→    rose: 'bg-rose-600/15 text-rose-400 border-rose-600/40',
+   100→  };
+   101→  const icon =
+   102→    state === 'INSTALLED_CORRECTLY' ? <CheckCircle2 className="h-3 w-3" aria-hidden /> :
+   103→    state === 'AWAITING_INSTALL' ? <HandMetal className="h-3 w-3" aria-hidden /> :
+   104→    state === 'TRAINING_DAMAGE' ? <TriangleAlert className="h-3 w-3" aria-hidden /> :
+   105→    <Wrench className="h-3 w-3" aria-hidden />;
+   106→  return (
+   107→    <Badge variant="outline" className={cn('gap-1', colorClass[info.colorAr] ?? '')}>
+   108→      {icon}
+   109→      {state === 'INSTALLED_CORRECTLY' ? 'مثبتة بإحكام' : state === 'INSTALLED_SECURED' ? 'مثبتة (مزالج مفتوحة)' : info.labelAr}
+   110→    </Badge>
+   111→  );
+   112→}
+   113→
+   114→/** خطوة قائمة تحقق قابلة للتنفيذ (علم ميكانيكي أو فك/تركيب قطعة) */
+   115→function ChecklistRow({
+   116→  item,
+   117→  mode,
+   118→  onFlag,
+   119→  onPart,
+   120→}: {
+   121→  item: ChecklistItem;
+   122→  mode: 'remove' | 'install';
+   123→  onFlag: (f: MachineFlag) => void;
+   124→  onPart: (id: ComponentId) => void;
+   125→}) {
+   126→  const isFlag = item.source !== 'safetyOff' && item.source !== 'safetyUnplug' && item.source !== 'base';
+   127→  const canRunFlag = !item.done && isFlag && item.available;
+   128→  const canRunPart = !item.done && !isFlag && item.actionPart && item.available;
+   129→  return (
+   130→    <li
+   131→      className={cn(
+   132→        'flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs',
+   133→        item.done ? 'border-emerald-600/30 bg-emerald-600/10' : 'border-border bg-card',
+   134→        !item.done && !item.available && 'opacity-60',
+   135→      )}
+   136→    >
+   137→      {item.done ? (
+   138→        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden />
+   139→      ) : (
+   140→        <CircleDashed className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   141→      )}
+   142→      <div className="min-w-0 flex-1">
+   143→        <p className={cn('font-medium leading-tight', item.done && 'line-through opacity-70')}>{item.labelAr}</p>
+   144→        {!item.done && item.hintAr ? (
+   145→          <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{item.hintAr}</p>
+   146→        ) : null}
+   147→      </div>
+   148→      {canRunFlag ? (
+   149→        <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => onFlag(item.source as MachineFlag)}>
+   150→          <Hammer className="h-3 w-3" aria-hidden /> نفّذ
+   151→        </Button>
+   152→      ) : null}
+   153→      {canRunPart ? (
+   154→        <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => onPart(item.actionPart!)}>
+   155→          <Hammer className="h-3 w-3" aria-hidden />
+   156→          {mode === 'remove' ? 'افصل' : 'وصّل'}
+   157→        </Button>
+   158→      ) : null}
+   159→    </li>
+   160→  );
+   161→}
+   162→
+   163→function InfoPanel() {
+   164→  const selected = useLabStore((s) => s.selected);
+   165→  const select = useLabStore((s) => s.select);
+   166→  const sim = useLabStore((s) => s.sim);
+   167→  const detachPart = useLabStore((s) => s.detachPart);
+   168→  const extractPart = useLabStore((s) => s.extractPart);
+   169→  const preparePart = useLabStore((s) => s.preparePart);
+   170→  const installPart = useLabStore((s) => s.installPart);
+   171→  const repairPart = useLabStore((s) => s.repairPart);
+   172→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   173→  const setIsolated = useLabStore((s) => s.setIsolated);
+   174→  const isolated = useLabStore((s) => s.isolated);
+   175→
+   176→  if (!selected) {
+   177→    return (
+   178→      <Card>
+   179→        <CardContent className="p-4 text-sm text-muted-foreground leading-relaxed">
+   180→          <p className="font-medium text-foreground mb-1">حدّد قطعة من المشهد</p>
+   181→          <p>انقر على أي قطعة داخل الجهاز لعرض معلوماتها وحالتها وخطوات فكها أو تركيبها. انقر زر الشاشة الافتراضية (في المشهد) لتشغيلها، واكتب في حقل «دفتر النظام» أسفل المشهد عندما يدخل النظام الافتراضي.</p>
+   182→          <p className="mt-1">تدوير: سحب بالزر الأيسر — تقريب: العجلة — تحريك: الزر الأيمن — إعادة الكاميرا: دبل-كليك.</p>
+   183→        </CardContent>
+   184→      </Card>
+   185→    );
+   186→  }
+   187→
+   188→  const entry = COMPONENT_MAP[selected];
+   189→  const status: PartStatus = sim.parts[selected];
+   190→  const removable = selected !== 'case';
+   191→  const removalItems = removable ? getRemovalChecklist(sim, selected) : [];
+   192→  const installItems = removable ? getInstallChecklist(sim, selected) : [];
+   193→
+   194→  return (
+   195→    <Card>
+   196→      <CardHeader className="p-4 pb-2">
+   197→        <div className="flex items-start justify-between gap-2">
+   198→          <div>
+   199→            <CardTitle className="text-base leading-tight">{entry.nameAr}</CardTitle>
+   200→            <p dir="ltr" className="text-left font-mono text-[11px] text-muted-foreground mt-0.5">
+   201→              {entry.nameEn} · {entry.id}
+   202→            </p>
+   203→          </div>
+   204→          <StatusBadge id={selected} />
+   205→        </div>
+   206→      </CardHeader>
+   207→      <CardContent className="p-4 pt-2 space-y-3">
+   208→        <p className="text-xs leading-relaxed text-muted-foreground">{entry.description}</p>
+   209→
+   210→        {/* أزرار آلة الحالات */}
+   211→        {removable ? (
+   212→          <div className="flex flex-wrap gap-2">
+   213→            {status === 'installed' ? (
+   214→              <Button size="sm" className="gap-1.5" onClick={() => detachPart(selected)}>
+   215→                <Hammer className="h-3.5 w-3.5" aria-hidden /> فصل جزئي (فك)
+   216→              </Button>
+   217→            ) : null}
+   218→            {status === 'separated' ? (
+   219→              <Button size="sm" className="gap-1.5 bg-amber-600 hover:bg-amber-700" onClick={() => extractPart(selected)}>
+   220→                <PackageOpen className="h-3.5 w-3.5" aria-hidden /> استخراج إلى الصينية
+   221→              </Button>
+   222→            ) : null}
+   223→            {status === 'removed' ? (
+   224→              <Button size="sm" className="gap-1.5 bg-cyan-700 hover:bg-cyan-600" onClick={() => preparePart(selected)}>
+   225→                <HandMetal className="h-3.5 w-3.5" aria-hidden /> التقاط للتركيب
+   226→              </Button>
+   227→            ) : null}
+   228→            {status === 'awaiting' ? (
+   229→              <Button size="sm" className="gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={() => installPart(selected)}>
+   230→                <Wrench className="h-3.5 w-3.5" aria-hidden /> ركّب الآن
+   231→              </Button>
+   232→            ) : null}
+   233→            {status === 'damaged' ? (
+   234→              <Button size="sm" className="gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={() => repairPart(selected)}>
+   235→                <Wrench className="h-3.5 w-3.5" aria-hidden /> استبدال بقطعة سليمة
+   236→              </Button>
+   237→            ) : null}
+   238→            <Button
+   239→              size="sm"
+   240→              variant="outline"
+   241→              className="gap-1.5"
+   242→              onClick={() => setIsolated(isolated === selected ? null : selected)}
+   243→            >
+   244→              <EyeOff className="h-3.5 w-3.5" aria-hidden />
+   245→              {isolated === selected ? 'إلغاء العزل' : 'عزل للفحص'}
+   246→            </Button>
+   247→          </div>
+   248→        ) : (
+   249→          <p className="text-xs text-muted-foreground">الهيكل هو جسم الجهاز — استخدم زر «الغطاء الجانبي» في شريط أدوات المشهد لفتحه أو إغلاقه.</p>
+   250→        )}
+   251→
+   252→        <Separator />
+   253→
+   254→        {/* قائمة تحقق الفك */}
+   255→        {removable && status === 'installed' ? (
+   256→          <div>
+   257→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   258→              <ShieldAlert className="h-3.5 w-3.5 text-amber-500" aria-hidden /> شروط الفك بالترتيب
+   259→            </p>
+   260→            <ul className="space-y-1.5">
+   261→              {removalItems.map((item) => (
+   262→                <ChecklistRow key={item.source + item.labelAr} item={item} mode="remove" onFlag={toggleFlag} onPart={detachPart} />
+   263→              ))}
+   264→            </ul>
+   265→          </div>
+   266→        ) : null}
+   267→
+   268→        {/* قائمة تحقق التركيب */}
+   269→        {removable && (status === 'awaiting' || status === 'removed') ? (
+   270→          <div>
+   271→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   272→              <Wrench className="h-3.5 w-3.5 text-emerald-500" aria-hidden /> شروط إعادة التركيب
+   273→            </p>
+   274→            <ul className="space-y-1.5">
+   275→              {installItems.map((item) => (
+   276→                <ChecklistRow key={item.source + item.labelAr} item={item} mode="install" onFlag={toggleFlag} onPart={installPart} />
+   277→              ))}
+   278→            </ul>
+   279→          </div>
+   280→        ) : null}
+   281→
+   282→        {/* خطوات الإغلاق بعد التركيب */}
+   283→        {removable && status === 'installed' && (SECURE_FLAGS[selected] ?? []).some((f) => sim.flags[f]) ? (
+   284→          <div>
+   285→            <p className="text-xs font-bold mb-2 flex items-center gap-1.5">
+   286→              <Hammer className="h-3.5 w-3.5 text-primary" aria-hidden /> أكمل التثبيت (خطوات متبقية)
+   287→            </p>
+   288→            <ul className="space-y-1.5">
+   289→              {(SECURE_FLAGS[selected] ?? [])
+   290→                .filter((f) => sim.flags[f])
+   291→                .map((f) => (
+   292→                  <li key={f} className="flex items-center gap-2 rounded-md border border-amber-600/30 bg-amber-600/10 px-2.5 py-2 text-xs">
+   293→                    <CircleDashed className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+   294→                    <div className="min-w-0 flex-1">
+   295→                      <p className="font-medium leading-tight">{FLAG_INFO[f].labelAr} — ما زال مفتوحًا</p>
+   296→                      <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{FLAG_INFO[f].hintAr}</p>
+   297→                    </div>
+   298→                    <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px] shrink-0" onClick={() => toggleFlag(f)}>
+   299→                      <Hammer className="h-3 w-3" aria-hidden /> أغلق
+   300→                    </Button>
+   301→                  </li>
+   302→                ))}
+   303→            </ul>
+   304→          </div>
+   305→        ) : null}
+   306→
+   307→        {/* السلامة */}
+   308→        {entry.safety.length > 0 ? (
+   309→          <div className="rounded-md border border-amber-600/30 bg-amber-600/10 p-2.5">
+   310→            <p className="text-xs font-bold text-amber-400 mb-1 flex items-center gap-1.5">
+   311→              <TriangleAlert className="h-3.5 w-3.5" aria-hidden /> تنبيهات السلامة
+   312→            </p>
+   313→            <ul className="text-[11px] leading-relaxed text-amber-200/80 list-disc ps-4 space-y-0.5">
+   314→              {entry.safety.map((s, i) => (
+   315→                <li key={i}>{s}</li>
+   316→              ))}
+   317→            </ul>
+   318→          </div>
+   319→        ) : null}
+   320→
+   321→        <button
+   322→          type="button"
+   323→          className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+   324→          onClick={() => select(null)}
+   325→        >
+   326→          إلغاء التحديد
+   327→        </button>
+   328→      </CardContent>
+   329→    </Card>
+   330→  );
+   331→}
+   332→
+   333→// ============ لوحة السلامة السريعة (الطاقة + الشاشة) ============
+   334→function SafetyStrip() {
+   335→  const sim = useLabStore((s) => s.sim);
+   336→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   337→  const toggleMonitor = useLabStore((s) => s.toggleMonitor);
+   338→  const count = installedCount(sim);
+   339→
+   340→  return (
+   341→    <div className="flex flex-wrap items-center gap-2">
+   342→      <Button
+   343→        size="sm"
+   344→        variant={sim.flags.powerOn ? 'destructive' : 'outline'}
+   345→        className={cn('gap-1.5', !sim.flags.powerOn && 'border-emerald-600/40 text-emerald-400 hover:bg-emerald-600/10')}
+   346→        onClick={() => toggleFlag('powerOn')}
+   347→      >
+   348→        <Power className="h-3.5 w-3.5" aria-hidden />
+   349→        {sim.flags.powerOn ? 'إطفاء الجهاز' : 'تشغيل الجهاز'}
+   350→      </Button>
+   351→      <Button
+   352→        size="sm"
+   353→        variant="outline"
+   354→        className={cn('gap-1.5', sim.flags.acConnected ? 'border-amber-600/40 text-amber-400' : 'border-emerald-600/40 text-emerald-400')}
+   355→        onClick={() => toggleFlag('acConnected')}
+   356→      >
+   357→        {sim.flags.acConnected ? <PlugZap className="h-3.5 w-3.5" aria-hidden /> : <Plug className="h-3.5 w-3.5" aria-hidden />}
+   358→        {sim.flags.acConnected ? 'فصل كابل الكهرباء' : 'توصيل كابل الكهرباء'}
+   359→      </Button>
+   360→      <Button
+   361→        size="sm"
+   362→        variant="outline"
+   363→        className={cn('gap-1.5', sim.peripherals.monitorOn ? 'border-cyan-600/40 text-cyan-400' : '')}
+   364→        onClick={toggleMonitor}
+   365→        title="تشغيل/إطفاء الشاشة الافتراضية (أو انقر زرها في المشهد)"
+   366→      >
+   367→        <Monitor className="h-3.5 w-3.5" aria-hidden />
+   368→        {sim.peripherals.monitorOn ? 'إطفاء الشاشة' : 'تشغيل الشاشة'}
+   369→      </Button>
+   370→      <Badge variant="outline" className="font-mono" dir="ltr">
+   371→        {count}/14
+   372→      </Badge>
+   373→    </div>
+   374→  );
+   375→}
+   376→
+   377→// ============ تلميح التحكم بالجهازين الحقيقيين (زر H) ============
+   378→function HintsOverlay({ dragMode }: { dragMode: boolean }) {
+   379→  const visible = useLabStore((s) => s.hintsVisible);
+   380→  if (!visible) return null;
+   381→  return (
+   382→    <div
+   383→      className="pointer-events-none absolute top-2 start-2 z-10 rounded-md border border-border/70 bg-background/85 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground backdrop-blur-sm"
+   384→      dir="rtl"
+   385→      role="note"
+   386→      aria-label="تلميحات التحكم بالماوس ولوحة المفاتيح الحقيقيين"
+   387→    >
+   388→      <p className="font-bold text-foreground mb-0.5 flex items-center gap-1.5">
+   389→        <Hand className="h-3 w-3" aria-hidden /> تحكم الماوس
+   390→      </p>
+   391→      <p>سحب الزر الأيسر: تدوير • العجلة: تقريب • الزر الأيمن: تحريك</p>
+   392→      <p>نقرة: تحديد قطعة • دبل-كليك: إعادة الكاميرا</p>
+   393→      {dragMode ? (
+   394→        <p className="text-cyan-400 mt-0.5">وضع الفك/التركيب: اسحب القطعة المفصولة إلى الصينية، أو القطعة الجاهزة إلى الجهاز</p>
+   395→      ) : (
+   396→        <p className="mt-0.5">فعّل «وضع السحب» لفك/تركيب القطع بالسحب المباشر</p>
+   397→      )}
+   398→      <p className="mt-0.5">لوحة المفاتيح: R إعادة • F تركيز • X أشعة • 1/2/3 مناظير • H إخفاء</p>
+   399→    </div>
+   400→  );
+   401→}
+   402→
+   403→// ============ لوحة الخطوات القابلة للطي (أسفل المشهد) ============
+   404→function StepsPanel() {
+   405→  const sim = useLabStore((s) => s.sim);
+   406→  const selected = useLabStore((s) => s.selected);
+   407→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   408→  const detachPart = useLabStore((s) => s.detachPart);
+   409→  const installPart = useLabStore((s) => s.installPart);
+   410→  const [open, setOpen] = useState(true);
+   411→
+   412→  const removable = selected !== null && selected !== 'case';
+   413→  const status = selected ? sim.parts[selected] : null;
+   414→  const phase: 'remove' | 'install' | null =
+   415→    removable && status === 'installed' ? 'remove' :
+   416→    removable && (status === 'awaiting' || status === 'removed') ? 'install' : null;
+   417→  const items = !removable || !selected ? [] : phase === 'remove'
+   418→    ? getRemovalChecklist(sim, selected)
+   419→    : phase === 'install'
+   420→      ? getInstallChecklist(sim, selected)
+   421→      : [];
+   422→
+   423→  const done = items.filter((i) => i.done).length;
+   424→
+   425→  return (
+   426→    <div className="rounded-lg border bg-card/60">
+   427→      <button
+   428→        type="button"
+   429→        className="flex w-full items-center gap-2 px-3 py-2 text-start"
+   430→        onClick={() => setOpen(!open)}
+   431→        aria-expanded={open}
+   432→      >
+   433→        {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" aria-hidden /> : <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />}
+   434→        <span className="text-xs font-bold">خطوات العمل {selected && phase ? `— ${COMPONENT_MAP[selected].nameAr}` : ''}</span>
+   435→        {items.length > 0 ? (
+   436→          <Badge variant="outline" className="font-mono text-[10px]" dir="ltr">{done}/{items.length}</Badge>
+   437→        ) : null}
+   438→        <span className="ms-auto text-[10px] text-muted-foreground">{open ? 'طي' : 'فتح'}</span>
+   439→      </button>
+   440→      {open ? (
+   441→        <div className="border-t px-3 py-2">
+   442→          {!selected ? (
+   443→            <p className="text-[11px] text-muted-foreground">حدّد قطعة من المشهد لتظهر خطوات فكها/تركيبها هنا بالترتيب.</p>
+   444→          ) : selected === 'case' ? (
+   445→            <p className="text-[11px] text-muted-foreground">الهيكل يُفتح ويُغلق من زر «الغطاء الجانبي» في شريط الأدوات — بلا مسامير خارجية في هذا الطراز.</p>
+   446→          ) : !phase ? (
+   447→            <p className="text-[11px] text-muted-foreground">
+   448→              الحالة الحالية: {ASSEMBLY_STATE_INFO[assemblyStateOf(status!, false)].labelAr} — لا خطوات نشطة الآن.
+   449→            </p>
+   450→          ) : (
+   451→            <>
+   452→              <p className="text-[11px] text-muted-foreground mb-1.5">
+   453→                {phase === 'remove'
+   454→                  ? 'المطلوب الآن: أول خطوة غير مكتملة بالترتيب — لا تتجاوز أي خطوة.'
+   455→                  : 'المطلوب الآن: أكمل شروط التركيب ثم ركّب القطعة في موضعها.'}
+   456→              </p>
+   457→              <ul className="space-y-1.5">
+   458→                {items.map((item) => (
+   459→                  <ChecklistRow key={item.source + item.labelAr} item={item} mode={phase} onFlag={toggleFlag} onPart={phase === 'remove' ? detachPart : installPart} />
+   460→                ))}
+   461→              </ul>
+   462→            </>
+   463→          )}
+   464→        </div>
+   465→      ) : null}
+   466→    </div>
+   467→  );
+   468→}
+   469→
+   470→// ============ الوضع البديل التعليمي عند غياب WebGL ============
+   471→function FallbackView({ messageAr }: { messageAr: string }) {
+   472→  const setScreen = useLabStore((s) => s.setScreen);
+   473→  return (
+   474→    <div className="space-y-4">
+   475→      <div className="rounded-lg border border-amber-600/40 bg-amber-600/10 p-4">
+   476→        <p className="font-bold text-amber-400 flex items-center gap-2">
+   477→          <TriangleAlert className="h-4 w-4" aria-hidden /> المشهد ثلاثي الأبعاد غير متاح
+   478→        </p>
+   479→        <p className="text-sm text-amber-200/80 mt-1 leading-relaxed">{messageAr}</p>
+   480→        <p className="text-xs text-muted-foreground mt-1">
+   481→          ما يلي عرض تعليمي مبسط نصي — وليس محاكاة ثلاثية الأبعاد.
+   482→        </p>
+   483→      </div>
+   484→      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+   485→        {Object.values(COMPONENT_MAP).map((c) => (
+   486→          <Card key={c.id}>
+   487→            <CardContent className="p-4">
+   488→              <p className="font-bold text-sm">{c.nameAr}</p>
+   489→              <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{c.nameEn}</p>
+   490→              <p className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-3">{c.role}</p>
+   491→            </CardContent>
+   492→          </Card>
+   493→        ))}
+   494→      </div>
+   495→      <Button variant="outline" onClick={() => setScreen('catalog')}>
+   496→        الانتقال إلى كتالوج القطع الكامل
+   497→      </Button>
+   498→    </div>
+   499→  );
+   500→}
+   501→
+   502→// ============ الشاشة الرئيسية للمختبر ============
+   503→export default function LabScreen() {
+   504→  const containerRef = useRef<HTMLDivElement>(null);
+   505→  const sceneWrapRef = useRef<HTMLDivElement>(null);
+   506→  const sceneRef = useRef<PCScene | null>(null);
+   507→  const [failed, setFailed] = useState(false);
+   508→  const [errorAr, setErrorAr] = useState<string>('');
+   509→  const [dragMode, setDragMode] = useState(false);
+   510→  const [isFullscreen, setIsFullscreen] = useState(false);
+   511→  const [canType, setCanType] = useState(false);
+   512→  const [focusMode, setFocusModeState] = useState(false);
+   513→  const [fansReport, setFansReport] = useState<Array<{ labelAr: string; rpm: number; running: boolean; stateAr: string; airflowAr: string }>>([]);
+   514→
+   515→  const sim = useLabStore((s) => s.sim);
+   516→  const selected = useLabStore((s) => s.selected);
+   517→  const xray = useLabStore((s) => s.xray);
+   518→  const exploded = useLabStore((s) => s.exploded);
+   519→  const isolated = useLabStore((s) => s.isolated);
+   520→  const quality = useLabStore((s) => s.quality);
+   521→  const sidePanelsHidden = useLabStore((s) => s.sidePanelsHidden);
+   522→  const bootStartedAt = useLabStore((s) => s.bootStartedAt);
+   523→  const notepad = useLabStore((s) => s.notepad);
+   524→  const airflowVisible = useLabStore((s) => s.airflowVisible);
+   525→  const toggleXray = useLabStore((s) => s.toggleXray);
+   526→  const toggleExploded = useLabStore((s) => s.toggleExploded);
+   527→  const setIsolated = useLabStore((s) => s.setIsolated);
+   528→  const setAirflow = useLabStore((s) => s.setAirflow);
+   529→  const resetSimulation = useLabStore((s) => s.resetSimulation);
+   530→  const select = useLabStore((s) => s.select);
+   531→  const damagePart = useLabStore((s) => s.damagePart);
+   532→  const setNotepad = useLabStore((s) => s.setNotepad);
+   533→  const clearNotepad = useLabStore((s) => s.clearNotepad);
+   534→
+   535→  // إنشاء المشهد مرة واحدة — كل حالات الفشل تمر عبر callback واحد
+   536→  useEffect(() => {
+   537→    const el = containerRef.current;
+   538→    if (!el) return;
+   539→    const fail = (message: string) => {
+   540→      setFailed(true);
+   541→      setErrorAr(message);
+   542→    };
+   543→    const callbacks = {
+   544→      onSelect: (id: ComponentId | null) => useLabStore.getState().select(id),
+   545→      onPeripheral: (kind: string) => {
+   546→        const store = useLabStore.getState();
+   547→        if (kind === 'monitor-power' || kind === 'monitor') store.toggleMonitor();
+   548→      },
+   549→      // إفلات قطعة مسحوبة: التحقق المنطقي أولًا ثم الحركة (توجيه v3 §6)
+   550→      onPartDrop: (id: ComponentId, zone: 'tray' | 'case' | null) => {
+   551→        const st = useLabStore.getState();
+   552→        const status = st.sim.parts[id];
+   553→        if (zone === 'tray' && status === 'separated') st.extractPart(id);
+   554→        else if (zone === 'case' && (status === 'awaiting' || status === 'removed')) st.installPart(id);
+   555→        // غير ذلك: لا تغيير منطقي — يعاد الهدف الصحيح أدناه
+   556→        const after = useLabStore.getState().sim;
+   557→        sceneRef.current?.syncState(after);
+   558→      },
+   559→      // (V6-B) شارة وضع التحكم بالشاشة
+   560→      onFocusMode: (on: boolean) => {
+   561→        setFocusModeState(on);
+   562→        useLabStore.getState().setInputMode(on ? 'monitor' : 'lab');
+   563→      },
+   564→      // (V6 §3) الحرارة المُحاكاة → المتجر (مصدر الحقيقة)
+   565→      onThermal: (cpu, gpu) => useLabStore.getState().setThermal(cpu, gpu),
+   566→      // إطفاء حراري تعليمي
+   567→      onThermalShutdown: (cpu) => {
+   568→        const st = useLabStore.getState();
+   569→        if (st.sim.flags.powerOn) {
+   570→          st.toggleFlag('powerOn');
+   571→          toast.error(`إطفاء حراري تعليمي: حرارة المعالج بلغت ${cpu.toFixed(0)}°C — تحقق من المبرد ومراوح الهيكل`);
+   572→        }
+   573→      },
+   574→      // (V6-D) إعدادات UEFI من داخل النظام الافتراضي
+   575→      onFirmwareChange: (patch) => {
+   576→        const st = useLabStore.getState();
+   577→        const key = Object.keys(patch)[0];
+   578→        if (key === 'bootOrder' && Array.isArray(patch.bootOrder)) st.patchFirmware({ bootOrder: patch.bootOrder as string[] });
+   579→        else if (key === 'secureBoot') st.patchFirmware({ secureBoot: Boolean(patch.secureBoot) });
+   580→        else if (key === 'tpm') st.patchFirmware({ tpm: Boolean(patch.tpm) });
+   581→        else if (key === 'xmp') st.patchFirmware({ xmp: Boolean(patch.xmp) });
+   582→        else if (key === 'setupRequested') st.patchFirmware({ setupRequested: Boolean(patch.setupRequested) });
+   583→      },
+   584→      onBootDevice: (deviceId) => {
+   585→        const st = useLabStore.getState();
+   586→        st.bootFromDevice(deviceId);
+   587→        st.patchFirmware({ setupRequested: false });
+   588→      },
+   589→      // (V6-E/F16) بيئة الاسترداد
+   590→      onStartupRepair: () => useLabStore.getState().runStartupRepair(),
+   591→      onRecoveryRestart: () => {
+   592→        const st = useLabStore.getState();
+   593→        st.toggleFlag('powerOn'); // إطفاء
+   594→        setTimeout(() => useLabStore.getState().toggleFlag('powerOn'), 900); // تشغيل من جديد
+   595→      },
+   596→      onError: fail,
+   597→    };
+   598→    let scene: PCScene | null = null;
+   599→    if (!isWebGLAvailable()) {
+   600→      queueMicrotask(() => fail('متصفحك لا يدعم WebGL — لن يمكن عرض المشهد ثلاثي الأبعاد. استخدم متصفحًا حديثًا أو فعّل تسريع العتاد.'));
+   601→      return;
+   602→    }
+   603→    // (V5) تحميل النماذج الحقيقية قبل إنشاء المشهد — الفشل يبقي المجسمات الإجرائية
+   604→    let cancelled = false;
+   605→    void (async () => {
+   606→      try {
+   607→        await preloadGlbAssets();
+   608→      } catch {
+   609→        // تجاهل: buildAllParts ستستخدم المجسمات الإجرائية
+   610→      }
+   611→      if (cancelled) return;
+   612→      try {
+   613→        scene = new PCScene({ container: el, quality, callbacks });
+   614→        sceneRef.current = scene;
+   615→        const st = useLabStore.getState();
+   616→        scene.syncState(st.sim);
+   617→        scene.setXray(st.xray);
+   618→        scene.setExploded(st.exploded);
+   619→        scene.setAirflow(st.airflowVisible);
+   620→        scene.setBootClock(st.bootStartedAt);
+   621→        scene.setNotepad(st.notepad);
+   622→        scene.setDragEnabled(false);
+   623→        // خطاف فحص تطويري فقط (غير مستخدم في الإنتاج الوظيفي)
+   624→        if (typeof window !== 'undefined') {
+   625→          (window as unknown as Record<string, unknown>).__pcrs = { scene };
+   626→        }
+   627→      } catch {
+   628→        queueMicrotask(() => fail('تعذر إنشاء المشهد ثلاثي الأبعاد — قد تكون موارد الجهاز منخفضة.'));
+   629→      }
+   630→    })();
+   631→    return () => {
+   632→      cancelled = true;
+   633→      scene?.dispose();
+   634→      sceneRef.current = null;
+   635→    };
+   636→  }, []);
+   637→
+   638→  // مزامنة الحالة مع المشهد
+   639→  useEffect(() => {
+   640→    sceneRef.current?.setQuality(quality);
+   641→  }, [quality]);
+   642→  useEffect(() => {
+   643→    sceneRef.current?.setXray(xray);
+   644→  }, [xray]);
+   645→  useEffect(() => {
+   646→    sceneRef.current?.setExploded(exploded);
+   647→  }, [exploded]);
+   648→  useEffect(() => {
+   649→    sceneRef.current?.highlight(selected);
+   650→  }, [selected]);
+   651→  useEffect(() => {
+   652→    sceneRef.current?.isolate(isolated);
+   653→  }, [isolated]);
+   654→  useEffect(() => {
+   655→    sceneRef.current?.syncState(sim);
+   656→  }, [sim]);
+   657→  useEffect(() => {
+   658→    sceneRef.current?.setBootClock(bootStartedAt);
+   659→  }, [bootStartedAt]);
+   660→  useEffect(() => {
+   661→    sceneRef.current?.setNotepad(notepad);
+   662→  }, [notepad]);
+   663→  useEffect(() => {
+   664→    sceneRef.current?.setAirflow(airflowVisible);
+   665→  }, [airflowVisible]);
+   666→  useEffect(() => {
+   667→    sceneRef.current?.setDragEnabled(dragMode);
+   668→  }, [dragMode]);
+   669→
+   670→  // هل النظام الافتراضي يقبل الكتابة الآن؟ (يحدد فعالية حقل «دفتر النظام»)
+   671→  useEffect(() => {
+   672→    const update = () => {
+   673→      const st = useLabStore.getState();
+   674→      const elapsed = st.bootStartedAt !== null ? Math.max(0, Date.now() - st.bootStartedAt) : 0;
+   675→      setCanType(computeMonitorView(st.sim, elapsed).canType);
+   676→    };
+   677→    update();
+   678→    const iv = setInterval(update, 800);
+   679→    return () => clearInterval(iv);
+   680→  }, [sim, bootStartedAt]);
+   681→
+   682→  // (V6 §3) قراءة حية لتقرير المراوح من المشهد (سرعات/حالات لكل مروحة)
+   683→  useEffect(() => {
+   684→    const iv = setInterval(() => {
+   685→      const scene = sceneRef.current;
+   686→      if (scene) setFansReport(scene.getFanReport());
+   687→    }, 1000);
+   688→    return () => clearInterval(iv);
+   689→  }, []);
+   690→
+   691→  // ===== اختصارات لوحة المفاتيح الحقيقية (توجيه v3 §5 + v6 §4.3) =====
+   692→  // في وضع التحكم بالشاشة: كل المفاتيح توجّه إلى النظام الافتراضي (عدا Esc للخروج).
+   693→  // في وضع المختبر: الاختصارات لا تُلتقط أثناء الكتابة في input/textarea/مفاتيح معدلة.
+   694→  useEffect(() => {
+   695→    const onKey = (e: KeyboardEvent) => {
+   696→      const st = useLabStore.getState();
+   697→
+   698→      // (V6-B) وضع التحكم بالشاشة: أولوية الإدخال للنظام الافتراضي
+   699→      if (st.inputMode === 'monitor') {
+   700→        // مفاتيح المتصفح المحفوظة تمر دائمًا (تحديث/ملء شاشة/أدوات المطور)
+   701→        if (e.key === 'F5' || e.key === 'F11' || e.key === 'F12' || ((e.ctrlKey || e.metaKey) && ['r', 'l', 't', 'w', 'j'].includes(e.key.toLowerCase()))) return;
+   702→        const consumed = sceneRef.current?.handleMonitorKey(e);
+   703→        if (consumed) e.preventDefault();
+   704→        return;
+   705→      }
+   706→
+   707→      const t = e.target as HTMLElement | null;
+   708→      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+   709→      if (e.ctrlKey || e.metaKey || e.altKey) return;
+   710→      switch (e.code) {
+   711→        case 'KeyR': // إعادة ضبط منظور الكاميرا
+   712→          sceneRef.current?.resetCamera();
+   713→          break;
+   714→        case 'KeyF': { // تركيز الكاميرا على القطعة المحددة
+   715→          const sel = st.selected;
+   716→          if (sel && sel !== 'case') sceneRef.current?.focusComponent(sel);
+   717→          break;
+   718→        }
+   719→        case 'KeyX': // تبديل الأشعة السينية
+   720→          st.toggleXray();
+   721→          break;
+   722→        case 'KeyE': // تبديل العرض التفجيري
+   723→          st.toggleExploded();
+   724→          break;
+   725→        case 'KeyH': // إظهار/إخفاء تلميحات التحكم
+   726→          st.setHintsVisible(!st.hintsVisible);
+   727→          break;
+   728→        case 'KeyM': // (V6-B) تفعيل وضع التحكم بالشاشة
+   729→          sceneRef.current?.setFocusMode(true);
+   730→          break;
+   731→        case 'Digit1': // منظير أمامي
+   732→          sceneRef.current?.setViewPreset('front');
+   733→          break;
+   734→        case 'Digit2': // منظير جانبي
+   735→          sceneRef.current?.setViewPreset('side');
+   736→          break;
+   737→        case 'Digit3': // منظير علوي
+   738→          sceneRef.current?.setViewPreset('top');
+   739→          break;
+   740→        case 'Delete': // (V6-D) الدخول إلى إعدادات UEFI أثناء الإقلاع
+   741→          st.requestSetup();
+   742→          break;
+   743→        case 'Escape': // إلغاء التحديد/العزل
+   744→          st.select(null);
+   745→          st.setIsolated(null);
+   746→          break;
+   747→        default:
+   748→          break;
+   749→      }
+   750→    };
+   751→    window.addEventListener('keydown', onKey);
+   752→    return () => window.removeEventListener('keydown', onKey);
+   753→  }, []);
+   754→
+   755→  // ملء الشاشة (Fullscreen API) — إعادة الضبط عبر Esc أو الزر نفسه
+   756→  useEffect(() => {
+   757→    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+   758→    document.addEventListener('fullscreenchange', onFs);
+   759→    return () => document.removeEventListener('fullscreenchange', onFs);
+   760→  }, []);
+   761→  const toggleFullscreen = useCallback(() => {
+   762→    const el = sceneWrapRef.current;
+   763→    if (!el) return;
+   764→    if (document.fullscreenElement) {
+   765→      document.exitFullscreen().catch(() => {});
+   766→    } else if (el.requestFullscreen) {
+   767→      el.requestFullscreen().catch(() => toast.error('تعذر تفعيل ملء الشاشة — قد يمنعه المتصفح.'));
+   768→    }
+   769→  }, []);
+   770→
+   771→  const resetCamera = useCallback(() => sceneRef.current?.resetCamera(), []);
+   772→  const focusSelected = useCallback(() => {
+   773→    if (selected) sceneRef.current?.focusComponent(selected);
+   774→  }, [selected]);
+   775→  const toggleScreenControl = useCallback(() => {
+   776→    const scene = sceneRef.current;
+   777→    if (!scene) return;
+   778→    scene.setFocusMode(!scene.isFocusMode());
+   779→  }, []);
+   780→
+   781→  if (failed) {
+   782→    return <FallbackView messageAr={errorAr} />;
+   783→  }
+   784→
+   785→  const panelOpen = sim.flags.panelOpen;
+   786→
+   787→  return (
+   788→    <div className="flex flex-col gap-3">
+   789→      {/* شريط أدوات المشهد — صغير وواضح (توجيه v3 2.1) */}
+   790→      <div className="flex flex-wrap items-center gap-1 rounded-lg border bg-card/60 p-1.5" role="toolbar" aria-label="أدوات المشهد ثلاثي الأبعاد">
+   791→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('front')} title="منظور أمامي (1)">
+   792→          <View className="h-3.5 w-3.5" aria-hidden /> أمامي
+   793→        </Button>
+   794→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('side')} title="منظور جانبي (2)">
+   795→          <FlipHorizontal2 className="h-3.5 w-3.5" aria-hidden /> جانبي
+   796→        </Button>
+   797→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={() => sceneRef.current?.setViewPreset('top')} title="منظور علوي (3)">
+   798→          <ChevronsUp className="h-3.5 w-3.5" aria-hidden /> علوي
+   799→        </Button>
+   800→        <Separator orientation="vertical" className="mx-1 h-5" />
+   801→        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => sceneRef.current?.zoomStep(1)} title="تكبير">
+   802→          <ZoomIn className="h-3.5 w-3.5" aria-hidden />
+   803→        </Button>
+   804→        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => sceneRef.current?.zoomStep(-1)} title="إبعاد">
+   805→          <ZoomOut className="h-3.5 w-3.5" aria-hidden />
+   806→        </Button>
+   807→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={resetCamera} title="إعادة ضبط الكاميرا (R أو دبل-كليك)">
+   808→          <Camera className="h-3.5 w-3.5" aria-hidden /> إعادة الضبط
+   809→        </Button>
+   810→        <Separator orientation="vertical" className="mx-1 h-5" />
+   811→        <Button size="sm" variant={panelOpen ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={() => useLabStore.getState().toggleFlag('panelOpen')} title="فتح/إغلاق الغطاء الجانبي">
+   812→          {panelOpen ? <DoorClosed className="h-3.5 w-3.5" aria-hidden /> : <DoorOpen className="h-3.5 w-3.5" aria-hidden />} الغطاء
+   813→        </Button>
+   814→        <Button size="sm" variant={xray ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleXray} title="الأشعة السينية — مخطط القطع (X)">
+   815→          <X className={cn('h-3.5 w-3.5', !xray && 'opacity-60')} aria-hidden /> أشعة
+   816→        </Button>
+   817→        <Button size="sm" variant={exploded ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleExploded} title="العرض التفجيري (E)">
+   818→          <Bomb className="h-3.5 w-3.5" aria-hidden /> تفجيري
+   819→        </Button>
+   820→        <Button size="sm" variant={airflowVisible ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={() => setAirflow(!airflowVisible)} title="أسهم اتجاه تدفق الهواء">
+   821→          <Wind className="h-3.5 w-3.5" aria-hidden /> هواء
+   822→        </Button>
+   823→        <Button size="sm" variant={focusMode ? 'default' : 'ghost'} className="h-7 gap-1 px-2 text-[11px]" onClick={toggleScreenControl} title="وضع التحكم بالشاشة المجسمة: الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي (M)">
+   824→          <MonitorUp className="h-3.5 w-3.5" aria-hidden /> التحكم بالشاشة
+   825→        </Button>
+   826→        <Separator orientation="vertical" className="mx-1 h-5" />
+   827→        <Button
+   828→          size="sm"
+   829→          variant={dragMode ? 'default' : 'ghost'}
+   830→          className="h-7 gap-1 px-2 text-[11px]"
+   831→          onClick={() => setDragMode(!dragMode)}
+   832→          title="وضع الفك/التركيب: سحب القطع بالماوس مباشرة"
+   833→        >
+   834→          <Hand className="h-3.5 w-3.5" aria-hidden /> وضع السحب
+   835→        </Button>
+   836→        <Button
+   837→          size="sm"
+   838→          variant="ghost"
+   839→          className="h-7 gap-1 px-2 text-[11px]"
+   840→          disabled={!selected || selected === 'case'}
+   841→          onClick={focusSelected}
+   842→          title="تقريب الكاميرا نحو القطعة المحددة (F)"
+   843→        >
+   844→          <Focus className="h-3.5 w-3.5" aria-hidden /> توجيه
+   845→        </Button>
+   846→        {selected && selected !== 'case' && sim.parts[selected] !== 'damaged' ? (
+   847→          <AlertDialog>
+   848→            <AlertDialogTrigger asChild>
+   849→              <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px] text-rose-400 hover:bg-rose-600/10" title="إحداث تلف تدريبي مقصود">
+   850→                <MonitorX className="h-3.5 w-3.5" aria-hidden /> تلف تدريبي
+   851→              </Button>
+   852→            </AlertDialogTrigger>
+   853→            <AlertDialogContent dir="rtl">
+   854→              <AlertDialogHeader>
+   855→                <AlertDialogTitle>إحداث تلف تدريبي مقصود؟</AlertDialogTitle>
+   856→                <AlertDialogDescription>
+   857→                  وضع الاستكشاف: ستتلوّن القطعة بالأحمر وتُعتبر تالفة في التشخيص (TRAINING_DAMAGE). يمكنك استبدالها بقطعة سليمة من المخزن التعليمي في أي وقت.
+   858→                </AlertDialogDescription>
+   859→              </AlertDialogHeader>
+   860→              <AlertDialogFooter>
+   861→                <AlertDialogCancel>إلغاء</AlertDialogCancel>
+   862→                <AlertDialogAction onClick={() => damagePart(selected)}>تأكيد التلف التدريبي</AlertDialogAction>
+   863→              </AlertDialogFooter>
+   864→            </AlertDialogContent>
+   865→          </AlertDialog>
+   866→        ) : null}
+   867→        {isolated ? (
+   868→          <Button size="sm" variant="secondary" className="h-7 gap-1 px-2 text-[11px]" onClick={() => setIsolated(null)} title="إلغاء عزل القطعة (Esc)">
+   869→            <EyeOff className="h-3.5 w-3.5" aria-hidden /> إلغاء العزل
+   870→          </Button>
+   871→        ) : null}
+   872→        <Separator orientation="vertical" className="mx-1 h-5" />
+   873→        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px]" onClick={toggleFullscreen} title="ملء الشاشة / العودة">
+   874→          {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" aria-hidden /> : <Maximize2 className="h-3.5 w-3.5" aria-hidden />}
+   875→          {isFullscreen ? 'إنهاء ملء الشاشة' : 'ملء الشاشة'}
+   876→        </Button>
+   877→        <Button
+   878→          size="sm"
+   879→          variant={sidePanelsHidden ? 'default' : 'ghost'}
+   880→          className="h-7 gap-1 px-2 text-[11px] ms-auto"
+   881→          onClick={() => useLabStore.getState().setSidePanelsHidden(!sidePanelsHidden)}
+   882→          title="إخفاء اللوحات الجانبية لتوسيع المشهد"
+   883→        >
+   884→          <PanelRightClose className="h-3.5 w-3.5" aria-hidden />
+   885→          {sidePanelsHidden ? 'إظهار اللوحة' : 'إخفاء اللوحة'}
+   886→        </Button>
+   887→        <AlertDialog>
+   888→          <AlertDialogTrigger asChild>
+   889→            <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-[11px] text-rose-400 hover:bg-rose-600/10" title="إعادة الجهاز إلى الحالة الافتراضية">
+   890→              <RotateCcw className="h-3.5 w-3.5" aria-hidden /> إعادة تهيئة
+   891→            </Button>
+   892→          </AlertDialogTrigger>
+   893→          <AlertDialogContent dir="rtl">
+   894→            <AlertDialogHeader>
+   895→              <AlertDialogTitle>إعادة تهيئة الجهاز الافتراضي؟</AlertDialogTitle>
+   896→              <AlertDialogDescription>
+   897→                سيُعاد كل شيء إلى الحالة الافتراضية (كل القطع مثبتة، الجهاز مطفأ). سجل الجلسات لن يُمس.
+   898→              </AlertDialogDescription>
+   899→            </AlertDialogHeader>
+   900→            <AlertDialogFooter>
+   901→              <AlertDialogCancel>إلغاء</AlertDialogCancel>
+   902→              <AlertDialogAction onClick={resetSimulation}>تأكيد الإعادة</AlertDialogAction>
+   903→            </AlertDialogFooter>
+   904→          </AlertDialogContent>
+   905→        </AlertDialog>
+   906→      </div>
+   907→
+   908→      {/* المشهد + اللوحة الجانبية */}
+   909→      <div className={cn('grid gap-3', sidePanelsHidden ? '' : 'lg:grid-cols-[minmax(0,1fr)_360px]')}>
+   910→        <div className="space-y-2 min-w-0">
+   911→          <SafetyStrip />
+   912→
+   913→          {/* (V6 §3) قراءة حية: الحرارة المُحاكاة + سرعة كل مروحة وحالتها واتجاه تدفقها */}
+   914→          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-card/40 px-2.5 py-1.5" dir="rtl" aria-label="قراءة المراوح والحرارة المحاكاة">
+   915→            <Badge variant="outline" className="gap-1 text-[10px]">
+   916→              <Thermometer className="h-3 w-3" aria-hidden />
+   917→              CPU {sim.thermal.cpuTempC.toFixed(0)}°C / GPU {sim.thermal.gpuTempC.toFixed(0)}°C
+   918→            </Badge>
+   919→            <span className="text-[10px] text-muted-foreground">محاكاة تعليمية:</span>
+   920→            {fansReport.length === 0 ? (
+   921→              <span className="text-[10px] text-muted-foreground">…تجهيز منظومة المراوح</span>
+   922→            ) : (
+   923→              fansReport.map((f) => (
+   924→                <Badge
+   925→                  key={f.labelAr}
+   926→                  variant="outline"
+   927→                  className={cn(
+   928→                    'gap-1 text-[10px]',
+   929→                    !f.running ? 'border-slate-600/40 text-slate-400' : f.rpm > 1200 ? 'border-rose-600/40 text-rose-400' : 'border-emerald-600/40 text-emerald-400',
+   930→                  )}
+   931→                  title={`${f.labelAr} — ${f.airflowAr}`}
+   932→                >
+   933→                  <Wind className="h-3 w-3" aria-hidden />
+   934→                  {f.labelAr}: {f.running ? `${f.rpm} RPM` : 'متوقفة'}
+   935→                </Badge>
+   936→              ))
+   937→            )}
+   938→          </div>
+   939→
+   940→          <div
+   941→            ref={sceneWrapRef}
+   942→            className={cn(
+   943→              'relative overflow-hidden rounded-xl border bg-[#0d1218]',
+   944→              isFullscreen ? 'h-screen' : 'h-[52vh] min-h-[380px] lg:h-[calc(100vh-320px)] lg:min-h-[460px]',
+   945→            )}
+   946→          >
+   947→            <div
+   948→              ref={containerRef}
+   949→              dir="ltr"
+   950→              className="h-full w-full"
+   951→              role="application"
+   952→              aria-label="المشهد ثلاثي الأبعاد للجهاز — اسحب للتدوير، انقر على قطعة لتحديدها، وعجلة الماوس للتقريب"
+   953→            />
+   954→            {/* (V6-B) شارة وضع التحكم بالشاشة + زر خروج آمن */}
+   955→            {focusMode ? (
+   956→              <div className="pointer-events-auto absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-2 bg-emerald-950/80 px-3 py-1.5 text-xs text-emerald-200 backdrop-blur-sm" dir="rtl">
+   957→                <MonitorUp className="h-3.5 w-3.5" aria-hidden />
+   958→                <span className="font-bold">وضع التحكم بالشاشة</span>
+   959→                <span className="opacity-80">— الماوس والكيبورد الحقيقيان يتحكمان بالنظام الافتراضي داخل الشاشة المجسمة</span>
+   960→                <kbd className="rounded border border-emerald-500/50 px-1 font-mono">Esc</kbd>
+   961→                <span className="opacity-80">للعودة للمختبر</span>
+   962→                <Button size="sm" variant="secondary" className="h-6 gap-1 px-2 text-[10px]" onClick={() => sceneRef.current?.setFocusMode(false)}>
+   963→                  <DoorClosed className="h-3 w-3" aria-hidden /> خروج
+   964→                </Button>
+   965→              </div>
+   966→            ) : null}
+   967→            <HintsOverlay dragMode={dragMode} />
+   968→          </div>
+   969→
+   970→          {/* حقل إدخال حقيقي → دفتر النظام الافتراضي على الشاشة (توجيه v3 أ.2) */}
+   971→          <div className="flex items-center gap-2">
+   972→            <Badge variant="outline" className="gap-1 shrink-0 text-[10px]">
+   973→              <Keyboard className="h-3 w-3" aria-hidden /> دفتر النظام
+   974→            </Badge>
+   975→            <Input
+   976→              value={notepad}
+   977→              onChange={(e) => setNotepad(e.target.value)}
+   978→              disabled={!canType}
+   979→              placeholder={canType ? 'اكتب بلوحة مفاتيحك — يظهر النص على الشاشة الافتراضية' : 'يعمل بعد إقلاع ناجح يدخل النظام الافتراضي'}
+   980→              className="h-8 text-xs"
+   981→              aria-label="إدخال نص حقيقي يظهر في دفتر النظام الافتراضي على الشاشة ثلاثية الأبعاد"
+   982→            />
+   983→            <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0" onClick={clearNotepad} title="مسح دفتر النظام" disabled={!notepad.length}>
+   984→              <Eraser className="h-3.5 w-3.5" aria-hidden />
+   985→              <span className="sr-only">مسح دفتر النظام</span>
+   986→            </Button>
+   987→          </div>
+   988→
+   989→          <p className="text-[11px] text-muted-foreground">
+   990→            الجهاز المرجعي: هيكل Mid-Tower + لوحة ATX (مقبس LGA1700 / ذاكرة DDR5) — أساس اللوحة مسح حقيقي مرخص CC0 (Poly Haven).
+   991→            اختصارات المشهد: <kbd className="rounded border px-1 font-mono">R</kbd> إعادة، <kbd className="rounded border px-1 font-mono">F</kbd> تركيز، <kbd className="rounded border px-1 font-mono">X</kbd> أشعة، <kbd className="rounded border px-1 font-mono">1/2/3</kbd> مناظير، <kbd className="rounded border px-1 font-mono">H</kbd> تلميحات.
+   992→          </p>
+   993→
+   994→          <StepsPanel />
+   995→        </div>
+   996→        {!sidePanelsHidden ? (
+   997→          <div className="min-w-0">
+   998→            <ScrollArea className="h-fit max-h-[calc(100vh-240px)] scrollbar-thin">
+   999→              <InfoPanel />
+  1000→            </ScrollArea>
+  1001→          </div>
+  1002→        ) : null}
+  1003→      </div>
+  1004→    </div>
+  1005→  );
+  1006→}
+  1007→

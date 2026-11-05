@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * CatalogScreen — كتالوج القطع الاثنتي عشرة: بحث + تصفية بالتصنيف + بطاقات + حوار تفاصيل كاملة.
+ * CatalogScreen — كتالوج القطع الخمسة عشر: بحث + تصفية بالتصنيف + بطاقات + حوار تفاصيل كاملة.
  * البيانات من COMPONENTS/COMPONENT_MAP فقط، والانتقال للمختبر عبر select + setScreen.
  */
 
@@ -122,6 +122,7 @@ export default function CatalogScreen() {
               size="sm"
               variant={activeCategory === cat ? 'default' : 'outline'}
               className="rounded-full"
+              aria-pressed={activeCategory === cat}
               onClick={() => setActiveCategory(cat)}
             >
               {cat}

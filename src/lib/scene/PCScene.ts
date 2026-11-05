@@ -19,7 +19,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildAllParts, buildEnvironment, setComponentId } from './partsFactory';
 import { createScreenPainter, type ScreenPainter } from './screenTexture';
-import { computeMonitorView } from '../simulation/monitorEngine';
+import { bootableDevices, computeMonitorView } from '../simulation/monitorEngine';
 import { FanSystem } from './fans';
 import { VirtualOS } from '../os/vos';
 import { registerVosApps } from '../os/apps';
@@ -213,6 +213,7 @@ export class PCScene {
   private focusMode = false;
   private savedCam: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
   private thermalAccum = 0;
+  private fanConditions: import('./fans').FanConditions | null = null; // (إصلاح تدقيق V6) كائن معاد استخدامه — لا تخصيص لكل إطار
   private readonly _screenNdc = new THREE.Vector2();
 
   // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
@@ -456,7 +457,6 @@ export class PCScene {
   /** (V6 §3) إظهار/إخفاء أسهم تدفق الهواء — نسخة منظومة المراوح لكل مروحة */
   setAirflow(on: boolean): void {
     if (this.blocked) return;
-    this.visuals.airflow.visible = false; // الأسهم الثابتة القديمة تُستبدل بأسهم لكل مروحة
     this.fans?.setArrowsVisible(on);
   }
 
@@ -535,9 +535,10 @@ export class PCScene {
     this.raycaster.setFromCamera(this._screenNdc, this.camera);
     const hits = this.raycaster.intersectObject(screen, false);
     if (hits.length === 0 || hits[0].uv === undefined) return null;
+    if (!this.vos) return null; // (إصلاح تدقيق V6) حارس: كان غير آمن null هنا
     const uv = hits[0].uv!;
     // PlaneGeometry: (0,0) أسفل-يسار — الكانفس: (0,0) أعلى-يسار ⇒ قلب Y فقط
-    return { x: uv.x * this.vos!.W, y: (1 - uv.y) * this.vos!.H };
+    return { x: uv.x * this.vos.W, y: (1 - uv.y) * this.vos.H };
   }
 
   /** تقرير منظومة المراوح (للواجهة التعليمية) */
@@ -666,6 +667,8 @@ export class PCScene {
     }
     this.renderer?.dispose();
     dom?.remove();
+    // (إصلاح تدقيق V6) تنظيف الخطاف التطويري — كان يبقي مرجعًا لمشهد مُستبعد
+    delete (window as unknown as Record<string, unknown>)['__pcScene'];
     this.emissiveOriginals.clear();
     this.shellOriginals.clear();
     this.damagedOriginals.clear();
@@ -697,15 +700,19 @@ export class PCScene {
     if (this.fans && this.lastState) {
       const s = this.lastState;
       const powered = s.flags.powerOn && s.flags.acConnected && !s.peripherals.psuDead;
-      const conditions = {
-        powered,
-        cpuCoolerOk: isInstalled(s.parts.cooler),
-        gpuOk: isInstalled(s.parts.gpu) && isInstalled(s.parts.gpuPower),
-        caseFansOk: isInstalled(s.parts.fans) && !s.flags.fanHeadersDisconnected,
-        psuOk: powered,
-        cpuLoad: 0.42,
-        gpuLoad: 0.48,
-      };
+      // (إصلاح تدقيق V6) الأحمال مشتقة من الحالة والحرارة المُحاكاة — كانت ثوابت مكتوبة يدويًا
+      // حلقة تغذية راجعة تعليمية: غياب التبريد يرفع الحرارة فيرفع الأحمال فيتسارع ما تبقى من مراوح
+      const heatCpu = Math.min(1, Math.max(0, (s.thermal.cpuTempC - 50) / 45));
+      const heatGpu = Math.min(1, Math.max(0, (s.thermal.gpuTempC - 50) / 40));
+      if (!this.fanConditions) this.fanConditions = { powered: false, cpuCoolerOk: false, gpuOk: false, caseFansOk: false, psuOk: false, cpuLoad: 0, gpuLoad: 0 };
+      const conditions = this.fanConditions;
+      conditions.powered = powered;
+      conditions.cpuCoolerOk = isInstalled(s.parts.cooler) && !s.flags.fanHeadersDisconnected;
+      conditions.gpuOk = isInstalled(s.parts.gpu) && isInstalled(s.parts.gpuPower);
+      conditions.caseFansOk = isInstalled(s.parts.fans) && !s.flags.fanHeadersDisconnected;
+      conditions.psuOk = powered;
+      conditions.cpuLoad = powered ? Math.min(1, 0.35 + 0.65 * heatCpu) : 0;
+      conditions.gpuLoad = powered && conditions.gpuOk ? Math.min(1, 0.3 + 0.7 * heatGpu) : 0;
       this.fans.update(dt, conditions);
 
       // الحرارة المُحاكاة (بيانات تعليمية معلنة): ترتفع بلا مبرد/بلا مراوح وتقترب من الهدف
@@ -1112,13 +1119,15 @@ export class PCScene {
 
     if (screen === 'bios') {
       vos.mode = 'firmware';
-      const devs = sim.disks.map((d) => `${d.id} — ${d.labelAr}${sim.os.installed ? ' (نظام)' : ''}`);
+      // (إصلاح تدقيق V6) قائمة الأجهزة الفعلية فقط — كانت تعرض أقراصًا غير مركّبة
+      const devs = bootableDevices(sim).map((d) => `${d.id} — ${d.labelAr}`);
       vos.fwData = {
         cpuAr: 'LGA1700 — 6C/12T (reference)',
         ramAr: `DDR5 32GB${sim.firmware.xmp ? ' @5200 (XMP)' : ' @2133'} — ${sim.flags.ramClipsOpen ? 'مزالج مفتوحة!' : 'مثبتة'}`,
         boardAr: 'PC LAB Z690 (reference)',
         tempsAr: `CPU ${sim.thermal.cpuTempC.toFixed(0)}°C / GPU ${sim.thermal.gpuTempC.toFixed(0)}°C (simulated)`,
         fansAr: this.fans?.report().map((f) => `${f.labelAr}: ${f.rpm} RPM`).join(' | ') ?? '—',
+        bootMode: sim.firmware.bootMode,
         bootOrder: [...sim.firmware.bootOrder],
         secureBoot: sim.firmware.secureBoot,
         tpm: sim.firmware.tpm,
@@ -1126,6 +1135,7 @@ export class PCScene {
         devicesAr: devs,
         onBootOrder: (order) => this.callbacks.onFirmwareChange?.({ bootOrder: order }),
         onToggle: (key) => this.callbacks.onFirmwareChange?.({ [key]: !sim.firmware[key] }),
+        onBootMode: (mode) => this.callbacks.onFirmwareChange?.({ bootMode: mode }),
         onExit: () => this.callbacks.onFirmwareChange?.({ setupRequested: false }),
         onBootDevice: (id) => this.callbacks.onBootDevice?.(id),
       };
@@ -1147,6 +1157,17 @@ export class PCScene {
     }
 
     if (sim.os.bcdCorrupt && sim.os.installed) {
+      // (إصلاح F16 — تدقيق V6) كان وضع الاسترداد يُفرض كل إطار فيُخفى موجه الأوامر
+      // ويجعل bootrec غير قابل للوصول نهائيًا — الآن النافذة تبقى مفتوحة حتى إغلاقها
+      const cmdStillOpen = vos.recoveryCmdOpen && vos.windows.some((w) => w.appId === 'cmd' && !w.minimized);
+      if (!cmdStillOpen) vos.recoveryCmdOpen = false;
+      if (cmdStillOpen) {
+        // سطح مكتب الاسترداد: نافذة موجه الأوامر بحالة recovery (bootrec متاح)
+        vos.mode = 'desktop';
+        vos.render(now);
+        this.painter.texture.needsUpdate = true;
+        return;
+      }
       // فشل إقلاع النظام (F16) ⇒ بيئة الاسترداد
       vos.mode = 'recovery';
       vos.recoveryData = {
@@ -1155,8 +1176,11 @@ export class PCScene {
         onStartupRepair: () => this.callbacks.onStartupRepair?.(),
         onCommandPrompt: () => {
           const win = vos.openApp('cmd');
-          if (win) win.state['recovery'] = true;
-          vos.mode = 'desktop';
+          if (win) {
+            win.state['recovery'] = true;
+            win.titleAr = 'موجه الأوامر — بيئة الاسترداد';
+            vos.recoveryCmdOpen = true;
+          }
         },
         onRestart: () => this.callbacks.onRecoveryRestart?.(),
       };
@@ -1495,13 +1519,17 @@ export class PCScene {
     this.drawMonitor(true);
   };
 
-  /** (V6-B) نقر مزدوج داخل الشاشة (الأيقونات/شريط العنوان) */
+  /** (V6-B) نقر مزدوج: داخل وضع الشاشة يوجه للنظام الافتراضي، وفي المختبر يعيد الكاميرا (موثقة) */
   private readonly onScreenDbl = (event: MouseEvent): void => {
     if (this.blocked) return;
-    if (!this.focusMode || !this.vos) return;
-    const hit = this.screenHit(event.clientX, event.clientY);
-    if (hit) this.vos.pointer('dbl', hit.x, hit.y);
-    this.drawMonitor(true);
+    if (this.focusMode && this.vos) {
+      const hit = this.screenHit(event.clientX, event.clientY);
+      if (hit) this.vos.pointer('dbl', hit.x, hit.y);
+      this.drawMonitor(true);
+      return;
+    }
+    // وضع المختبر: دبل-كليك = إعادة ضبط الكاميرا (كان معلنًا غير مسجل — إصلاح تدقيق V6)
+    this.resetCamera();
   };
 
   /** (V6-B) الزر الأيمن → قائمة سياق النظام الافتراضي */
@@ -1512,12 +1540,6 @@ export class PCScene {
     const hit = this.screenHit(event.clientX, event.clientY);
     if (hit) this.vos.pointer('right', hit.x, hit.y);
     this.drawMonitor(true);
-  };
-
-  /** دبل-كليك: إعادة الكاميرا إلى الوضع الافتراضي (موثقة في الإعدادات) */
-  private readonly onDoubleClick = (): void => {
-    if (this.blocked) return;
-    this.resetCamera();
   };
 
   // ====================================================================

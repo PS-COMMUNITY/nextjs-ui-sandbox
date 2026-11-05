@@ -1,0 +1,650 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * PowerScreen — «الطاقة والتخزين».
+     5→ * تبويب «ميزانية الطاقة»: حساب التجميعة المرجعية (estimatePower + BASE_PLATFORM_W)،
+     6→ * جدول موصلات PSU في التجميعة المرجعية (ATX/EPS/PCIe)، وقواعد إرشادية.
+     7→ * تبويب «صحة القرص (محاكاة)»: ثلاثة سيناريوهات SMART حتمية عبر simulateSmart
+     8→ * مع شارة «محاكاة تعليمية» بارزة دائمًا (FlaskConical + badgeAr).
+     9→ * كل الأرقام تقديرية تعليمية وليست قياسًا حقيقيًا.
+    10→ */
+    11→
+    12→import { useMemo, useState } from 'react';
+    13→import {
+    14→  Activity,
+    15→  AlertTriangle,
+    16→  CheckCircle2,
+    17→  CircleCheck,
+    18→  CircleHelp,
+    19→  FlaskConical,
+    20→  HardDrive,
+    21→  Hourglass,
+    22→  Info,
+    23→  Percent,
+    24→  PlugZap,
+    25→  ShieldCheck,
+    26→  XCircle,
+    27→  Zap,
+    28→} from 'lucide-react';
+    29→
+    30→import { Badge } from '@/components/ui/badge';
+    31→import { Button } from '@/components/ui/button';
+    32→import {
+    33→  Card,
+    34→  CardContent,
+    35→  CardDescription,
+    36→  CardHeader,
+    37→  CardTitle,
+    38→} from '@/components/ui/card';
+    39→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+    40→import { Progress } from '@/components/ui/progress';
+    41→import { Separator } from '@/components/ui/separator';
+    42→import {
+    43→  Table,
+    44→  TableBody,
+    45→  TableCell,
+    46→  TableHead,
+    47→  TableHeader,
+    48→  TableRow,
+    49→} from '@/components/ui/table';
+    50→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    51→
+    52→import type { SmartSimResult } from '@/lib/types';
+    53→import { BUILD_OPTIONS, DEFAULT_BUILD } from '@/lib/data/catalog';
+    54→import { findOption } from '@/lib/simulation/compatibilityEngine';
+    55→import { CASE_FANS_W, estimatePower, readSpecNumber } from '@/lib/simulation/powerEstimator';
+    56→import { simulateSmart } from '@/lib/simulation/smartSim';
+    57→
+    58→/** عدد موصلات PCIe 8-pin التي تحتاجها البطاقة من قيمة powerConnector. */
+    59→function gpuPcieConnectorsNeeded(spec: string | undefined): number {
+    60→  const v = (spec ?? '').trim().toLowerCase();
+    61→  if (v === '8pin+6pin' || v === '6pin+8pin') return 2;
+    62→  if (v === '8pin' || v === '6pin') return 1;
+    63→  return 0; // none أو أي قيمة أخرى: لا موصل خارجي
+    64→}
+    65→
+    66→type SmartScenario = SmartSimResult['scenario'];
+    67→
+    68→const SMART_SCENARIOS: { key: SmartScenario; labelAr: string; icon: typeof CircleCheck }[] = [
+    69→  { key: 'healthy', labelAr: 'قرص سليم', icon: CircleCheck },
+    70→  { key: 'aging', labelAr: 'قرص متقادم', icon: Hourglass },
+    71→  { key: 'failing', labelAr: 'قرص متعطل', icon: AlertTriangle },
+    72→];
+    73→
+    74→export default function PowerScreen() {
+    75→  const [smart, setSmart] = useState<SmartSimResult | null>(null);
+    76→
+    77→  // ===== حسابات التجميعة المرجعية (ثابتة) =====
+    78→  const est = useMemo(() => estimatePower(DEFAULT_BUILD, BUILD_OPTIONS), []);
+    79→  const cpuOpt = findOption(BUILD_OPTIONS, 'cpu', DEFAULT_BUILD.cpu);
+    80→  const gpuOpt = findOption(BUILD_OPTIONS, 'gpu', DEFAULT_BUILD.gpu);
+    81→  const psuOpt = findOption(BUILD_OPTIONS, 'psu', DEFAULT_BUILD.psu);
+    82→  const moboOpt = findOption(BUILD_OPTIONS, 'motherboard', DEFAULT_BUILD.motherboard);
+    83→  const coolerOpt = findOption(BUILD_OPTIONS, 'cooler', DEFAULT_BUILD.cooler);
+    84→  const ramOpt = findOption(BUILD_OPTIONS, 'ram', DEFAULT_BUILD.ram);
+    85→  const ssdOpt = findOption(BUILD_OPTIONS, 'ssd', DEFAULT_BUILD.ssd);
+    86→
+    87→  const optW = (specKey: string, opt: { specs: Record<string, string>; powerW?: number } | undefined): number =>
+    88→    opt !== undefined ? (readSpecNumber(opt.specs, specKey) ?? opt.powerW ?? 0) : 0;
+    89→  const cpuW = optW('tdpW', cpuOpt);
+    90→  const gpuW = optW('tdpW', gpuOpt);
+    91→  const moboW = moboOpt?.powerW ?? 0;
+    92→  const coolerW = coolerOpt?.powerW ?? 0;
+    93→  const ramW = ramOpt?.powerW ?? 0;
+    94→  const ssdW = ssdOpt?.powerW ?? 0;
+    95→
+    96→  const pcieNeeded = gpuPcieConnectorsNeeded(gpuOpt?.specs['powerConnector']);
+    97→  const pcieAvailable = psuOpt !== undefined ? (readSpecNumber(psuOpt.specs, 'pcie8pin') ?? 0) : 0;
+    98→  const epsAvailable = (psuOpt?.specs['eps8pin'] ?? '') === 'yes';
+    99→  const pcieShortage = pcieAvailable < pcieNeeded;
+   100→
+   101→  const healthProgressCls =
+   102→    smart === null
+   103→      ? ''
+   104→      : smart.scenario === 'healthy'
+   105→        ? '[&>div]:bg-emerald-500'
+   106→        : smart.scenario === 'aging'
+   107→          ? '[&>div]:bg-amber-500'
+   108→          : '[&>div]:bg-rose-500';
+   109→
+   110→  return (
+   111→    <div dir="rtl" className="space-y-6 p-4 md:p-6">
+   112→      {/* ===== ترويسة الشاشة ===== */}
+   113→      <header className="flex items-center gap-3">
+   114→        <div className="flex size-10 items-center justify-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">
+   115→          <Zap className="size-5" />
+   116→        </div>
+   117→        <div>
+   118→          <h1 className="text-xl font-bold tracking-tight">الطاقة والتخزين</h1>
+   119→          <p className="text-sm text-muted-foreground">
+   120→            ميزانية طاقة التجميعة المرجعية وقواعدها الإرشادية، ومحاكاة تعليمية لقراءة صحة القرص (SMART).
+   121→          </p>
+   122→        </div>
+   123→      </header>
+   124→
+   125→      <Tabs defaultValue="budget">
+   126→        <TabsList className="grid w-full max-w-md grid-cols-2">
+   127→          <TabsTrigger value="budget" className="gap-1.5">
+   128→            <PlugZap className="size-4" />
+   129→            ميزانية الطاقة
+   130→          </TabsTrigger>
+   131→          <TabsTrigger value="disk" className="gap-1.5">
+   132→            <HardDrive className="size-4" />
+   133→            صحة القرص (محاكاة)
+   134→          </TabsTrigger>
+   135→        </TabsList>
+   136→
+   137→        {/* ================= تبويب ميزانية الطاقة ================= */}
+   138→        <TabsContent value="budget" className="mt-4 space-y-4">
+   139→          <div className="grid items-start gap-4 xl:grid-cols-2">
+   140→            {/* بطاقة الحساب */}
+   141→            <Card className="gap-3 p-4">
+   142→              <CardHeader className="p-0">
+   143→                <CardTitle className="flex items-center gap-2 text-base">
+   144→                  <PlugZap className="size-4 text-sky-600 dark:text-sky-400" />
+   145→                  حساب الطاقة للتجميعة المرجعية
+   146→                </CardTitle>
+   147→                <CardDescription>
+   148→                  مجموع استهلاك القطع المختارة (معالج + بطاقة + لوحة + مبرد + ذاكرة + قرص + مراوح)، ثم مقارنته
+   149→                  بميزانية الأمان التعليمية: 80٪ من قدرة مزود الطاقة (psuRatedW × 0.80).
+   150→                </CardDescription>
+   151→              </CardHeader>
+   152→              <CardContent className="space-y-4 p-0">
+   153→                {/* أرقام كبيرة */}
+   154→                <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+   155→                  <div className="rounded-lg border p-3">
+   156→                    <p className="text-xs text-muted-foreground">الاستهلاك التقديري</p>
+   157→                    <p className="mt-1">
+   158→                      <span dir="ltr" className="text-2xl font-bold">
+   159→                        {est.totalW}
+   160→                      </span>{' '}
+   161→                      <span className="text-xs text-muted-foreground">واط</span>
+   162→                    </p>
+   163→                  </div>
+   164→                  <div className="rounded-lg border p-3">
+   165→                    <p className="text-xs text-muted-foreground">ميزانية الأمان (80٪)</p>
+   166→                    <p className="mt-1">
+   167→                      {est.budgetW === null ? (
+   168→                        <span dir="ltr" className="text-2xl font-bold text-muted-foreground">—</span>
+   169→                      ) : (
+   170→                        <>
+   171→                          <span dir="ltr" className="text-2xl font-bold">
+   172→                            {est.budgetW}
+   173→                          </span>{' '}
+   174→                          <span className="text-xs text-muted-foreground">واط</span>
+   175→                        </>
+   176→                      )}
+   177→                    </p>
+   178→                  </div>
+   179→                  <div className="rounded-lg border p-3">
+   180→                    <p className="text-xs text-muted-foreground">نسبة الاستخدام</p>
+   181→                    <p className="mt-1">
+   182→                      {est.usagePercent === null ? (
+   183→                        <span dir="ltr" className="text-2xl font-bold text-muted-foreground">—</span>
+   184→                      ) : (
+   185→                        <span dir="ltr" className="text-2xl font-bold">
+   186→                          {est.usagePercent}%
+   187→                        </span>
+   188→                      )}
+   189→                    </p>
+   190→                  </div>
+   191→                  <div className="rounded-lg border p-3">
+   192→                    <p className="text-xs text-muted-foreground">قدرة PSU المرجعي</p>
+   193→                    <p className="mt-1">
+   194→                      {est.psuW === null ? (
+   195→                        <span dir="ltr" className="text-2xl font-bold text-muted-foreground">
+   196→                          —
+   197→                        </span>
+   198→                      ) : (
+   199→                        <>
+   200→                          <span dir="ltr" className="text-2xl font-bold">
+   201→                            {est.psuW}
+   202→                          </span>{' '}
+   203→                          <span className="text-xs text-muted-foreground">واط</span>
+   204→                        </>
+   205→                      )}
+   206→                    </p>
+   207→                  </div>
+   208→                </div>
+   209→                {est.remainingW !== null && (
+   210→                  <p className="text-center text-xs text-muted-foreground">
+   211→                    الهامش المتبقي حتى ميزانية الأمان: <span dir="ltr" className="font-mono font-semibold">{est.remainingW} W</span>
+   212→                    {' '}• الموصى به لمستوى أمان مكافئ: <span dir="ltr" className="font-mono font-semibold">{est.recommendedPsuW} W</span>
+   213→                  </p>
+   214→                )}
+   215→
+   216→                {/* جدول مساهمة المكونات */}
+   217→                <div className="overflow-hidden rounded-lg border">
+   218→                  <Table>
+   219→                    <TableHeader>
+   220→                      <TableRow className="bg-muted/50">
+   221→                        <TableHead className="text-start">المكوّن</TableHead>
+   222→                        <TableHead className="text-start">الخيار المرجعي</TableHead>
+   223→                        <TableHead className="text-end">المساهمة التقديرية</TableHead>
+   224→                      </TableRow>
+   225→                    </TableHeader>
+   226→                    <TableBody>
+   227→                      <TableRow>
+   228→                        <TableCell className="font-medium">المعالج</TableCell>
+   229→                        <TableCell className="text-xs text-muted-foreground">{cpuOpt?.nameAr ?? '—'}</TableCell>
+   230→                        <TableCell className="text-end">
+   231→                          <span dir="ltr" className="font-mono">
+   232→                            {cpuW} W
+   233→                          </span>
+   234→                        </TableCell>
+   235→                      </TableRow>
+   236→                      <TableRow>
+   237→                        <TableCell className="font-medium">بطاقة الرسوميات</TableCell>
+   238→                        <TableCell className="text-xs text-muted-foreground">{gpuOpt?.nameAr ?? '—'}</TableCell>
+   239→                        <TableCell className="text-end">
+   240→                          <span dir="ltr" className="font-mono">
+   241→                            {gpuW} W
+   242→                          </span>
+   243→                        </TableCell>
+   244→                      </TableRow>
+   245→                      <TableRow>
+   246→                        <TableCell className="font-medium">اللوحة الأم</TableCell>
+   247→                        <TableCell className="text-xs text-muted-foreground">{moboOpt?.nameAr ?? '—'}</TableCell>
+   248→                        <TableCell className="text-end">
+   249→                          <span dir="ltr" className="font-mono">{moboW} W</span>
+   250→                        </TableCell>
+   251→                      </TableRow>
+   252→                      <TableRow>
+   253→                        <TableCell className="font-medium">مبرد المعالج</TableCell>
+   254→                        <TableCell className="text-xs text-muted-foreground">{coolerOpt?.nameAr ?? '—'}</TableCell>
+   255→                        <TableCell className="text-end">
+   256→                          <span dir="ltr" className="font-mono">{coolerW} W</span>
+   257→                        </TableCell>
+   258→                      </TableRow>
+   259→                      <TableRow>
+   260→                        <TableCell className="font-medium">الذاكرة</TableCell>
+   261→                        <TableCell className="text-xs text-muted-foreground">{ramOpt?.nameAr ?? '—'}</TableCell>
+   262→                        <TableCell className="text-end">
+   263→                          <span dir="ltr" className="font-mono">{ramW} W</span>
+   264→                        </TableCell>
+   265→                      </TableRow>
+   266→                      <TableRow>
+   267→                        <TableCell className="font-medium">قرص التخزين</TableCell>
+   268→                        <TableCell className="text-xs text-muted-foreground">{ssdOpt?.nameAr ?? '—'}</TableCell>
+   269→                        <TableCell className="text-end">
+   270→                          <span dir="ltr" className="font-mono">{ssdW} W</span>
+   271→                        </TableCell>
+   272→                      </TableRow>
+   273→                      <TableRow>
+   274→                        <TableCell className="font-medium">مراوح الهيكل</TableCell>
+   275→                        <TableCell className="text-xs text-muted-foreground">قيمة تعليمية ثابتة (CASE_FANS_W)</TableCell>
+   276→                        <TableCell className="text-end">
+   277→                          <span dir="ltr" className="font-mono">{CASE_FANS_W} W</span>
+   278→                        </TableCell>
+   279→                      </TableRow>
+   280→                      <TableRow className="bg-muted/40">
+   281→                        <TableCell className="font-bold" colSpan={2}>
+   282→                          المجموع التقديري
+   283→                        </TableCell>
+   284→                        <TableCell className="text-end">
+   285→                          <span dir="ltr" className="font-mono font-bold">
+   286→                            {est.totalW} W
+   287→                          </span>
+   288→                        </TableCell>
+   289→                      </TableRow>
+   290→                    </TableBody>
+   291→                  </Table>
+   292→                </div>
+   293→
+   294→                {/* حكم الكفاية: أيقونة + نص وليس لونًا فقط */}
+   295→                <div
+   296→                  className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+   297→                    est.verdict === 'ok'
+   298→                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300'
+   299→                      : est.verdict === 'low'
+   300→                        ? 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-300'
+   301→                        : 'border-border bg-muted/40 text-muted-foreground'
+   302→                  }`}
+   303→                >
+   304→                  {est.verdict === 'ok' ? (
+   305→                    <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+   306→                  ) : est.verdict === 'low' ? (
+   307→                    <XCircle className="mt-0.5 size-4 shrink-0" />
+   308→                  ) : (
+   309→                    <CircleHelp className="mt-0.5 size-4 shrink-0" />
+   310→                  )}
+   311→                  <div>
+   312→                    <Badge
+   313→                      variant="outline"
+   314→                      className={`mb-1 ${
+   315→                        est.verdict === 'ok'
+   316→                          ? 'border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
+   317→                          : est.verdict === 'low'
+   318→                            ? 'border-rose-500/40 text-rose-700 dark:text-rose-300'
+   319→                            : 'text-muted-foreground'
+   320→                      }`}
+   321→                    >
+   322→                      {est.verdict === 'ok' ? 'قدرة كافية' : est.verdict === 'low' ? 'قدرة غير كافية' : 'غير معلومة'}
+   323→                    </Badge>
+   324→                    <p className="leading-relaxed">{est.messageAr}</p>
+   325→                  </div>
+   326→                </div>
+   327→
+   328→                {/* تنبيهات إلزامية */}
+   329→                <div className="space-y-2">
+   330→                  {est.notesAr.map((note) => (
+   331→                    <Alert
+   332→                      key={note}
+   333→                      className="border-amber-500/30 bg-amber-500/5 py-2 text-amber-800 dark:text-amber-200 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400"
+   334→                    >
+   335→                      <Info />
+   336→                      <AlertDescription className="text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+   337→                        {note}
+   338→                      </AlertDescription>
+   339→                    </Alert>
+   340→                  ))}
+   341→                </div>
+   342→              </CardContent>
+   343→            </Card>
+   344→
+   345→            <div className="space-y-4">
+   346→              {/* موصلات PSU في التجميعة المرجعية */}
+   347→              <Card className="gap-3 p-4">
+   348→                <CardHeader className="p-0">
+   349→                  <CardTitle className="flex items-center gap-2 text-base">
+   350→                    <ShieldCheck className="size-4 text-sky-600 dark:text-sky-400" />
+   351→                    موصلات PSU في التجميعة المرجعية
+   352→                  </CardTitle>
+   353→                  <CardDescription>
+   354→                    PSU:{' '}
+   355→                    <span className="font-medium text-foreground">{psuOpt?.nameAr ?? 'غير مختار'}</span> — البطاقة:{' '}
+   356→                    <span className="font-medium text-foreground">{gpuOpt?.nameAr ?? 'غير مختار'}</span>
+   357→                  </CardDescription>
+   358→                </CardHeader>
+   359→                <CardContent className="space-y-3 p-0">
+   360→                  <div className="overflow-hidden rounded-lg border">
+   361→                    <Table>
+   362→                      <TableHeader>
+   363→                        <TableRow className="bg-muted/50">
+   364→                          <TableHead className="text-start">الموصل</TableHead>
+   365→                          <TableHead className="text-start">المطلوب مقابل المتوفر</TableHead>
+   366→                          <TableHead className="text-end">الحالة</TableHead>
+   367→                        </TableRow>
+   368→                      </TableHeader>
+   369→                      <TableBody>
+   370→                        <TableRow>
+   371→                          <TableCell className="font-medium">
+   372→                            ATX 24-pin <span className="text-xs text-muted-foreground">(تغذية اللوحة الرئيسية)</span>
+   373→                          </TableCell>
+   374→                          <TableCell className="text-xs text-muted-foreground">مطلوب 1 — متوفر مع PSU المرجعي</TableCell>
+   375→                          <TableCell className="text-end">
+   376→                            <span className="inline-flex items-center gap-1 text-sm text-emerald-700 dark:text-emerald-300">
+   377→                              <CheckCircle2 className="size-4" />
+   378→                              متوفر
+   379→                            </span>
+   380→                          </TableCell>
+   381→                        </TableRow>
+   382→                        <TableRow>
+   383→                          <TableCell className="font-medium">
+   384→                            EPS 8-pin <span className="text-xs text-muted-foreground">(تغذية المعالج)</span>
+   385→                          </TableCell>
+   386→                          <TableCell className="text-xs text-muted-foreground">
+   387→                            مطلوب 1 — متوفر في PSU:{' '}
+   388→                            <span dir="ltr" className="font-mono">
+   389→                              {epsAvailable ? 'yes' : 'no'}
+   390→                            </span>
+   391→                          </TableCell>
+   392→                          <TableCell className="text-end">
+   393→                            {epsAvailable ? (
+   394→                              <span className="inline-flex items-center gap-1 text-sm text-emerald-700 dark:text-emerald-300">
+   395→                                <CheckCircle2 className="size-4" />
+   396→                                متوفر
+   397→                              </span>
+   398→                            ) : (
+   399→                              <span className="inline-flex items-center gap-1 text-sm text-rose-700 dark:text-rose-300">
+   400→                                <XCircle className="size-4" />
+   401→                                غير متوفر
+   402→                              </span>
+   403→                            )}
+   404→                          </TableCell>
+   405→                        </TableRow>
+   406→                        <TableRow>
+   407→                          <TableCell className="font-medium">
+   408→                            PCIe 8-pin <span className="text-xs text-muted-foreground">(طاقة بطاقة الرسوميات)</span>
+   409→                          </TableCell>
+   410→                          <TableCell className="text-xs text-muted-foreground">
+   411→                            المطلوب{' '}
+   412→                            <span dir="ltr" className="font-mono font-bold text-foreground">
+   413→                              {pcieNeeded}
+   414→                            </span>{' '}
+   415→                            / المتوفر{' '}
+   416→                            <span dir="ltr" className="font-mono font-bold text-foreground">
+   417→                              {pcieAvailable}
+   418→                            </span>
+   419→                          </TableCell>
+   420→                          <TableCell className="text-end">
+   421→                            {pcieShortage ? (
+   422→                              <span className="inline-flex items-center gap-1 text-sm text-rose-700 dark:text-rose-300">
+   423→                                <XCircle className="size-4" />
+   424→                                ناقص
+   425→                              </span>
+   426→                            ) : (
+   427→                              <span className="inline-flex items-center gap-1 text-sm text-emerald-700 dark:text-emerald-300">
+   428→                                <CheckCircle2 className="size-4" />
+   429→                                كافٍ
+   430→                              </span>
+   431→                            )}
+   432→                          </TableCell>
+   433→                        </TableRow>
+   434→                      </TableBody>
+   435→                    </Table>
+   436→                  </div>
+   437→
+   438→                  {pcieShortage && (
+   439→                    <Alert className="border-rose-500/50 bg-rose-500/10 text-rose-800 dark:text-rose-200 [&>svg]:text-rose-600 dark:[&>svg]:text-rose-400">
+   440→                      <XCircle />
+   441→                      <AlertTitle>موصلات PCIe غير كافية</AlertTitle>
+   442→                      <AlertDescription className="leading-relaxed text-rose-700 dark:text-rose-300">
+   443→                        لا تستخدم محوّلات ملتوية كحل دائم — اختر PSU بعدد موصلات PCIe يغطي متطلب البطاقة؛ المحوّلات
+   444→                        سبب متكرر لذوبان الكابلات داخل الهيكل.
+   445→                      </AlertDescription>
+   446→                    </Alert>
+   447→                  )}
+   448→                </CardContent>
+   449→              </Card>
+   450→
+   451→              {/* قواعد إرشادية */}
+   452→              <Card className="gap-3 p-4">
+   453→                <CardHeader className="p-0">
+   454→                  <CardTitle className="flex items-center gap-2 text-base">
+   455→                    <Info className="size-4 text-sky-600 dark:text-sky-400" />
+   456→                    قواعد إرشادية لميزانية الطاقة
+   457→                  </CardTitle>
+   458→                  <CardDescription>قواعد تعليمية مبسطة — تُعدَّل حسب توصيات الشركات المصنِّعة.</CardDescription>
+   459→                </CardHeader>
+   460→                <CardContent className="space-y-0 p-0">
+   461→                  {[
+   462→                    {
+   463→                      icon: Percent,
+   464→                      title: 'ميزانية الأمان = 80٪ من قدرة PSU',
+   465→                      text: 'الصيغة التعليمية المعتمدة: safetyBudgetW = psuRatedW × 0.80، ثم usagePercent = الحمل ÷ الميزانية × 100 وremainingW = الميزانية − الحمل. في التجميعة المرجعية: 750 واط → ميزانية 600 واط، الحمل 414 واط (نحو 69٪) وهامش 186 واط. هذه معادلة تعليمية لا تحلّ محل فحص ذروة الاستهلاك أو توصيات الشركة.',
+   466→                    },
+   467→                    {
+   468→                      icon: ShieldCheck,
+   469→                      title: 'جودة PSU لا تقل أهمية عن القدرة',
+   470→                      text: 'شهادات الكفاءة (مثل 80+ Bronze/Gold) وحمايات الجهد المنخفض/العالي تحدد ثبات التغذية تحت الحمل — قدرة كبيرة بجودة سيئة خطر لا ميزة.',
+   471→                    },
+   472→                    {
+   473→                      icon: Activity,
+   474→                      title: 'ذروات الحمل اللحظية',
+   475→                      text: 'بطاقات الرسوميات الحديثة قد تستهلك ذروات قصيرة تتجاوز رقم TDP المكتوب بكثير — لذلك القدرة «التي تكفي نظريًا» قد تنطفئ عمليًا عند أول حمل.',
+   476→                    },
+   477→                  ].map((rule, i) => (
+   478→                    <div key={rule.title}>
+   479→                      {i > 0 && <Separator className="my-3" />}
+   480→                      <div className="flex items-start gap-2.5">
+   481→                        <rule.icon className="mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-400" />
+   482→                        <div>
+   483→                          <p className="text-sm font-medium">{rule.title}</p>
+   484→                          <p className="text-xs leading-relaxed text-muted-foreground">{rule.text}</p>
+   485→                        </div>
+   486→                      </div>
+   487→                    </div>
+   488→                  ))}
+   489→                </CardContent>
+   490→              </Card>
+   491→            </div>
+   492→          </div>
+   493→        </TabsContent>
+   494→
+   495→        {/* ================= تبويب صحة القرص (محاكاة) ================= */}
+   496→        <TabsContent value="disk" className="mt-4 space-y-4">
+   497→          <Card className="gap-3 p-4">
+   498→            <CardHeader className="p-0">
+   499→              <CardTitle className="flex items-center gap-2 text-base">
+   500→                <HardDrive className="size-4 text-sky-600 dark:text-sky-400" />
+   501→                محاكاة قراءة SMART
+   502→              </CardTitle>
+   503→              <CardDescription>
+   504→                اختر سيناريوًا لعرض قيم حتمية ثابتة تشرح كيف تُقرأ مؤشرات صحة القرص — لا قراءة من أي قرص حقيقي.
+   505→              </CardDescription>
+   506→            </CardHeader>
+   507→            <CardContent className="space-y-4 p-0">
+   508→              <div className="flex flex-wrap gap-2">
+   509→                {SMART_SCENARIOS.map((sc) => {
+   510→                  const active = smart?.scenario === sc.key;
+   511→                  return (
+   512→                    <Button
+   513→                      key={sc.key}
+   514→                      variant="outline"
+   515→                      onClick={() => setSmart(simulateSmart(sc.key))}
+   516→                      className={
+   517→                        active
+   518→                          ? 'gap-1.5 border-primary bg-primary text-primary-foreground hover:bg-primary/90'
+   519→                          : 'gap-1.5'
+   520→                      }
+   521→                    >
+   522→                      <sc.icon className="size-4" />
+   523→                      {sc.labelAr}
+   524→                    </Button>
+   525→                  );
+   526→                })}
+   527→              </div>
+   528→
+   529→              {/* تنبيه «محاكاة تعليمية» بارز — يظهر دائمًا مع النتيجة */}
+   530→              {smart !== null && (
+   531→                <>
+   532→                  <Alert className="border-amber-500/60 bg-amber-500/15 text-amber-900 dark:text-amber-200 [&>svg]:size-5 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400">
+   533→                    <FlaskConical />
+   534→                    <AlertTitle className="font-bold">{smart.badgeAr}</AlertTitle>
+   535→                    <AlertDescription className="text-amber-800 dark:text-amber-300">
+   536→                      القيم التالية حتمية ومكتوبة يدويًا لأغراض التعلّم فقط — لا تعكس أي قرص فعلي ولا تتنبأ بحالته.
+   537→                    </AlertDescription>
+   538→                  </Alert>
+   539→
+   540→                  {/* قيم كبيرة */}
+   541→                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+   542→                    <div className="rounded-lg border p-4 text-center">
+   543→                      <p className="text-xs text-muted-foreground">الصحة العامة</p>
+   544→                      <p className="mt-1">
+   545→                        <span dir="ltr" className="text-3xl font-bold">
+   546→                          {smart.healthPercent}
+   547→                        </span>
+   548→                        <span className="text-sm text-muted-foreground">%</span>
+   549→                      </p>
+   550→                      <Progress
+   551→                        value={smart.healthPercent}
+   552→                        className={`mt-2 h-1.5 ${healthProgressCls}`}
+   553→                        aria-label={`نسبة الصحة ${smart.healthPercent}%`}
+   554→                      />
+   555→                    </div>
+   556→                    <div className="rounded-lg border p-4 text-center">
+   557→                      <p className="text-xs text-muted-foreground">الحرارة</p>
+   558→                      <p className="mt-1">
+   559→                        <span dir="ltr" className="text-3xl font-bold">
+   560→                          {smart.temperatureC}
+   561→                        </span>
+   562→                        <span className="text-sm text-muted-foreground">°س</span>
+   563→                      </p>
+   564→                    </div>
+   565→                    <div className="rounded-lg border p-4 text-center">
+   566→                      <p className="text-xs text-muted-foreground">قطاعات معاد تخصيصها</p>
+   567→                      <p className="mt-1">
+   568→                        <span
+   569→                          dir="ltr"
+   570→                          className={`text-3xl font-bold ${smart.reallocatedSectors > 100 ? 'text-rose-600 dark:text-rose-400' : smart.reallocatedSectors > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}
+   571→                        >
+   572→                          {smart.reallocatedSectors}
+   573→                        </span>
+   574→                      </p>
+   575→                    </div>
+   576→                    <div className="rounded-lg border p-4 text-center">
+   577→                      <p className="text-xs text-muted-foreground">ساعات التشغيل</p>
+   578→                      <p className="mt-1">
+   579→                        <span dir="ltr" className="text-3xl font-bold">
+   580→                          {smart.powerOnHours}
+   581→                        </span>
+   582→                        <span className="text-sm text-muted-foreground">ساعة</span>
+   583→                      </p>
+   584→                    </div>
+   585→                  </div>
+   586→
+   587→                  {/* التفسير */}
+   588→                  <div className="rounded-lg border bg-muted/30 p-4">
+   589→                    <p className="mb-1 text-sm font-semibold">تفسير القراءة</p>
+   590→                    <p className="text-sm leading-relaxed text-muted-foreground">{smart.interpretationAr}</p>
+   591→                  </div>
+   592→                </>
+   593→              )}
+   594→
+   595→              {smart === null && (
+   596→                <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-8 text-center">
+   597→                  <HardDrive className="size-8 text-muted-foreground/60" />
+   598→                  <p className="font-medium">لم تُعرض قراءة بعد</p>
+   599→                  <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
+   600→                    اضغط أحد السيناريوهات الثلاثة أعلاه (سليم / متقادم / متعطل) لعرض قيم SMART المحاكاة وطريقة تفسيرها.
+   601→                  </p>
+   602→                </div>
+   603→              )}
+   604→            </CardContent>
+   605→          </Card>
+   606→
+   607→          {/* شرح المؤشرات */}
+   608→          <Card className="gap-3 p-4">
+   609→            <CardHeader className="p-0">
+   610→              <CardTitle className="text-base">شرح مختصر لأهم المؤشرات</CardTitle>
+   611→              <CardDescription>كيف تقرأ هذه الأرقام على أي قرص حقيقي — مع بقاء القرار للنسخ الاحتياطي أولًا.</CardDescription>
+   612→            </CardHeader>
+   613→            <CardContent className="space-y-0 p-0">
+   614→              {[
+   615→                {
+   616→                  title: 'نسبة الصحة (health %)',
+   617→                  text: 'تقدير إجمالي تعرضه أدوات القرص — انخفاضه المستمر يعني أن وقت النسخ الاحتياطي والاستبدال اقترب حتى لو كان الجهاز يعمل الآن.',
+   618→                },
+   619→                {
+   620→                  title: 'القطاعات المعاد تخصيصها (reallocated sectors)',
+   621→                  text: 'قطاعات فشل القرص في استخدامها فاستبدلها ببدائل احتياطية — وجودها أمر طبيعي قليلًا، لكن تزايدها السريع علامة متأخرة على تدهور سطح التخزين.',
+   622→                },
+   623→                {
+   624→                  title: 'الحرارة (°س)',
+   625→                  text: 'الحرارة المستقرة أعلى من المعتاد تُقصّر عمر القرص وتفسّر بطء الأداء المفاجئ — راجع تهوية الهيكل قبل الحكم على القرص نفسه.',
+   626→                },
+   627→                {
+   628→                  title: 'ساعات التشغيل (power-on hours)',
+   629→                  text: 'ساعات العمل التراكمية — تُفسَّر مع العمر المتوقع للقرص لا وحدها؛ قرص قديم بساعات عالية يستحق مراقبة أقرب حتى مع أرقام سليمة.',
+   630→                },
+   631→              ].map((item, i) => (
+   632→                <div key={item.title}>
+   633→                  {i > 0 && <Separator className="my-3" />}
+   634→                  <div className="flex items-start gap-2.5">
+   635→                    <HardDrive className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+   636→                    <div>
+   637→                      <p className="text-sm font-medium">{item.title}</p>
+   638→                      <p className="text-xs leading-relaxed text-muted-foreground">{item.text}</p>
+   639→                    </div>
+   640→                  </div>
+   641→                </div>
+   642→              ))}
+   643→            </CardContent>
+   644→          </Card>
+   645→        </TabsContent>
+   646→      </Tabs>
+   647→    </div>
+   648→  );
+   649→}
+   650→

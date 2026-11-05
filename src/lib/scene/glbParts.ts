@@ -505,8 +505,8 @@ function swapCooler(visuals: PartVisuals): void {
   const cooler = normalize(model.clone(true), def);
   setShadows(cooler.root, true);
   group.add(cooler.root);
-  const rotor = findNode(group, 'cooler_fan_rotor');
-  if (rotor) visuals.spinners.push(rotor);
+  // (إزالة تدقيق V6) خط spinners القديم — الـRotor المسماه يكفي لمنظومة المراوح الجديدة
+  findNode(group, 'cooler_fan_rotor');
 }
 
 // ---------- ذاكرة RAM (شريحتان في الفتحتين 1 و3) ----------
@@ -554,8 +554,7 @@ function swapGpu(visuals: PartVisuals): void {
   }
 
   for (const name of ['gpu_fan_rotor_1', 'gpu_fan_rotor_2']) {
-    const rotor = findNode(group, name);
-    if (rotor) visuals.spinners.push(rotor);
+    findNode(group, name);
   }
 }
 
@@ -583,8 +582,7 @@ function swapPsu(visuals: PartVisuals): void {
     }
   }
 
-  const rotor = findNode(group, 'psu_fan_rotor');
-  if (rotor) visuals.spinners.push(rotor);
+  findNode(group, 'psu_fan_rotor');
 }
 
 // ---------- M.2 SSD ----------
@@ -644,7 +642,6 @@ function swapFans(visuals: PartVisuals): void {
     const rotor = findNode(wrapper, 'fan_rotor');
     if (rotor) {
       rotor.name = `fan_rotor_${d.id}`; // اسم فريد لكل مروحة (منظومة V6 للمراوح)
-      visuals.spinners.push(rotor);
     }
   }
 }

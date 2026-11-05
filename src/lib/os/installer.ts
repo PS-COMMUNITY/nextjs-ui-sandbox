@@ -1,14 +1,18 @@
 /**
  * installer.ts — معالج تثبيت Windows التعليمي (V6-D) — شاشة كاملة داخل VOS.
  * ============================================================================
- * تدفق تفاعلي حسب العائلة (XP/Vista/7/8/8.1/10/11): لغة → مفتاح (حيث يُسمح
- * بتخطيه) → نسخة → ترخيص → نوع التثبيت → الأقراص والأقسام (تحقق GPT/MBR و
- * UEFI/Legacy ومتطلبات 11) → نسخ/توسيع → إعادات تشغيل → OOBE → سطح المكتب.
+ * تدفق تفاعلي حسب العائلة (XP/Vista/7/8/8.1/10/11) — 16 خطوة موثقة:
+ * (0) وسيط الإقلاع ← (1) اللغة/المنطقة ← (2) مفتاح المنتج ← (3) النسخة والبنية
+ * ← (4) الترخيص ← (5) نوع التثبيت ← (6) الأقراص والأقسام (مختبر GPT/MBR + بوابات TPM/SB)
+ * ← (7) نسخ الملفات ← (8) إعادة التشغيل الأولى من القرص ← (9) تهيئة الأجهزة وإعادات التشغيل
+ * ← (10) OOBE المنطقة ← (11) تخطيط الكيبورد ← (12) الشبكة (إلزامية لـ11)
+ * ← (13) اسم المستخدم ← (14) كلمة المرور ← (15) الخصوصية والإنهاء ← سطح المكتب.
  *
  * أمانة (توجيه §5.5): واجهة وتدفق خاصان بالمشروع — لا ISO ولا مفاتيح حقيقية
  * ولا ادعاء أنها نسخة Windows فعلية. العمليات على أقراص المحاكاة فقط.
  */
 import { useLabStore } from '../store/labStore';
+import { isInstalled } from '../types';
 import type { WinFamilyId } from '../types';
 import type { WinFamily } from '../data/windowsCatalog';
 import { WINDOWS_FAMILIES, getFamily, allowedPartStyles, partitionConflictMessageAr, autoPartitionPlan, MBR_MAX_DISK_GB } from '../data/windowsCatalog';
@@ -35,11 +39,16 @@ export interface SetupState {
   oobeStep: number;
   userName: string;
   privacy: boolean[];
+  /** حقول OOBE (V6-D — معالج 16 خطوة) */
+  password: string;
+  networkConnected: boolean;
   errorAr: string | null;
   done: boolean;
   /** حقول زمنية داخلية */
   step7DoneAt?: number;
   step8At?: number;
+  step7LastAt?: number;
+  oobeAt?: number;
 }
 
 export function initialSetupState(): SetupState {
@@ -47,7 +56,8 @@ export function initialSetupState(): SetupState {
     step: 0, family: null, langIdx: 0, keyText: '', keySkipped: false,
     editionId: null, arch: null, licenseAccepted: false, installType: null,
     targetDiskId: null, partPlan: null, progress: 0, progressLabelAr: '',
-    restartsLeft: 0, oobeStep: 0, userName: '', privacy: [], errorAr: null, done: false,
+    restartsLeft: 0, oobeStep: 0, userName: '', privacy: [],
+    password: '', networkConnected: false, errorAr: null, done: false,
   };
 }
 
@@ -230,21 +240,26 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     return;
   }
 
-  // ===== 3) اختيار النسخة والبنية =====
+  // ===== 3) اختيار النسخة والبنية (عمودان — العائلات الكبيرة كـ7/10 تملك 8–9 صفوف ولا تتسع بعمود واحد) =====
   if (setup.step === 3) {
     const top = chrome(os, ctx, family, 'Select Edition — اختر النسخة والبنية');
-    let y = top + 4;
+    const bw = Math.min(430, (os.W - 90) / 2);
+    let idx = 0;
     for (const ed of family.editions) {
       for (const arch of ed.arch) {
-        selectable(os, ctx, 36, y, 470, 48, `${family.nameEn} ${ed.nameAr} ${arch === 'x64' ? '64-bit' : '32-bit'}`, `معمارية ${arch.toUpperCase()} — متوفرة لهذه النسخة`, setup.editionId === ed.id && setup.arch === arch, () => {
+        const cx = 36 + (idx % 2) * (bw + 18);
+        const cy = top + 4 + Math.floor(idx / 2) * 58;
+        selectable(os, ctx, cx, cy, bw, 48, `${ed.nameAr} ${arch === 'x64' ? '64-bit' : '32-bit'}`, `معمارية ${arch.toUpperCase()}`, setup.editionId === ed.id && setup.arch === arch, () => {
           setup.editionId = ed.id;
           setup.arch = arch;
           setup.errorAr = null;
           os.dirty = true;
         });
-        y += 58;
+        idx++;
       }
     }
+    const rows = Math.ceil(idx / 2);
+    const y = top + 4 + rows * 58;
     bigButton(os, ctx, 36, y + 8, 140, 38, 'Next ←', () => {
       if (!setup.editionId || !setup.arch) { setup.errorAr = 'اختر نسخة وبنية أولًا.'; os.dirty = true; return; }
       setup.errorAr = null;
@@ -314,8 +329,10 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
   // ===== 6) الأقراص والأقسام + التحقق =====
   if (setup.step === 6) {
     const top = chrome(os, ctx, family, 'Where do you want to install?');
-    const boot = 'uefi'; // منصة الجهاز المرجعي UEFI
+    // (إصلاح تدقيق V6) وضع الإقلاع من مصدر الحقيقة — كان مفروضًا UEFI فيُحجب XP/Vista نهائيًا
+    const boot = store.sim.firmware.bootMode;
     const allowed = family ? allowedPartStyles(family, boot) : [];
+    const platformBootsFamily = family.bootModes.includes(boot);
     let y = top + 4;
 
     // فحص متطلبات Windows 11 الموثقة
@@ -331,13 +348,30 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
       ctx.fillText('!! ' + family.nameEn + ' يتطلب Secure Boot — فعّله من إعدادات UEFI.', 36, y);
       y += 22;
     }
+    if (!platformBootsFamily) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(`!! ${family.nameEn} تقلع بوضع ${family.bootModes.join('/').toUpperCase()} فقط — المنصة حاليًا ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'}: بدّل الوضع من إعدادات البرنامج الثابت (تبويب Boot).`, 36, y);
+      y += 22;
+    }
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
     ctx.font = '12.5px sans-serif';
-    ctx.fillText(`وضع إقلاع الجهاز: UEFI — الأنماط المسموحة لهذه العائلة: ${allowed.join(' / ').toUpperCase() || 'لا شيء (تعارض وضع الإقلاع)'}`, 36, y);
+    ctx.fillText(`وضع إقلاع الجهاز: ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'} — الأنماط المسموحة لهذه العائلة في هذا الوضع: ${allowed.join(' / ').toUpperCase() || 'لا شيء (تعارض وضع الإقلاع)'}`, 36, y);
     y += 26;
 
-    for (const disk of store.sim.disks) {
-      const available = disk.bus === 'nvme' ? true : true; // في المثبّت: الأقراص المثبتة
+    // (إصلاح تدقيق V6) الأقراص المعروضة = المركّبة فعليًا فقط (كانت قائمة شكلية تعرض الكل)
+    const installedDisks = store.sim.disks.filter((d) =>
+      d.id === 'm2-1' ? isInstalled(store.sim.parts.ssd)
+      : d.id === 'hdd-1' ? isInstalled(store.sim.parts.hdd) && isInstalled(store.sim.parts.sataData) && isInstalled(store.sim.parts.sataPower)
+      : false,
+    );
+    if (installedDisks.length === 0) {
+      ctx.fillStyle = '#ffd9a0';
+      ctx.font = 'bold 13.5px sans-serif';
+      ctx.fillText('لا يوجد قرص مركّب وموصول في الجهاز — أطفئه وركّب قرصًا (M.2 أو ميكانيكي مع كابليه) ثم أعد المحاولة.', 36, y);
+      return;
+    }
+    for (const disk of installedDisks) {
       const total = disk.parts.reduce((a, p) => a + p.sizeGB, 0);
       const label = `Disk ${disk.id === 'm2-1' ? '0' : '1'} — ${disk.sizeGB} GB ${disk.style ? (disk.style === 'gpt' ? '(GPT)' : '(MBR)') : '(Unallocated Space)'}`;
       selectable(os, ctx, 36, y, 470, 46, label,
@@ -351,10 +385,13 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
       y += 56;
     }
 
-    // تحذير MBR على قرص > 2TB تعليميًا (لا ينطبق على أقراصنا 1TB — يظهر كملاحظة)
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    // (إصلاح تدقيق V6) فحص الذاكرة الموثق: بلا وحدات ذاكرة لا يمكن تثبيت أي نظام
+    const ramOk = isInstalled(store.sim.parts.ram);
+    ctx.fillStyle = ramOk ? 'rgba(255,255,255,0.55)' : '#ffb4b4';
     ctx.font = '12px sans-serif';
-    ctx.fillText(`ملاحظة تعليمية: MBR يحد التقسيم عند ${MBR_MAX_DISK_GB} GB — GPT لا يحد عمليًا.`, 36, y);
+    ctx.fillText(ramOk
+      ? `الذاكرة: 32 GB — الحد الأدنى الموثق للعائلة: ${Math.ceil(family.minRamMB / 1024)} GB ✓   |   ملاحظة: MBR يحد التقسيم عند ${MBR_MAX_DISK_GB} GB — GPT لا يحد عمليًا.`
+      : `!! لا توجد وحدات ذاكرة مركّبة — ${family.nameEn} تحتاج ${Math.ceil(family.minRamMB / 1024)} GB على الأقل.`, 36, y);
     y += 24;
 
     const disk = store.sim.disks.find((d) => d.id === setup.targetDiskId);
@@ -397,11 +434,13 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
       }
       bigButton(os, ctx, 36, y + 8, 170, 38, 'Next — ابدأ التثبيت', () => {
         if (!setup.targetDiskId) { setup.errorAr = 'اختر القرص الهدف أولًا.'; os.dirty = true; return; }
+        if (!platformBootsFamily) { setup.errorAr = `التثبيت محجوب: ${family.nameEn} لا تقبل الإقلاع بوضع ${boot === 'uefi' ? 'UEFI' : 'BIOS/Legacy'} — بدّل وضع الإقلاع من إعدادات البرنامج الثابت.`; os.dirty = true; return; }
         if (family.requiresTpm2 && !store.sim.firmware.tpm) { setup.errorAr = 'التثبيت محجوب: TPM 2.0 مطلوب (فعّله من UEFI Setup ثم أعد المحاولة).'; os.dirty = true; return; }
         if (family.requiresSecureBoot && !store.sim.firmware.secureBoot) { setup.errorAr = 'التثبيت محجوب: Secure Boot مطلوب لهذه العائلة.'; os.dirty = true; return; }
         if (disk.style && !allowed.includes(disk.style)) { setup.errorAr = partitionConflictMessageAr(boot, disk.style); os.dirty = true; return; }
-        // فحص الحد الأدنى الموثق
+        // فحص الحد الأدنى الموثق (قرص + ذاكرة)
         if (disk.sizeGB < family.minDiskGB) { setup.errorAr = `القرص أصغر من الحد الأدنى الموثق (${family.minDiskGB} GB).`; os.dirty = true; return; }
+        if (!isInstalled(store.sim.parts.ram)) { setup.errorAr = `التثبيت محجوب: لا ذاكرة مركّبة — هذه العائلة تحتاج ${Math.ceil(family.minRamMB / 1024)} GB على الأقل.`; os.dirty = true; return; }
         if (!setup.partPlan && disk.parts.length === 0) { setup.errorAr = 'أنشئ قسمًا (New) أولًا — لا مساحة مهيأة للنظام.'; os.dirty = true; return; }
         setup.errorAr = null;
         setup.step = 7;
@@ -447,10 +486,11 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     ctx.font = '12.5px sans-serif';
     ctx.fillText('قد يستغرق التثبيت بعض الوقت — الجهاز سيعيد التشغيل عدة مرات (محاكاة زمنية معجّلة).', 36, top + 86);
 
-    // تقدم زمني تلقائي — يعتمد على الآن (رسم مستمر أثناء وضع setup)
-    const rate = 0.045;
+    // تقدم زمني حقيقي (زمن مُعجّل: ~30 ثانية للمرحلة كاملة بغض النظر عن معدل الرسم)
     if (setup.progress < 1) {
-      setup.progress = Math.min(1, setup.progress + rate * (1 / 60));
+      const last = setup.step7LastAt ?? now;
+      setup.progress = Math.min(1, setup.progress + Math.min(0.05, (now - last) / 1000 / 30));
+      setup.step7LastAt = now;
       if (setup.progress >= 1) setup.step7DoneAt = now;
       os.dirty = true;
     } else if (setup.step7DoneAt && now - setup.step7DoneAt > 900) {
@@ -462,23 +502,222 @@ export function drawInstaller(os: VirtualOS, ctx: CanvasRenderingContext2D, now:
     return;
   }
 
-  // ===== 8) إعادة التشغيل (من القرص) =====
+  // ===== 8) إعادة التشغيل الأولى (من القرص) — ثم الدخول إلى OOBE =====
   if (setup.step === 8) {
     chrome(os, ctx, family, 'Restarting…');
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.font = 'bold 18px sans-serif';
-    ctx.fillText('سيُعاد تشغيل الجهاز الآن — الإقلاع من القرص (وليس الوسيط).', 36, 140);
+    ctx.fillText('سيُعاد تشغيل الجهاز الآن — الإقلاع من القرص (وليس الوسيط) لمواصلة الإعداد.', 36, 140);
     ctx.font = '13px sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,0.65)';
-    ctx.fillText('تُزال أولوية الإقلاع من USB تلقائيًا حتى لا يعود التشغيل إلى المثبّت (سلوك صحيح موثق).', 36, 168);
+    ctx.fillText('مرحلة أولى من إعادات التشغيل الموثقة لهذه العائلة — التثبيت لم يكتمل بعد.', 36, 168);
     if (setup.step8At && now - setup.step8At > 1600) {
+      setup.restartsLeft = Math.max(0, family.oobe.restarts - 1);
+      setup.step = 9;
+      setup.oobeAt = now;
+      os.dirty = true;
+    }
+    return;
+  }
+
+  // ===== 9) تهيئة الأجهزة وإعادات التشغيل المتبقية (حسب oobe.restarts للعائلة) =====
+  if (setup.step === 9) {
+    chrome(os, ctx, family, 'Getting devices ready…');
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('جارٍ تهيئة الأجهزة — لا تُطفئ الجهاز', 36, 150);
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillText(`إعادات تشغيل موثقة لهذه العائلة: ${family.oobe.restarts} — المتبقي: ${setup.restartsLeft}`, 36, 178);
+    const t = setup.oobeAt ?? now;
+    const pct = Math.min(1, (now - t) / 1800);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    roundRect(ctx, 36, 200, os.W - 72, 18, 6);
+    ctx.fill();
+    ctx.fillStyle = '#39c7b8';
+    roundRect(ctx, 36, 200, Math.max(8, (os.W - 72) * pct), 18, 6);
+    ctx.fill();
+    if (now - t > 1800) {
+      if (setup.restartsLeft > 0) {
+        setup.restartsLeft -= 1;
+        setup.oobeAt = now; // لفّة إعادة تشغيل أخرى (محاكاة معجّلة)
+      } else {
+        setup.step = 10;
+        setup.oobeAt = now;
+      }
+      os.dirty = true;
+    }
+    return;
+  }
+
+  // ===== 10) OOBE — المنطقة =====
+  if (setup.step === 10) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Region`);
+    const langs: Array<[string, string]> = [['العربية (فلسطين)', 'ar-PS'], ['English (United States)', 'en-US']];
+    let y = top + 8;
+    for (let i = 0; i < langs.length; i++) {
+      selectable(os, ctx, 36, y, 430, 50, langs[i][0], `المنطقة/التنسيق: ${langs[i][1]}`, setup.langIdx === i, () => { setup.langIdx = i; os.dirty = true; });
+      y += 60;
+    }
+    bigButton(os, ctx, 36, y + 10, 140, 38, 'Yes ←', () => { setup.step = 11; os.dirty = true; });
+    bigButton(os, ctx, 190, y + 10, 110, 38, 'إلغاء الإعداد', closeBtn, false);
+    return;
+  }
+
+  // ===== 11) OOBE — تخطيط الكيبورد =====
+  if (setup.step === 11) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Keyboard Layout`);
+    const layouts: Array<[string, string]> = [['Arabic 101', 'عربي 101'], ['US QWERTY', 'إنجليزي أمريكي']];
+    let y = top + 8;
+    for (let i = 0; i < layouts.length; i++) {
+      selectable(os, ctx, 36, y, 430, 50, layouts[i][0], layouts[i][1], setup.langIdx === i, () => { setup.langIdx = i; os.dirty = true; });
+      y += 60;
+    }
+    bigButton(os, ctx, 36, y + 10, 140, 38, 'Yes ←', () => { setup.step = 12; os.dirty = true; });
+    bigButton(os, ctx, 190, y + 10, 110, 38, 'رجوع →', () => { setup.step = 10; os.dirty = true; }, false);
+    return;
+  }
+
+  // ===== 12) OOBE — الشبكة (إلزامية لويندوز 11 في المسار التعليمي) =====
+  if (setup.step === 12) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Network`);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(family.oobe.networkRequired
+      ? 'هذه العائلة تتطلب اتصالًا بالشبكة للمتابعة (سلوك موثق لويندوز 11 في مسار الحساب عبر الإنترنت).'
+      : 'الاتصال اختياري لهذه العائلة — يمكن المتابعة دون شبكة (سلوك موثق للعائلات الأقدم).', 36, top + 14);
+    selectable(os, ctx, 36, top + 34, 430, 54, 'Ethernet — متصل (محاكاة)', 'اتصال شبكة محاكى داخل المختبر — لا وصول فعلي لأي شبكة', setup.networkConnected, () => { setup.networkConnected = true; os.dirty = true; });
+    selectable(os, ctx, 36, top + 98, 430, 54, 'I don’t have internet — بلا اتصال', family.oobe.networkRequired ? 'سيمنعك غياب الاتصال من المتابعة لهذه العائلة' : 'متابعة بلا شبكة — متاح لهذه العائلة', !setup.networkConnected, () => { setup.networkConnected = false; os.dirty = true; });
+    bigButton(os, ctx, 36, top + 170, 140, 38, 'Yes ←', () => {
+      if (family.oobe.networkRequired && !setup.networkConnected) {
+        setup.errorAr = 'المتابعة محجوبة: هذه العائلة تتطلب اتصالًا بالشبكة (وصل Ethernet المحاكى أو تخطّي عبر التثبيت لنسخ أقدم).';
+        os.dirty = true; return;
+      }
+      setup.errorAr = null;
+      setup.step = 13;
+      os.dirty = true;
+    });
+    bigButton(os, ctx, 190, top + 170, 110, 38, 'رجوع →', () => { setup.step = 11; os.dirty = true; }, false);
+    if (setup.errorAr) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.font = '13px sans-serif';
+      os.wrapText(ctx, '!! ' + setup.errorAr, 36, top + 222, os.W - 72, 17);
+    }
+    return;
+  }
+
+  // ===== 13) OOBE — اسم المستخدم =====
+  if (setup.step === 13) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Who's going to use this PC?`);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('اسم المستخدم لحساب الجهاز الافتراضي (محاكاة — لا يُرسل ولا يُخزن خارج متصفحك).', 36, top + 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    roundRect(ctx, 36, top + 28, 380, 40, 7);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    roundRect(ctx, 36, top + 28, 380, 40, 7);
+    ctx.stroke();
+    ctx.fillStyle = '#e8eef5';
+    ctx.font = '16px sans-serif';
+    ctx.fillText(setup.userName + (os.blink ? '|' : ''), 48, top + 54);
+    os.addRect('custom', 36, top + 28, 380, 40, {
+      onClick: () => {
+        os.focusedTextbox = {
+          get: () => setup.userName,
+          set: (t) => { setup.userName = t.slice(0, 20); },
+        };
+        os.dirty = true;
+      },
+    }, 'text');
+    bigButton(os, ctx, 36, top + 88, 140, 38, 'Next ←', () => {
+      if (setup.userName.trim().length < 2) { setup.errorAr = 'أدخل اسم مستخدم (حرفان على الأقل).'; os.dirty = true; return; }
+      setup.errorAr = null;
+      setup.step = 14;
+      os.dirty = true;
+    });
+    bigButton(os, ctx, 190, top + 88, 110, 38, 'رجوع →', () => { setup.step = 12; os.dirty = true; }, false);
+    bigButton(os, ctx, 312, top + 88, 110, 38, 'إلغاء الإعداد', closeBtn, false);
+    if (setup.errorAr) {
+      ctx.fillStyle = '#ffb4b4';
+      ctx.font = '13px sans-serif';
+      ctx.fillText('!! ' + setup.errorAr, 36, top + 146);
+    }
+    return;
+  }
+
+  // ===== 14) OOBE — كلمة المرور (اختيارية) =====
+  if (setup.step === 14) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Create a password`);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('كلمة مرور للحساب (اختيارية — يمكن المتابعة بلا كلمة مرور، سلوك موثق).', 36, top + 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    roundRect(ctx, 36, top + 28, 380, 40, 7);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    roundRect(ctx, 36, top + 28, 380, 40, 7);
+    ctx.stroke();
+    ctx.fillStyle = '#e8eef5';
+    ctx.font = '16px monospace';
+    ctx.fillText('•'.repeat(setup.password.length) + (os.blink ? '|' : ''), 48, top + 54);
+    os.addRect('custom', 36, top + 28, 380, 40, {
+      onClick: () => {
+        os.focusedTextbox = {
+          get: () => setup.password,
+          set: (t) => { setup.password = t.slice(0, 24); },
+        };
+        os.dirty = true;
+      },
+    }, 'text');
+    bigButton(os, ctx, 436, top + 28, 150, 40, 'مسح كلمة المرور', () => { setup.password = ''; os.dirty = true; }, false);
+    bigButton(os, ctx, 36, top + 88, 140, 38, 'Next ←', () => {
+      setup.privacy = [false, false, false, false];
+      setup.step = 15;
+      os.dirty = true;
+    });
+    bigButton(os, ctx, 190, top + 88, 110, 38, 'رجوع →', () => { setup.step = 13; os.dirty = true; }, false);
+    return;
+  }
+
+  // ===== 15) OOBE — الخصوصية والإنهاء (حسب privacyToggles للعائلة) =====
+  if (setup.step === 15) {
+    const top = chrome(os, ctx, family, `${family.nameEn} OOBE — Privacy settings`);
+    let y = top + 4;
+    if (family.oobe.privacyToggles) {
+      const opts: Array<[string, string]> = [
+        ['Location — الموقع', 'السماح للتطبيقات بالوصول إلى الموقع (محاكاة)'],
+        ['Find my device — اعثر على جهازي', 'تتبع الجهاز عند فقدانه (محاكاة)'],
+        ['Diagnostic data — بيانات التشخيص', 'إرسال بيانات تشخيصية (محاكاة — لا شيء يُرسل فعليًا)'],
+        ['Tailored experiences — تجارب مخصصة', 'استخدام بيانات التشخيص لتخصيص الاقتراحات (محاكاة)'],
+      ];
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('اختر إعدادات الخصوصية — يمكن تغييرها لاحقًا من إعدادات النظام (تعليميًا).', 36, y);
+      y += 22;
+      for (let i = 0; i < opts.length; i++) {
+        selectable(os, ctx, 36, y, 470, 46, opts[i][0], opts[i][1], setup.privacy[i] === true, () => {
+          setup.privacy[i] = !setup.privacy[i];
+          os.dirty = true;
+        });
+        y += 54;
+      }
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('لا شاشة خصوصية في مسار هذه العائلة (سلوك موثق — شاشة الخصوصية بدأت مع ويندوز 10).', 36, y);
+      y += 22;
+    }
+    bigButton(os, ctx, 36, y + 10, 220, 40, 'Finish — إنهاء الإعداد ← سطح المكتب', () => {
       const ed = family.editions.find((e) => e.id === setup.editionId);
       useLabStore.getState().completeInstall(setup.family!, `${ed?.nameAr ?? ''} ${setup.arch === 'x64' ? '64-bit' : '32-bit'}`, setup.targetDiskId ?? 'm2-1', setup.partPlan);
       resetSetup();
-      // التشغيل من جديد: النظام مثبت الآن
-      useLabStore.getState().toggleFlag('powerOn');
+      // إعادة تشغيل أخيرة → الإقلاع من القرص إلى سطح المكتب الافتراضي
+      useLabStore.getState().warmRestart();
       os.dirty = true;
-    }
+    });
+    bigButton(os, ctx, 270, y + 10, 110, 40, 'رجوع →', () => { setup.step = 14; os.dirty = true; }, false);
+    bigButton(os, ctx, 392, y + 10, 110, 40, 'إلغاء الإعداد', closeBtn, false);
     return;
   }
 }

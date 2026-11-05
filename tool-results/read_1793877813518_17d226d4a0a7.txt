@@ -1,0 +1,697 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * شاشة جلسة الفني — المراحل التسع الإلزامية (المواصفة §7):
+     5→ * بطاقة الطلب ← السلامة ← الفحص الخارجي ← الفحص الداخلي ← خطة التشخيص
+     6→ * ← الإصلاح الافتراضي ← التجميع والتحقق ← التشغيل وPOST ← تقرير التسليم.
+     7→ */
+     8→
+     9→import { useEffect, useMemo, useState } from 'react';
+    10→import {
+    11→  ArrowLeft,
+    12→  BadgeCheck,
+    13→  Ban,
+    14→  CheckCircle2,
+    15→  CircleDashed,
+    16→  ClipboardList,
+    17→  FileText,
+    18→  Hammer,
+    19→  MonitorUp,
+    20→  PackageOpen,
+    21→  Printer,
+    22→  ShieldCheck,
+    23→  Stethoscope,
+    24→  TriangleAlert,
+    25→  Wrench,
+    26→  XCircle,
+    27→} from 'lucide-react';
+    28→import { useLabStore } from '@/lib/store/labStore';
+    29→import { FAULTS, getFault } from '@/lib/data/faults';
+    30→import {
+    31→  TECH_HYPOTHESES,
+    32→  TECH_STAGES,
+    33→  TECH_TOOLS,
+    34→  getHypothesis,
+    35→  stageGate,
+    36→  type TechStage,
+    37→} from '@/lib/simulation/technicianEngine';
+    38→import { computeMonitorView, MONITOR_SCREEN_INFO } from '@/lib/simulation/monitorEngine';
+    39→import { codeLabelAr } from '@/lib/data/faults';
+    40→import { Button } from '@/components/ui/button';
+    41→import { Badge } from '@/components/ui/badge';
+    42→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    43→import { Checkbox } from '@/components/ui/checkbox';
+    44→import { Separator } from '@/components/ui/separator';
+    45→import { cn } from '@/lib/utils';
+    46→
+    47→// ============ شريط المراحل ============
+    48→function StageStepper({ current, onJump }: { current: TechStage; onJump: (s: TechStage) => void }) {
+    49→  return (
+    50→    <div className="flex flex-wrap gap-1.5">
+    51→      {TECH_STAGES.map((st) => {
+    52→        const active = st.id === current;
+    53→        const passed = st.id < current;
+    54→        return (
+    55→          <button
+    56→            key={st.id}
+    57→            type="button"
+    58→            onClick={() => passed && onJump(st.id)}
+    59→            disabled={!passed}
+    60→            className={cn(
+    61→              'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors min-h-[30px]',
+    62→              active && 'border-primary bg-primary text-primary-foreground shadow-sm',
+    63→              passed && !active && 'border-emerald-600/40 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20',
+    64→              !active && !passed && 'border-border text-muted-foreground',
+    65→            )}
+    66→          >
+    67→            <span className="font-mono">{st.id}</span>
+    68→            {st.titleAr}
+    69→          </button>
+    70→        );
+    71→      })}
+    72→    </div>
+    73→  );
+    74→}
+    75→
+    76→// ============ لوحة بوابة المرحلة الحالية ============
+    77→function GatePanel({ stage }: { stage: TechStage }) {
+    78→  const tech = useLabStore((s) => s.tech);
+    79→  const sim = useLabStore((s) => s.sim);
+    80→  if (!tech) return null;
+    81→  const gate = stageGate(stage, tech, sim);
+    82→  return (
+    83→    <Card className={cn('border', gate.done ? 'border-emerald-600/40 bg-emerald-600/5' : 'border-amber-600/40 bg-amber-600/5')}>
+    84→      <CardContent className="p-3">
+    85→        <p className={cn('text-xs font-bold flex items-center gap-1.5', gate.done ? 'text-emerald-400' : 'text-amber-400')}>
+    86→          {gate.done ? <ShieldCheck className="h-4 w-4" aria-hidden /> : <TriangleAlert className="h-4 w-4" aria-hidden />}
+    87→          {gate.done ? 'بوابة المرحلة مفتوحة' : 'ما يمنع الانتقال'}
+    88→        </p>
+    89→        {gate.done ? (
+    90→          <p className="text-xs text-muted-foreground mt-1">{gate.hintAr}</p>
+    91→        ) : (
+    92→          <ul className="mt-1.5 space-y-1">
+    93→            {gate.blockersAr.map((b, i) => (
+    94→              <li key={i} className="text-xs text-amber-200/90 flex items-start gap-1.5">
+    95→                <Ban className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden /> {b}
+    96→              </li>
+    97→            ))}
+    98→          </ul>
+    99→        )}
+   100→      </CardContent>
+   101→    </Card>
+   102→  );
+   103→}
+   104→
+   105→// ============ محتوى المراحل ============
+   106→function Stage1OrderCard() {
+   107→  const tech = useLabStore((s) => s.tech);
+   108→  const patchTech = useLabStore((s) => s.patchTech);
+   109→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   110→  if (!tech) return null;
+   111→  const fault = getFault(tech.scenarioId);
+   112→  if (!fault) return null;
+   113→  return (
+   114→    <Card>
+   115→      <CardHeader className="p-4 pb-2">
+   116→        <CardTitle className="text-base flex items-center gap-2">
+   117→          <ClipboardList className="h-5 w-5 text-primary" aria-hidden /> بطاقة طلب الصيانة — {fault.id}
+   118→        </CardTitle>
+   119→      </CardHeader>
+   120→      <CardContent className="p-4 pt-0 space-y-3">
+   121→        <div className="rounded-lg border bg-muted/30 p-4">
+   122→          <p className="text-xs text-muted-foreground mb-1">شكوى العميل:</p>
+   123→          <p className="text-sm leading-relaxed">«{fault.complaintAr}»</p>
+   124→          <div className="flex items-center gap-2 mt-3">
+   125→            <Badge variant="outline">{fault.difficulty}</Badge>
+   126→            <Badge variant="outline" className="font-mono">{fault.id}</Badge>
+   127→          </div>
+   128→        </div>
+   129→        <p className="text-xs text-muted-foreground leading-relaxed">
+   130→          مهمتك: تشخيص العطل من الأدلة ثم إصلاحه في المختبر حتى يعمل النظام — دون افتراض العطل من الشكوى وحدها.
+   131→        </p>
+   132→        {tech.orderRead ? (
+   133→          <Button className="gap-1.5" onClick={advanceTechStage}>
+   134→            الانتقال إلى السلامة <ArrowLeft className="h-4 w-4" aria-hidden />
+   135→          </Button>
+   136→        ) : (
+   137→          <Button className="gap-1.5" onClick={() => patchTech({ orderRead: true })}>
+   138→            <BadgeCheck className="h-4 w-4" aria-hidden /> استلمت الطلب
+   139→          </Button>
+   140→        )}
+   141→      </CardContent>
+   142→    </Card>
+   143→  );
+   144→}
+   145→
+   146→function Stage2Safety() {
+   147→  const tech = useLabStore((s) => s.tech);
+   148→  const sim = useLabStore((s) => s.sim);
+   149→  const patchTech = useLabStore((s) => s.patchTech);
+   150→  const toggleTechTool = useLabStore((s) => s.toggleTechTool);
+   151→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   152→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   153→  if (!tech) return null;
+   154→  return (
+   155→    <Card>
+   156→      <CardHeader className="p-4 pb-2">
+   157→        <CardTitle className="text-base flex items-center gap-2">
+   158→          <ShieldCheck className="h-5 w-5 text-emerald-500" aria-hidden /> السلامة أولًا
+   159→        </CardTitle>
+   160→      </CardHeader>
+   161→      <CardContent className="p-4 pt-0 space-y-3">
+   162→        <div className="flex flex-wrap gap-2">
+   163→          <Button size="sm" variant={sim.flags.powerOn ? 'destructive' : 'outline'} onClick={() => toggleFlag('powerOn')}>
+   164→            {sim.flags.powerOn ? 'الجهاز يعمل — أطفئه' : 'الجهاز مطفأ'}
+   165→          </Button>
+   166→          <Button size="sm" variant="outline" onClick={() => toggleFlag('acConnected')}>
+   167→            {sim.flags.acConnected ? 'الكهرباء موصولة — افصلها' : 'الكهرباء مفصولة'}
+   168→          </Button>
+   169→        </div>
+   170→        <div className="grid gap-2 sm:grid-cols-2">
+   171→          <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs cursor-pointer">
+   172→            <Checkbox checked={tech.esdStrap} onCheckedChange={(v) => patchTech({ esdStrap: v === true })} />
+   173→            لبست سوار التأريض المضاد للكهرباء الساكنة
+   174→          </label>
+   175→          <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs cursor-pointer">
+   176→            <Checkbox checked={tech.tidyDesk} onCheckedChange={(v) => patchTech({ tidyDesk: v === true })} />
+   177→            رتبت سطح العمل (بلا سوائل ولا فوضى)
+   178→          </label>
+   179→        </div>
+   180→        <div>
+   181→          <p className="text-xs font-bold mb-1.5">اختر أدوات العمل المناسبة (انقر للاختيار):</p>
+   182→          <div className="grid gap-1.5 sm:grid-cols-2">
+   183→            {TECH_TOOLS.map((tool) => {
+   184→              const picked = tech.toolsChosen.includes(tool.id);
+   185→              return (
+   186→                <button
+   187→                  key={tool.id}
+   188→                  type="button"
+   189→                  onClick={() => toggleTechTool(tool.id)}
+   190→                  className={cn(
+   191→                    'flex items-start gap-2 rounded-md border px-2.5 py-2 text-start text-xs transition-colors',
+   192→                    picked ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent',
+   193→                  )}
+   194→                >
+   195→                  {picked ? <CheckCircle2 className="h-4 w-4 shrink-0 text-primary mt-0.5" aria-hidden /> : <CircleDashed className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" aria-hidden />}
+   196→                  <span className="min-w-0">
+   197→                    <span className="font-medium block leading-tight">{tool.nameAr}</span>
+   198→                    {picked ? <span className={cn('text-[11px] leading-tight mt-0.5 block', tool.correct ? 'text-emerald-400' : 'text-rose-400')}>{tool.whyAr}</span> : null}
+   199→                  </span>
+   200→                </button>
+   201→              );
+   202→            })}
+   203→          </div>
+   204→        </div>
+   205→        <Button className="gap-1.5" onClick={advanceTechStage}>
+   206→          تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   207→        </Button>
+   208→      </CardContent>
+   209→    </Card>
+   210→  );
+   211→}
+   212→
+   213→function Stage3External() {
+   214→  const tech = useLabStore((s) => s.tech);
+   215→  const patchTech = useLabStore((s) => s.patchTech);
+   216→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   217→  if (!tech) return null;
+   218→  const items: Array<{ key: keyof typeof tech; labelAr: string }> = [
+   219→    { key: 'extAcCable', labelAr: 'فحصت كابل الكهرباء والمقبس خلف مزود الطاقة' },
+   220→    { key: 'extMonitorCable', labelAr: 'فحصت كابل إشارة الشاشة (طرفاه: الجهاز والشاشة)' },
+   221→    { key: 'extPeripherals', labelAr: 'فحصت لوحة المفاتيح والفأرة ومواضع منافذهما' },
+   222→    { key: 'extPowerPressed', labelAr: 'جربت ضغطة تشغيل واحدة وسجلت الاستجابة (مراوح/أضواء/صفارة)' },
+   223→  ];
+   224→  return (
+   225→    <Card>
+   226→      <CardHeader className="p-4 pb-2">
+   227→        <CardTitle className="text-base flex items-center gap-2">
+   228→          <MonitorUp className="h-5 w-5 text-primary" aria-hidden /> الفحص الخارجي
+   229→        </CardTitle>
+   230→      </CardHeader>
+   231→      <CardContent className="p-4 pt-0 space-y-3">
+   232→        <p className="text-xs text-muted-foreground leading-relaxed">
+   233→          كثير من الأعطال تُرى من الخارج قبل فتح أي برغي: كابل غير مقفول، طرف شاشة مفصول، أو استجابة تشغيل غريبة.
+   234→        </p>
+   235→        <div className="grid gap-2">
+   236→          {items.map((it) => (
+   237→            <label key={it.key} className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs cursor-pointer">
+   238→              <Checkbox checked={Boolean(tech[it.key])} onCheckedChange={(v) => patchTech({ [it.key]: v === true })} />
+   239→              {it.labelAr}
+   240→            </label>
+   241→          ))}
+   242→        </div>
+   243→        <Button className="gap-1.5" onClick={advanceTechStage}>
+   244→          تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   245→        </Button>
+   246→      </CardContent>
+   247→    </Card>
+   248→  );
+   249→}
+   250→
+   251→function Stage4Internal() {
+   252→  const tech = useLabStore((s) => s.tech);
+   253→  const sim = useLabStore((s) => s.sim);
+   254→  const patchTech = useLabStore((s) => s.patchTech);
+   255→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   256→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   257→  if (!tech) return null;
+   258→  const items: Array<{ key: keyof typeof tech; labelAr: string }> = [
+   259→    { key: 'intDust', labelAr: 'فحصت الغبار وفتحات التهوية ومسار الهواء' },
+   260→    { key: 'intCables', labelAr: 'فحصت الكابلات والموصلات (مرتخية/مفصولة/سليمة)' },
+   261→    { key: 'intScrews', labelAr: 'فحصت البراغي والتثبيت (قطع مرتخية؟)' },
+   262→  ];
+   263→  return (
+   264→    <Card>
+   265→      <CardHeader className="p-4 pb-2">
+   266→        <CardTitle className="text-base flex items-center gap-2">
+   267→          <PackageOpen className="h-5 w-5 text-primary" aria-hidden /> الفحص الداخلي
+   268→        </CardTitle>
+   269→      </CardHeader>
+   270→      <CardContent className="p-4 pt-0 space-y-3">
+   271→        <Button
+   272→          size="sm"
+   273→          variant="outline"
+   274→          onClick={() => toggleFlag('panelOpen')}
+   275→        >
+   276→          {sim.flags.panelOpen ? 'الغطاء مفتوح' : 'افتح الغطاء الجانبي'}
+   277→        </Button>
+   278→        <div className="grid gap-2">
+   279→          {items.map((it) => (
+   280→            <label key={it.key} className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs cursor-pointer">
+   281→              <Checkbox checked={Boolean(tech[it.key])} onCheckedChange={(v) => patchTech({ [it.key]: v === true })} />
+   282→              {it.labelAr}
+   283→            </label>
+   284→          ))}
+   285→        </div>
+   286→        <Button className="gap-1.5" onClick={advanceTechStage}>
+   287→          تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   288→        </Button>
+   289→      </CardContent>
+   290→    </Card>
+   291→  );
+   292→}
+   293→
+   294→function Stage5Hypothesis() {
+   295→  const tech = useLabStore((s) => s.tech);
+   296→  const patchTech = useLabStore((s) => s.patchTech);
+   297→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   298→  if (!tech) return null;
+   299→  return (
+   300→    <Card>
+   301→      <CardHeader className="p-4 pb-2">
+   302→        <CardTitle className="text-base flex items-center gap-2">
+   303→          <Stethoscope className="h-5 w-5 text-primary" aria-hidden /> خطة التشخيص — اختر فرضيتك
+   304→        </CardTitle>
+   305→      </CardHeader>
+   306→      <CardContent className="p-4 pt-0 space-y-3">
+   307→        <p className="text-xs text-muted-foreground leading-relaxed">
+   308→          وضع تقييم: لن تُكشف الإجابة الآن — ستحكم على فرضيتك في تقرير التسليم بناءً على ما نفّذته فعلاً.
+   309→        </p>
+   310→        <div className="grid gap-1.5 max-h-72 overflow-y-auto scrollbar-thin pe-1">
+   311→          {TECH_HYPOTHESES.map((h) => {
+   312→            const picked = tech.hypothesisId === h.id;
+   313→            return (
+   314→              <button
+   315→                key={h.id}
+   316→                type="button"
+   317→                onClick={() => patchTech({ hypothesisId: h.id })}
+   318→                className={cn(
+   319→                  'flex items-start gap-2 rounded-md border px-2.5 py-2 text-start text-xs transition-colors',
+   320→                  picked ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent',
+   321→                )}
+   322→              >
+   323→                <span className={cn('font-mono shrink-0', picked ? 'text-primary' : 'text-muted-foreground')}>{h.id}</span>
+   324→                <span className="leading-relaxed">{h.textAr}</span>
+   325→              </button>
+   326→            );
+   327→          })}
+   328→        </div>
+   329→        <Button className="gap-1.5" onClick={advanceTechStage} disabled={!tech.hypothesisId}>
+   330→          سجّل الفرضية وانتقل للإصلاح <ArrowLeft className="h-4 w-4" aria-hidden />
+   331→        </Button>
+   332→      </CardContent>
+   333→    </Card>
+   334→  );
+   335→}
+   336→
+   337→function Stage6Repair() {
+   338→  const tech = useLabStore((s) => s.tech);
+   339→  const sim = useLabStore((s) => s.sim);
+   340→  const setScreen = useLabStore((s) => s.setScreen);
+   341→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   342→  const patchTech = useLabStore((s) => s.patchTech);
+   343→  if (!tech) return null;
+   344→  const fault = getFault(tech.scenarioId);
+   345→  const fixed = fault?.isFixed(sim) ?? false;
+   346→  return (
+   347→    <Card>
+   348→      <CardHeader className="p-4 pb-2">
+   349→        <CardTitle className="text-base flex items-center gap-2">
+   350→          <Wrench className="h-5 w-5 text-amber-500" aria-hidden /> الإصلاح الافتراضي
+   351→        </CardTitle>
+   352→      </CardHeader>
+   353→      <CardContent className="p-4 pt-0 space-y-3">
+   354→        <p className="text-xs leading-relaxed text-muted-foreground">
+   355→          انتقل إلى المختبر ونفّذ الفك/التركيب وفق قوائم الشروط — المحرك يرفض أي اختصار غير آمن وسيشرح لك السبب.
+   356→        </p>
+   357→        <div className={cn('rounded-md border p-3 text-xs leading-relaxed', fixed ? 'border-emerald-600/40 bg-emerald-600/10 text-emerald-300' : 'border-amber-600/40 bg-amber-600/10 text-amber-200')}>
+   358→          {fixed ? 'العطل الأساسي أُصلح — تحقق من التجميع الكامل قبل التشغيل.' : 'العطل الأساسي ما زال قائمًا — واصل الفحص والإصلاح في المختبر.'}
+   359→        </div>
+   360→        <div className="flex flex-wrap gap-2">
+   361→          <Button className="gap-1.5" onClick={() => setScreen('lab')}>
+   362→            <Hammer className="h-4 w-4" aria-hidden /> انتقل إلى المختبر
+   363→          </Button>
+   364→          <Button variant="outline" className="gap-1.5" onClick={() => setScreen('diagnostics')}>
+   365→            <Stethoscope className="h-4 w-4" aria-hidden /> فحص POST السريع
+   366→          </Button>
+   367→        </div>
+   368→        <Separator />
+   369→        <label className="block">
+   370→          <span className="text-xs font-bold mb-1 block">ملاحظات الفني (اختياري):</span>
+   371→          <textarea
+   372→            dir="rtl"
+   373→            value={tech.repairNotes}
+   374→            onChange={(e) => patchTech({ repairNotes: e.target.value.slice(0, 500) })}
+   375→            rows={3}
+   376→            className="w-full rounded-md border bg-background px-3 py-2 text-xs leading-relaxed"
+   377→            placeholder="سجّل ما لاحظته أثناء الإصلاح — سيُدرج في تقرير التسليم"
+   378→          />
+   379→        </label>
+   380→        <Button className="gap-1.5" onClick={advanceTechStage}>
+   381→          تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   382→        </Button>
+   383→      </CardContent>
+   384→    </Card>
+   385→  );
+   386→}
+   387→
+   388→function Stage7Verify() {
+   389→  const sim = useLabStore((s) => s.sim);
+   390→  const setScreen = useLabStore((s) => s.setScreen);
+   391→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   392→  return (
+   393→    <Card>
+   394→      <CardHeader className="p-4 pb-2">
+   395→        <CardTitle className="text-base flex items-center gap-2">
+   396→          <BadgeCheck className="h-5 w-5 text-emerald-500" aria-hidden /> التجميع والتحقق
+   397→        </CardTitle>
+   398→      </CardHeader>
+   399→      <CardContent className="p-4 pt-0 space-y-3">
+   400→        <GatePanel stage={7} />
+   401→        <div className="flex flex-wrap gap-2">
+   402→          <Button className="gap-1.5" onClick={() => setScreen('lab')}>
+   403→            <Hammer className="h-4 w-4" aria-hidden /> افتح المختبر
+   404→          </Button>
+   405→          <Button className="gap-1.5" onClick={advanceTechStage}>
+   406→            تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   407→          </Button>
+   408→        </div>
+   409→        <p className="text-[11px] text-muted-foreground leading-relaxed">
+   410→          تحقق تشمل: كل القطع في مواضعها، المزالج والبراغي مغلقة، الغطاء الجانبي مُغلق — ثم فقط انتقل للتشغيل.
+   411→        </p>
+   412→      </CardContent>
+   413→    </Card>
+   414→  );
+   415→}
+   416→
+   417→function Stage8Boot() {
+   418→  const sim = useLabStore((s) => s.sim);
+   419→  const bootStartedAt = useLabStore((s) => s.bootStartedAt);
+   420→  const toggleFlag = useLabStore((s) => s.toggleFlag);
+   421→  const setScreen = useLabStore((s) => s.setScreen);
+   422→  const advanceTechStage = useLabStore((s) => s.advanceTechStage);
+   423→  const [, setTick] = useState(0);
+   424→  useEffect(() => {
+   425→    const t = setInterval(() => setTick((x) => x + 1), 700);
+   426→    return () => clearInterval(t);
+   427→  }, []);
+   428→  const view = useMemo(
+   429→    () => computeMonitorView(sim, bootStartedAt !== null ? Date.now() - bootStartedAt : 0),
+   430→    [sim, bootStartedAt, setTick],
+   431→  );
+   432→  return (
+   433→    <Card>
+   434→      <CardHeader className="p-4 pb-2">
+   435→        <CardTitle className="text-base flex items-center gap-2">
+   436→          <MonitorUp className="h-5 w-5 text-primary" aria-hidden /> التشغيل وفحص POST — المصائر الثلاثة
+   437→        </CardTitle>
+   438→      </CardHeader>
+   439→      <CardContent className="p-4 pt-0 space-y-3">
+   440→        <div className="flex flex-wrap gap-2">
+   441→          <Button
+   442→            className="gap-1.5"
+   443→            variant={sim.flags.powerOn ? 'destructive' : 'default'}
+   444→            onClick={() => toggleFlag('powerOn')}
+   445→          >
+   446→            {sim.flags.powerOn ? 'إطفاء' : 'شغّل الجهاز'}
+   447→          </Button>
+   448→          <Button variant="outline" className="gap-1.5" onClick={() => setScreen('lab')}>
+   449→            <MonitorUp className="h-4 w-4" aria-hidden /> شاهد الشاشة في المختبر
+   450→          </Button>
+   451→        </div>
+   452→        <div className="rounded-md border bg-card p-3">
+   453→          <p className="text-xs text-muted-foreground mb-1">حالة الشاشة الافتراضية الآن:</p>
+   454→          <p className="text-sm font-bold flex items-center gap-2">
+   455→            {MONITOR_SCREEN_INFO[view.screen].labelAr}
+   456→            <Badge variant="outline" className="font-mono text-[10px]">{view.screen}</Badge>
+   457→          </p>
+   458→          <p className="text-xs text-muted-foreground mt-1">{MONITOR_SCREEN_INFO[view.screen].hintAr}</p>
+   459→          {view.postLinesAr.length > 0 ? (
+   460→            <pre dir="ltr" className="mt-2 rounded bg-black/40 p-2 text-[10px] leading-relaxed font-mono overflow-x-auto text-emerald-300">
+   461→              {view.postLinesAr.join('\n')}
+   462→            </pre>
+   463→          ) : null}
+   464→        </div>
+   465→        <p className="text-xs leading-relaxed text-muted-foreground">
+   466→          المصائر الثلاثة الممكنة: <span className="text-rose-400">فشل POST</span> (قطع حرجة) — <span className="text-amber-400">POST ناجح بلا جهاز إقلاع</span> (دخول UEFI) — <span className="text-emerald-400">إقلاع سليم إلى النظام الافتراضي</span>.
+   467→        </p>
+   468→        <Button className="gap-1.5" onClick={advanceTechStage}>
+   469→          تحقق من الانتقال <ArrowLeft className="h-4 w-4" aria-hidden />
+   470→        </Button>
+   471→      </CardContent>
+   472→    </Card>
+   473→  );
+   474→}
+   475→
+   476→function Stage9Report() {
+   477→  const tech = useLabStore((s) => s.tech);
+   478→  const sim = useLabStore((s) => s.sim);
+   479→  const bootStartedAt = useLabStore((s) => s.bootStartedAt);
+   480→  const finishTechReport = useLabStore((s) => s.finishTechReport);
+   481→  const abandonTechSession = useLabStore((s) => s.abandonTechSession);
+   482→  const [, setTick] = useState(0);
+   483→  useEffect(() => {
+   484→    const t = setInterval(() => setTick((x) => x + 1), 900);
+   485→    return () => clearInterval(t);
+   486→  }, []);
+   487→  if (!tech) return null;
+   488→  const fault = getFault(tech.scenarioId);
+   489→  const hyp = getHypothesis(tech.hypothesisId);
+   490→  const generated = tech.reportAt !== null;
+   491→  const view = computeMonitorView(sim, bootStartedAt !== null ? Date.now() - bootStartedAt : 0);
+   492→
+   493→  if (!generated) {
+   494→    return (
+   495→      <Card>
+   496→        <CardHeader className="p-4 pb-2">
+   497→          <CardTitle className="text-base flex items-center gap-2">
+   498→            <FileText className="h-5 w-5 text-primary" aria-hidden /> تقرير التسليم
+   499→          </CardTitle>
+   500→        </CardHeader>
+   501→        <CardContent className="p-4 pt-0 space-y-3">
+   502→          <p className="text-xs text-muted-foreground leading-relaxed">
+   503→            وُلّد التقرير من سجل جلسك الفعلي: بطاقة الطلب، الفرضية وحكمها، خطوات الإصلاح المسجلة، ونتيجة POST النهائية.
+   504→          </p>
+   505→          <Button className="gap-1.5" onClick={finishTechReport}>
+   506→            <FileText className="h-4 w-4" aria-hidden /> ولّد التقرير
+   507→          </Button>
+   508→        </CardContent>
+   509→      </Card>
+   510→    );
+   511→  }
+   512→
+   513→  return (
+   514→    <Card>
+   515→      <CardHeader className="p-4 pb-2">
+   516→        <CardTitle className="text-base flex items-center gap-2">
+   517→          <FileText className="h-5 w-5 text-primary" aria-hidden /> تقرير تسليم الجهاز — {new Date(tech.reportAt!).toLocaleString('ar')}
+   518→        </CardTitle>
+   519→      </CardHeader>
+   520→      <CardContent className="p-4 pt-0 space-y-3 text-sm leading-relaxed">
+   521→        <div className="grid gap-3 sm:grid-cols-2">
+   522→          <div className="rounded-md border p-3">
+   523→            <p className="text-xs text-muted-foreground mb-1">بطاقة الطلب</p>
+   524→            <p className="text-xs">{fault?.complaintAr ?? '—'}</p>
+   525→            <Badge variant="outline" className="mt-2 font-mono">{fault?.id}</Badge>
+   526→          </div>
+   527→          <div className="rounded-md border p-3">
+   528→            <p className="text-xs text-muted-foreground mb-1">الفرضية التي اخترتها وحكمها</p>
+   529→            <p className="text-xs">{hyp?.textAr ?? 'لم تختر فرضية'}</p>
+   530→            <div className="mt-2 flex items-center gap-2">
+   531→              {tech.hypothesisCorrect ? (
+   532→                <Badge className="gap-1 bg-emerald-600/15 text-emerald-400 border border-emerald-600/40" variant="outline">
+   533→                  <CheckCircle2 className="h-3 w-3" aria-hidden /> فرضية صحيحة
+   534→                </Badge>
+   535→              ) : (
+   536→                <Badge className="gap-1 bg-rose-600/15 text-rose-400 border border-rose-600/40" variant="outline">
+   537→                  <XCircle className="h-3 w-3" aria-hidden /> فرضية غير صحيحة
+   538→                </Badge>
+   539→              )}
+   540→            </div>
+   541→          </div>
+   542→        </div>
+   543→        <div className="rounded-md border p-3">
+   544→          <p className="text-xs text-muted-foreground mb-1">العطل الفعلي (يكشف بعد الإصلاح)</p>
+   545→          <p className="text-xs">{fault?.faultAr}</p>
+   546→          <ul className="mt-2 space-y-0.5">
+   547→            {(fault?.evidencesAr ?? []).map((e, i) => (
+   548→              <li key={i} className="text-[11px] text-muted-foreground flex items-start gap-1.5">
+   549→                <CheckCircle2 className="h-3 w-3 text-emerald-500 mt-0.5 shrink-0" aria-hidden /> {e}
+   550→              </li>
+   551→            ))}
+   552→          </ul>
+   553→        </div>
+   554→        <div className="grid gap-3 sm:grid-cols-2">
+   555→          <div className="rounded-md border p-3">
+   556→            <p className="text-xs text-muted-foreground mb-1">نتيجة التشغيل النهائية</p>
+   557→            <p className="text-xs font-bold">{MONITOR_SCREEN_INFO[view.screen].labelAr}</p>
+   558→            <p className="text-[11px] text-muted-foreground mt-1">{MONITOR_SCREEN_INFO[view.screen].hintAr}</p>
+   559→          </div>
+   560→          <div className="rounded-md border p-3">
+   561→            <p className="text-xs text-muted-foreground mb-1">ملاحظات الفني</p>
+   562→            <p className="text-xs whitespace-pre-wrap">{tech.repairNotes || '— بلا ملاحظات —'}</p>
+   563→          </div>
+   564→        </div>
+   565→        <div className="rounded-md border border-emerald-600/40 bg-emerald-600/10 p-3">
+   566→          <p className="text-xs font-bold text-emerald-400 mb-1">بيان التسليم</p>
+   567→          <p className="text-xs leading-relaxed text-emerald-200/90">
+   568→            الجهاز عاد للعميل بحالة تشغيل سليمة (POST ناجح وإقلاع إلى النظام الافتراضي). كل الأرقام في هذا التقرير ناتج محاكاة تعليمية للمنصة المرجعية وليست قياسات أجهزة حقيقية.
+   569→          </p>
+   570→        </div>
+   571→        <div className="flex flex-wrap gap-2 no-print">
+   572→          <Button variant="outline" className="gap-1.5" onClick={() => window.print()}>
+   573→            <Printer className="h-4 w-4" aria-hidden /> اطبع التقرير
+   574→          </Button>
+   575→          <Button variant="secondary" className="gap-1.5" onClick={abandonTechSession}>
+   576→            جلسة فني جديدة
+   577→          </Button>
+   578→        </div>
+   579→      </CardContent>
+   580→    </Card>
+   581→  );
+   582→}
+   583→
+   584→// ============ اختيار بطاقة طلب (عند عدم وجود جلسة) ============
+   585→function OrderPicker() {
+   586→  const startTechSession = useLabStore((s) => s.startTechSession);
+   587→  return (
+   588→    <Card>
+   589→      <CardHeader className="p-4 pb-2">
+   590→        <CardTitle className="text-base flex items-center gap-2">
+   591→          <ClipboardList className="h-5 w-5 text-primary" aria-hidden /> اختر بطاقة طلب لبدء جلسة فني
+   592→        </CardTitle>
+   593→      </CardHeader>
+   594→      <CardContent className="p-4 pt-0">
+   595→        <p className="text-xs text-muted-foreground leading-relaxed mb-3">
+   596→          14 عطلًا تعليميًا بأربع درجات صعوبة — سيُركّب العطل على الجهاز الافتراضي وستمر بالمراحل التسع حتى تقرير التسليم.
+   597→        </p>
+   598→        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+   599→          {FAULTS.map((f) => (
+   600→            <button
+   601→              key={f.id}
+   602→              type="button"
+   603→              onClick={() => startTechSession(f.id)}
+   604→              className="flex flex-col items-start gap-1.5 rounded-lg border p-3 text-start transition-colors hover:bg-accent"
+   605→            >
+   606→              <div className="flex w-full items-center justify-between gap-2">
+   607→                <span className="font-mono text-[10px] text-muted-foreground">{f.id}</span>
+   608→                <Badge variant="outline" className="text-[10px]">{f.difficulty}</Badge>
+   609→              </div>
+   610→              <span className="text-sm font-bold leading-tight">{f.titleAr}</span>
+   611→              <span className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{f.complaintAr}</span>
+   612→            </button>
+   613→          ))}
+   614→        </div>
+   615→      </CardContent>
+   616→    </Card>
+   617→  );
+   618→}
+   619→
+   620→// ============ الشاشة ============
+   621→export default function TechnicianScreen() {
+   622→  const tech = useLabStore((s) => s.tech);
+   623→  const abandonTechSession = useLabStore((s) => s.abandonTechSession);
+   624→  const patchTech = useLabStore((s) => s.patchTech);
+   625→
+   626→  if (!tech) {
+   627→    return (
+   628→      <div className="space-y-4">
+   629→        <div className="rounded-lg border bg-card p-4">
+   630→          <h2 className="text-base font-bold flex items-center gap-2">
+   631→            <Stethoscope className="h-5 w-5 text-primary" aria-hidden /> جلسة الفني — المراحل التسع
+   632→          </h2>
+   633→          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+   634→            سير عمل فني حقيقي من بطاقة الطلب حتى تقرير التسليم — لا يمكن تخطي مرحلة، وكل بوابة انتقال تُتحقق آليًا من حالة الجهاز.
+   635→          </p>
+   636→        </div>
+   637→        <OrderPicker />
+   638→      </div>
+   639→    );
+   640→  }
+   641→
+   642→  const stage = tech.stage;
+   643→  return (
+   644→    <div className="space-y-4">
+   645→      <div className="rounded-lg border bg-card p-3">
+   646→        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+   647→          <h2 className="text-sm font-bold flex items-center gap-2">
+   648→            <Stethoscope className="h-4 w-4 text-primary" aria-hidden />
+   649→            جلسة فني — {getFault(tech.scenarioId)?.titleAr}
+   650→            <Badge variant="outline" className="font-mono">{tech.scenarioId}</Badge>
+   651→          </h2>
+   652→          <Button size="sm" variant="ghost" onClick={abandonTechSession}>
+   653→            إلغاء الجلسة
+   654→          </Button>
+   655→        </div>
+   656→        <StageStepper current={stage} onJump={(s) => patchTech({ stage: s })} />
+   657→      </div>
+   658→
+   659→      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+   660→        <div className="min-w-0 space-y-4">
+   661→          {stage === 1 && <Stage1OrderCard />}
+   662→          {stage === 2 && <Stage2Safety />}
+   663→          {stage === 3 && <Stage3External />}
+   664→          {stage === 4 && <Stage4Internal />}
+   665→          {stage === 5 && <Stage5Hypothesis />}
+   666→          {stage === 6 && <Stage6Repair />}
+   667→          {stage === 7 && <Stage7Verify />}
+   668→          {stage === 8 && <Stage8Boot />}
+   669→          {stage === 9 && <Stage9Report />}
+   670→        </div>
+   671→        <div className="min-w-0 space-y-3">
+   672→          <GatePanel stage={stage} />
+   673→          <Card>
+   674→            <CardContent className="p-3 text-[11px] text-muted-foreground leading-relaxed">
+   675→              <p className="font-bold text-foreground mb-1 text-xs">{TECH_STAGES[stage - 1].titleAr}</p>
+   676→              {TECH_STAGES[stage - 1].briefAr}
+   677→            </CardContent>
+   678→          </Card>
+   679→          <Card>
+   680→            <CardContent className="p-3">
+   681→              <p className="text-xs font-bold mb-1.5">المراحل</p>
+   682→              <ul className="space-y-1">
+   683→                {TECH_STAGES.map((st) => (
+   684→                  <li key={st.id} className={cn('text-[11px] flex items-center gap-1.5', st.id === stage ? 'text-foreground font-bold' : st.id < stage ? 'text-emerald-400' : 'text-muted-foreground')}>
+   685→                    {st.id < stage ? <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden /> : <CircleDashed className="h-3 w-3 shrink-0" aria-hidden />}
+   686→                    {st.id}. {st.titleAr}
+   687→                  </li>
+   688→                ))}
+   689→              </ul>
+   690→            </CardContent>
+   691→          </Card>
+   692→        </div>
+   693→      </div>
+   694→    </div>
+   695→  );
+   696→}
+   697→

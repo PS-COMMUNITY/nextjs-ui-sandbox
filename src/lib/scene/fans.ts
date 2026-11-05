@@ -25,7 +25,7 @@ export interface FanDef {
   labelAr: string;
   location: FanLocation;
   kind: FanKind;
-  /** المحور المحلي للدوران على عقدة الـpivot */
+  /** المحور المحلي للدوران على عقدة الـpivot (يُستخرج من العقدة نفسها — GLB أو إجرائية) */
   axis: 'x' | 'y' | 'z';
   /** إشارة الاتجاه المرئي (+1 / −1) — تحقق بصري لكل مروحة (توجيه §3.4) */
   sign: 1 | -1;
@@ -65,13 +65,20 @@ export class FanSystem {
     this.arrows = new THREE.Group();
     this.arrows.name = 'airflow-arrows-v6';
     this.arrows.visible = false;
-    this.buildFans(visuals);
-    this.buildArrows();
+    // (إصلاح تدقيق V6) الإضافة للجذر قبل بناء الأسهم حتى يعمل worldToLocal فعليًا
     visuals.root.add(this.group);
     visuals.root.add(this.arrows);
+    this.buildFans(visuals);
+    this.buildArrows();
   }
 
-  /** بناء التعريفات من عقد الـRotor المسماة في النماذج الحقيقية (+ إجرائية عند الفشل) */
+  /** محور الدوران الفعلي لعقدة الريش: الريش الإجرائي يعلن spinAxis، وGLB تستخدم الافتراضي الموثق */
+  private spinAxisOf(rotor: THREE.Object3D, glbDefault: 'x' | 'y' | 'z'): 'x' | 'y' | 'z' {
+    const declared = rotor.userData['spinAxis'];
+    return declared === 'x' || declared === 'y' || declared === 'z' ? declared : glbDefault;
+  }
+
+  /** بناء التعريفات من عقد الـRotor المسماة في النماذج الحقيقية (+ المجسمات الإجرائية المسماة عند الفشل) */
   private buildFans(visuals: PartVisuals): void {
     const find = (root: THREE.Object3D, name: string): THREE.Object3D | null => root.getObjectByName(name) ?? null;
 
@@ -80,7 +87,7 @@ export class FanSystem {
     if (coolerRotor) {
       this.addFan({
         id: 'cooler', labelAr: 'مروحة مبرد المعالج', location: 'cpu', kind: 'internal',
-        axis: 'z', sign: 1, airflow: [0, 0, -1], baseRpm: 1150,
+        axis: this.spinAxisOf(coolerRotor, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 1150,
         rotor: coolerRotor, parent: coolerRotor.parent ?? visuals.dynamic.cooler,
       });
     }
@@ -91,7 +98,7 @@ export class FanSystem {
       if (rotor) {
         this.addFan({
           id: name, labelAr: name.endsWith('1') ? 'مروحة البطاقة 1' : 'مروحة البطاقة 2', location: 'gpu', kind: 'internal',
-          axis: 'y', sign: -1, airflow: [0, 1, 0], baseRpm: 1050,
+          axis: this.spinAxisOf(rotor, 'y'), sign: -1, airflow: [0, 1, 0], baseRpm: 1050,
           rotor, parent: rotor.parent ?? visuals.dynamic.gpu,
         });
       }
@@ -102,13 +109,13 @@ export class FanSystem {
     const front2 = find(visuals.dynamic.fans, 'fan_rotor_front-2');
     const rear = find(visuals.dynamic.fans, 'fan_rotor_rear');
     if (front1) {
-      this.addFan({ id: 'front-1', labelAr: 'مروحة أمامية علوية', location: 'front', kind: 'intake', axis: 'z', sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front1, parent: front1.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'front-1', labelAr: 'مروحة أمامية علوية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front1, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front1, parent: front1.parent ?? visuals.dynamic.fans });
     }
     if (front2) {
-      this.addFan({ id: 'front-2', labelAr: 'مروحة أمامية سفلية', location: 'front', kind: 'intake', axis: 'z', sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front2, parent: front2.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'front-2', labelAr: 'مروحة أمامية سفلية', location: 'front', kind: 'intake', axis: this.spinAxisOf(front2, 'z'), sign: 1, airflow: [0, 0, -1], baseRpm: 800, rotor: front2, parent: front2.parent ?? visuals.dynamic.fans });
     }
     if (rear) {
-      this.addFan({ id: 'rear', labelAr: 'مروحة خلفية (طرد)', location: 'rear', kind: 'exhaust', axis: 'z', sign: -1, airflow: [0, 0, -1], baseRpm: 900, rotor: rear, parent: rear.parent ?? visuals.dynamic.fans });
+      this.addFan({ id: 'rear', labelAr: 'مروحة خلفية (طرد)', location: 'rear', kind: 'exhaust', axis: this.spinAxisOf(rear, 'z'), sign: -1, airflow: [0, 0, -1], baseRpm: 900, rotor: rear, parent: rear.parent ?? visuals.dynamic.fans });
     }
 
     // 4) مروحة مزود الطاقة — تسحب من جهة المكوّنات وتطرد خلف المزود
@@ -116,7 +123,7 @@ export class FanSystem {
     if (psuRotor) {
       this.addFan({
         id: 'psu', labelAr: 'مروحة مزود الطاقة', location: 'psu', kind: 'exhaust',
-        axis: 'y', sign: 1, airflow: [0, -1, 0], baseRpm: 1300,
+        axis: this.spinAxisOf(psuRotor, 'y'), sign: 1, airflow: [0, -1, 0], baseRpm: 1300,
         rotor: psuRotor, parent: psuRotor.parent ?? visuals.dynamic.psu,
       });
     }
@@ -198,17 +205,21 @@ export class FanSystem {
   }
 
   /** حالات المراوح للعرض التعليمي (HUD/UEFI/إدارة المهام) */
-  report(): Array<{ id: string; labelAr: string; rpm: number; running: boolean; stateAr: string; location: FanLocation; kind: FanKind; airflowAr: string }> {
-    return this.fans.map((f) => ({
-      id: f.id,
-      labelAr: f.labelAr,
-      rpm: Math.round(f.rpm),
-      running: f.rpm > 5,
-      stateAr: f.rpm < 5 ? 'متوقفة' : f.rpm < f.baseRpm * 0.55 ? 'بطيئة' : f.rpm < f.baseRpm * 1.15 ? 'طبيعية' : 'سريعة',
-      location: f.location,
-      kind: f.kind,
-      airflowAr: f.kind === 'intake' ? 'سحب من الأمام' : f.kind === 'exhaust' ? 'طرد للخلف/خارج' : 'عبر مشتت القطعة',
-    }));
+  report(): Array<{ id: string; labelAr: string; rpm: number; running: boolean; state: FanRunState; stateAr: string; location: FanLocation; kind: FanKind; airflowAr: string }> {
+    return this.fans.map((f) => {
+      const state: FanRunState = f.rpm < 5 ? 'stopped' : f.rpm < f.baseRpm * 0.55 ? 'slow' : f.rpm < f.baseRpm * 1.15 ? 'normal' : 'fast';
+      return {
+        id: f.id,
+        labelAr: f.labelAr,
+        rpm: Math.round(f.rpm),
+        running: f.rpm > 5,
+        state,
+        stateAr: f.rpm < 5 ? 'متوقفة' : f.rpm < f.baseRpm * 0.55 ? 'بطيئة' : f.rpm < f.baseRpm * 1.15 ? 'طبيعية' : 'سريعة',
+        location: f.location,
+        kind: f.kind,
+        airflowAr: f.kind === 'intake' ? 'سحب من الأمام' : f.kind === 'exhaust' ? 'طرد للخلف/خارج' : 'عبر مشتت القطعة',
+      };
+    });
   }
 
   /**
