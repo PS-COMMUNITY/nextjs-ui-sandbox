@@ -68,6 +68,12 @@ export class FanSystem {
     // (إصلاح تدقيق V6) الإضافة للجذر قبل بناء الأسهم حتى يعمل worldToLocal فعليًا
     visuals.root.add(this.group);
     visuals.root.add(this.arrows);
+    // (إصلاح جذري V6-fans) تكوين كامل لمصفوفات العالم من الجذر قبل قياس أي مركز:
+    // لم تُستدعَ عملية render بعد، وموضع المجموعات ضُبط عبر position فقط — مصفوفات
+    // العالم لا تزال هوية قديمة، وقياس مركز الريش بـBox3.setFromObject كان يعيد
+    // إحداثيات فضاء النموذج على أنها عالمية فسقطت محاور مراوح الهيكل/PSU عند أصل
+    // العالم ودور الريش بمدار هائل حول المشهد بدل الدوران داخل إطاره.
+    visuals.root.updateMatrixWorld(true);
     this.buildFans(visuals);
     this.buildArrows();
   }
@@ -139,7 +145,10 @@ export class FanSystem {
     const parent = def.parent;
 
     // مركز صندوق إحاطة الشفرات في فضاء الأب
-    parent.updateMatrixWorld(true);
+    // (إصلاح جذري V6-fans) updateWorldMatrix(true, true) يمشي للأسلاف ويكوّنهم جميعًا
+    // قبل القياس — خلاف updateMatrixWorld(true) الذي يثق بمصفوفات الأسلاف القديمة،
+    // وBox3.setFromObject في three r186 لا يحدّث الأسلاف أيضًا (updateWorldMatrix(false,false)).
+    parent.updateWorldMatrix(true, true);
     const box = new THREE.Box3().setFromObject(rotor);
     const center = new THREE.Vector3();
     if (isFinite(box.min.x)) {
@@ -245,6 +254,9 @@ export class FanSystem {
       fan.rpm += (target - fan.rpm) * Math.min(1, dt * 2.5); // قصور ذاتي واقعي
       if (fan.rpm > 5) {
         fan.angle += fan.sign * ((fan.rpm / 60) * Math.PI * 2) * dt;
+        // (إصلاح V6-fans) لفّ الزاوية داخل الدورة الكاملة: يدور الجهاز ساعات كاملة
+        // في المعمل — التراكم الحر (آلاف الراديان) يهدم دقة float ويهزّ الريش
+        if (fan.angle > Math.PI * 2 || fan.angle < -Math.PI * 2) fan.angle %= Math.PI * 2;
         fan.pivot.rotation.set(0, 0, 0);
         fan.pivot.rotation[fan.axis] = fan.angle;
       } // خلاف ذلك: angle يتجمد أخيرًا عند توقف الدوران (لا اهتزاز)
