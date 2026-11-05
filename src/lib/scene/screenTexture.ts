@@ -7,9 +7,11 @@
  *
  * الرسم يحدث فقط عند الطلب (dirty) — لا إنشاء كائنات داخل حلقة الرسم عدا النصوص.
  *
- * (v9) الدقة: الكانفس الفيزيائي 1280×720 (16:9) بينما فضاء الرسم المنطقي
- * 1024×576 — تحويل مقياس أساسي 1.25 يجعل كل الإحداثيات القديمة صحيحة
- * ويُحدّة حدة النص والخطوط. النسبة 16:9 تام تطابق سطح العرض المجسم.
+ * (v10) الدقة: الكانفس الفيزيائي 1600×900 (16:9) بينما فضاء الرسم المنطقي
+ * 1024×576 — تحويل مقياس أساسي 1.5625 يجعل كل الإحداثيات القديمة صحيحة
+ * ويُحدّة حدة النص والخطوط على الشاشات عالية الكثافة. النسبة 16:9 تام
+ * تطابق سطح العرض المجسم، مع Mipmaps تمنع وميض التنعيم عند تصغير الشاشة
+ * في منظور المختبر.
  */
 
 import * as THREE from 'three';
@@ -25,9 +27,9 @@ export interface ScreenPainter {
 /** فضاء الرسم المنطقي (كل إحداثيات الرسم وVOS بهذه الأبعاد) */
 export const SCREEN_LOGICAL_W = 1024;
 export const SCREEN_LOGICAL_H = 576;
-/** دقة الكانفس الفيزيائية — 16:9 تام مطابق لنسبة سطح العرض المجسم */
-export const SCREEN_PHYS_W = 1280;
-export const SCREEN_PHYS_H = 720;
+/** دقة الكانفس الفيزيائية — 16:9 تام مطابق لنسبة سطح العرض المجسم (v10: 1600×900 لحدة أعلى) */
+export const SCREEN_PHYS_W = 1600;
+export const SCREEN_PHYS_H = 900;
 
 const W = SCREEN_LOGICAL_W;
 const H = SCREEN_LOGICAL_H;
@@ -83,15 +85,18 @@ export function createScreenPainter(): ScreenPainter | null {
   canvas.height = SCREEN_PHYS_H;
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
-  // (v9) تحويل المقياس الأساسي: كل الرسم المنطقي 1024×576 يُ rasterized عند 1280×720
+  // (v10) تحويل المقياس الأساسي: كل الرسم المنطقي 1024×576 يُ rasterized عند 1600×900
   // — save/restore داخل الرسّام/‏VOS تحافظ على هذا التحويل لأنه خارج أي زوج save/restore
   ctx.scale(SCREEN_PHYS_W / SCREEN_LOGICAL_W, SCREEN_PHYS_H / SCREEN_LOGICAL_H);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.minFilter = THREE.LinearFilter;
+  // (v10) Mipmaps + تحديد لانيسوتروبي: الشاشة المصغّرة في منظور المختبر كانت
+  // تومض (aliasing) مع LinearFilter المجرد — الآن تُقرأ بسلاسة من أي مسافة
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
-  texture.generateMipmaps = false;
+  texture.generateMipmaps = true;
+  texture.anisotropy = 4;
 
   let lastSig = '';
 

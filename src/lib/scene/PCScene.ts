@@ -232,6 +232,10 @@ export class PCScene {
   /** آخر موضع حقيقي للمؤشر (لتزامن المؤشر الافتراضي عند دخول وضع الشاشة) */
   private lastPointerX = 0;
   private lastPointerY = 0;
+  // (v10) محرك السلاسة: تتبع طور وميض المؤشر وهل كان الإطار الأخير من النظام الافتراضي
+  // — يسمح برسم نسيج الشاشة عند الحاجة فقط بمعدل الإطار الكامل بدل معدلات ثابتة
+  private lastBlinkPhase = -1;
+  private lastVosFrame = false;
 
   // ---- توهج القطع التالفة (استعادة مستقلة عن الإبراز) ----
   private damagedOriginals = new Map<THREE.MeshStandardMaterial, SavedEmissive>();
@@ -242,7 +246,8 @@ export class PCScene {
   private shellOriginals = new Map<THREE.Material, SavedMaterial>();
 
   // ---- مخازن مؤقتة مُعاد استخدامها (منع الإنشاء داخل الحلقة) ----
-  private readonly clock = new THREE.Clock();
+  // (v10) تتبع زمني يدوي بدل THREE.Clock المُهلك — نفس الدقة بلا تحذيرات
+  private lastFrameTime = 0;
   private readonly raycaster = new THREE.Raycaster();
   private readonly _ndc = new THREE.Vector2();
   private readonly _v1 = new THREE.Vector3();
@@ -288,7 +293,7 @@ export class PCScene {
       const renderer = new THREE.WebGLRenderer({ antialias: true });
       renderer.setClearColor(COLORS.bg);
       renderer.shadowMap.enabled = this.quality !== 'low';
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.type = THREE.PCFShadowMap; // (v10) PCFSoft أُزيل من r186 — PCF يعطي نفس النعومة مع هذا الحجم
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = TONE_EXPOSURE;
       renderer.setSize(w, h, false);
@@ -532,7 +537,8 @@ export class PCScene {
       this._planeCenter.setFromMatrixPosition(screen.matrixWorld);
       this._screenPlane.setFromNormalAndCoplanarPoint(this._planeNormal, this._planeCenter);
       // تأطير الشاشة: مسافة تحسب من أبعاد السطح الفعلية وزاوية الرؤية
-      // (v9) هامش 1.18 + إزاحة رأسية 0.3 — الشاشة تظهر أعلى المنتصف بعيدًا عن رصيف الأدوات السفلي
+      // (v10) هامش 1.18 + إزاحة رأسية 0.30 — الشاشة تملأ أكبر مساحة ممكنة من
+      // الإطار بلا قصّ (كان الهامش 1.29 يترك أطرافًا ميتة واسعة)
       this.savedCam = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
       const box = new THREE.Box3().setFromObject(screen);
       const center = box.getCenter(new THREE.Vector3());
@@ -541,14 +547,11 @@ export class PCScene {
       const aspect = Math.max(0.4, this.camera.aspect);
       const distW = size.x / 2 / (Math.tan(fov / 2) * aspect);
       const distH = size.y / 2 / Math.tan(fov / 2);
-      // (v9 ضبط) هامش 1.29 + إزاحة +0.33 أعلى المركز: توجيه الكاميرا أعلى مركز الشاشة
-      // ينزل المشهد في الإطار — أعلى النظام الافتراضي (وشرط عناوين النوافذ) يظهر
-      // تحت الشارة مباشرة ويصبح قابلاً للإمساك بالسحب
-      const dist = Math.max(distW, distH) * 1.29;
+      const dist = Math.max(distW, distH) * 1.18;
       const camPos = center.clone().addScaledVector(this._planeNormal, dist);
-      camPos.y += 0.33;
+      camPos.y += 0.3;
       const aim = center.clone();
-      aim.y += 0.33;
+      aim.y += 0.3;
       this.startCamTween(camPos, aim, 0.55);
       this.renderer.domElement.style.cursor = 'none';
       // (v9) تزامن المؤشر الافتراضي مع موضع ماوس المستخدم الحقيقي لحظة الدخول
@@ -807,7 +810,9 @@ export class PCScene {
   private readonly tick = (): void => {
     if (this.disposed || this.failed) return;
     this.rafId = requestAnimationFrame(this.tick);
-    const dt = Math.min(this.clock.getDelta(), 0.05); // حماية من قفزات التبويبات الخاملة
+    const frameNow = nowMs();
+    const dt = this.lastFrameTime > 0 ? Math.min((frameNow - this.lastFrameTime) / 1000, 0.05) : 0.016; // حماية من قفزات التبويبات الخاملة
+    this.lastFrameTime = frameNow;
     const k = 1 - Math.exp(-LERP_RATE * dt);
 
     // (V6 §3) منظومة المراوح: سرعات ودوران كل ريش على محوره الصحيح + الحرارة المُحاكاة
@@ -852,7 +857,7 @@ export class PCScene {
     }
 
     // تطفو القطعة الملتقطة (awaiting) فوق الصينية بلطف — إشارة بصرية لجاهزية التركيب
-    const elapsed = this.clock.getElapsedTime();
+    const elapsed = frameNow / 1000;
     for (const id of COMPONENT_IDS) {
       if (id === 'case') continue;
       if (this.lastState && this.lastState.parts[id] === 'awaiting' && this.dragId !== id) {
@@ -889,13 +894,12 @@ export class PCScene {
 
     this.controls.update();
 
-    // إعادة رسم نسيج الشاشة الافتراضية: (v9) في وضع التحكم بالشاشة ≈30fps للسلاسة،
-    // وفي المختبر مُقيّد لتوفير الموارد
+    // إعادة رسم نسيج الشاشة الافتراضية:
+    // (v10) في وضع التحكم بالشاشة: رسم عند الحاجة فقط بمعدل الإطار الكامل (60fps
+    // أثناء حركة المؤشر، وتوقف تام عند السكون عدا لفة وميض المؤشر كل 500ms) —
+    // أعلى سلاسة ممكنة بأقل كلفة GPU. في المختبر: مُقيّد لتوفير الموارد.
     if (this.painter) {
-      const interval = this.focusMode ? 30 : MONITOR_REDRAW_MS;
-      if (nowMs() - this.lastMonitorDrawAt >= interval) {
-        this.drawMonitor(false);
-      }
+      this.drawMonitor(false);
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -1213,9 +1217,9 @@ export class PCScene {
     placeTool('/models/screwdrivers_02/screwdrivers_02_1k.gltf', 'tool-screwdriver-set', 2.2, [-5.45, TRAY.tableTopY, 1.05], 1.25);
     // كماشات على الحافة اليسرى كذلك
     placeTool('/models/pliers/pliers_1k.gltf', 'tool-pliers', 1.5, [-5.5, TRAY.tableTopY, 2.6], -0.5);
-    // مصباح مكتب على الطرف الأيمن للمكتب — ذراعه يمتد فوق المكتب المفتوح
-    // (بعيدًا عن جسم الجهاز كي لا يحجب النقر على القطع — توجيه v4)
-    placeTool('/models/desk_lamp_arm_01/desk_lamp_arm_01_1k.gltf', 'desk-lamp', 4.6, [7.4, 0, 3.1], -2.2, { light: true });
+    // مصباح مكتب في الركن الخلفي الأيسر — ذراعه يمتد فوق صينية القطع مضيئًا
+    // منطقة العمل الرئيسية (v10: نقلته من اليمين لأن محطة العرض صارت هناك)
+    placeTool('/models/desk_lamp_arm_01/desk_lamp_arm_01_1k.gltf', 'desk-lamp', 4.6, [-5.8, 0, 0.2], 0.9, { light: true });
     // صندوق عدة معدني تحت المكتب (على أرضية المختبر)
     placeTool('/models/metal_tool_chest/metal_tool_chest_1k.gltf', 'under-desk-tool-chest', 5.4, [5.4, DESK.floorY, 5.2], 0.15);
   }
@@ -1228,8 +1232,21 @@ export class PCScene {
    */
   private drawMonitor(force: boolean): void {
     if (!this.painter || this.blocked) return;
-    if (!force && nowMs() - this.lastMonitorDrawAt < 60) return;
-    this.lastMonitorDrawAt = nowMs();
+    const now = nowMs();
+    if (!force) {
+      if (this.focusMode) {
+        // (v10) سقف 16ms = إطار واحد؛ ثم لا رسم إن لم يتغير شيء:
+        // المؤشر الثابت + نوافذ ساكنة = صفر إعادة رسم (بدل 30 مرة/ثانية)
+        if (now - this.lastMonitorDrawAt < 16) return;
+        const phase = Math.floor(now / 500) % 2;
+        const blinkChanged = phase !== this.lastBlinkPhase;
+        this.lastBlinkPhase = phase;
+        if (this.vos && !this.vos.dirty && !blinkChanged && this.lastVosFrame) return;
+      } else if (now - this.lastMonitorDrawAt < MONITOR_REDRAW_MS) {
+        return;
+      }
+    }
+    this.lastMonitorDrawAt = now;
     const sim = this.lastState;
     const elapsed = this.bootStartedAt !== null ? Math.max(0, Date.now() - this.bootStartedAt) : 0;
     if (!sim) {
@@ -1241,14 +1258,16 @@ export class PCScene {
       return;
     }
     const view = computeMonitorView(sim, elapsed);
-    const now = Date.now();
+    const wallNow = Date.now();
 
     if (this.vos && (view.screen === 'os' || view.screen === 'bios')) {
-      this.drawVosScreen(sim, view.screen, now);
+      this.drawVosScreen(sim, view.screen, wallNow);
+      this.lastVosFrame = true;
       return;
     }
 
-    this.painter.draw(view, this.notepad, now);
+    this.painter.draw(view, this.notepad, wallNow);
+    this.lastVosFrame = false;
   }
 
   /** رسم بيئة النظام الافتراضي/البرنامج الثابت على كانفس الشاشة + رفع النسيج */
@@ -1717,7 +1736,8 @@ export class PCScene {
       this.lastPointerY = event.clientY;
       const hit = this.screenPlaneHit(event.clientX, event.clientY);
       if (hit) this.vos.pointer('move', hit.x, hit.y);
-      this.drawMonitor(true);
+      // (v10) لا رسم فوري هنا — حلقة الرسم تلتقط dirty وتعيد الرسم عند الإطار التالي
+      // (كانت كل حركة ماوس ترسم 1024×576 كاملة فورًا = هدر GPU وتمزق إطارات)
       return;
     }
 

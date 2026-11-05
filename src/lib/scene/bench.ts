@@ -271,45 +271,45 @@ function buildMouse(): THREE.Group {
 }
 
 function buildPeripherals(root: THREE.Group): void {
-  const rotY = -0.88; // بنفس توجه الشاشة نحو الكاميرا الرئيسية (v9)
+  // (v10) نفس دوران الشاشة الجديد (-0.62) — الكيبورد والفأرة والشاشة محطة واحدة
+  // مصفوفة أمام الجهاز بدل مبعثرة على زوايا المكتب
+  const rotY = -0.62; // بنفس توجه الشاشة نحو الكاميرا الرئيسية
 
-  // قاعدة الفأرة (mousepad) تحت الفأرة مباشرة
-  const pad = box(1.55, 0.014, 1.3, std(0x10151b, 0.1, 0.9), 5.2, 0.008, 8.1, false, true);
-  pad.rotation.y = rotY + 0.3;
+  // قاعدة الفأرة (mousepad) تحت الفأرة مباشرة — يمين الكيبورد
+  const pad = box(1.55, 0.014, 1.3, std(0x10151b, 0.1, 0.9), 7.3, 0.008, 5.9, false, true);
+  pad.rotation.y = rotY + 0.07;
   root.add(pad);
 
   const kb = buildKeyboard();
-  kb.position.set(3.85, 0, 6.73);
+  kb.position.set(5.5, 0, 5.5);
   kb.rotation.y = rotY;
   root.add(kb);
 
   const ms = buildMouse();
-  ms.position.set(5.2, 0.015, 8.1);
-  ms.rotation.y = rotY + 0.3;
+  ms.position.set(7.3, 0.015, 5.9);
+  ms.rotation.y = rotY + 0.07;
   root.add(ms);
 
   // نقاط التقاط واسعة (الكيبورد/الفأرة صغيرتان على شاشة كاملة)
   const kbHit = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.6, 1.5), hitMat);
-  kbHit.position.set(3.85, 0.3, 6.73);
+  kbHit.position.set(5.5, 0.3, 5.5);
   root.add(kbHit);
   const msHit = new THREE.Mesh(new THREE.SphereGeometry(0.45, 8, 6), hitMat);
-  msHit.position.set(5.2, 0.25, 8.1);
+  msHit.position.set(7.3, 0.25, 5.9);
   root.add(msHit);
 
   // كابلات مرئية: من مؤخرة الكيبورد/الفأرة نحو الحافة الخلفية للمكتب
   root.add(cable([
-    new THREE.Vector3(4.4, 0.05, 6.4),
-    new THREE.Vector3(3.4, 0.05, 7.1),
-    new THREE.Vector3(2.85, 0.05, 4.8),
-    new THREE.Vector3(2.6, 0.05, 2.6),
-    new THREE.Vector3(2.55, 0.05, -1.4),
+    new THREE.Vector3(5.95, 0.05, 4.9),
+    new THREE.Vector3(6.9, 0.05, 3.6),
+    new THREE.Vector3(7.25, 0.05, 0.8),
+    new THREE.Vector3(3.0, 0.05, -1.5),
   ]));
   root.add(cable([
-    new THREE.Vector3(5.5, 0.05, 7.9),
-    new THREE.Vector3(6.4, 0.05, 8.35),
-    new THREE.Vector3(4.3, 0.05, 8.0),
-    new THREE.Vector3(2.95, 0.05, 4.8),
-    new THREE.Vector3(2.85, 0.05, -1.35),
+    new THREE.Vector3(7.45, 0.05, 5.55),
+    new THREE.Vector3(7.9, 0.05, 3.0),
+    new THREE.Vector3(7.4, 0.05, -0.9),
+    new THREE.Vector3(3.1, 0.05, -1.45),
   ], 0.03));
 }
 
@@ -393,8 +393,9 @@ function buildScrewOrganizer(root: THREE.Group): void {
   lid.rotation.x = 0.32;
   g.add(lid);
 
-  g.position.set(4.15, 0, 1.95);
-  g.rotation.y = -0.14;
+  // (v10) الزاوية الأمامية اليمنى — بجانب محطة العرض لا خلفها
+  g.position.set(7.5, 0, 7.55);
+  g.rotation.y = -0.45;
   root.add(g);
 }
 
@@ -448,7 +449,8 @@ function buildClipboard(root: THREE.Group): void {
   g.add(paper);
   // مشبك معدني أعلى الحافظة
   g.add(box(0.5, 0.05, 0.22, std(0x39424d, 0.7, 0.4), 0, 0.05, -0.66, true));
-  g.position.set(1.05, MAT_TOP, 5.62);
+  // (v10) على سطح المكتب مباشرة (كانت على ارتفاع السجادة وهي خارج حدودها — تطفو)
+  g.position.set(1.05, 0.006, 5.62);
   g.rotation.y = 0.07;
   root.add(g);
 }
@@ -504,12 +506,16 @@ function buildConsumables(root: THREE.Group, cast: boolean): void {
   const deskY = 0.005;
   const matY = MAT_TOP + 0.005;
 
-  // أنبوب معجون حراري مستلقٍ (يمين الجهاز على المكتب)
+  // (v10) ركن المواد الاستهلاكية: عنقود واحد أمام يسار الجهاز —
+  // المعجون/الكحول/الفرشاة على المكتب خلف حافة السجادة، وبطاقة POST والكوب
+  // والسوار على السجادة نفسها (كانت بعضها خارج السجادة على ارتفاعها = تطفو)
+
+  // أنبوب معجون حراري مستلقٍ
   const paste = new THREE.Group();
   paste.add(cyl(0.11, 0.62, std(0xd8dce2, 0.1, 0.45), 'x', 0, 0, 0, 0.11, cast));
   paste.add(cyl(0.06, 0.14, std(0xe8a13c, 0.3, 0.5), 'x', -0.36, 0, 0, 0.06, cast));
   paste.add(box(0.2, 0.13, 0.001, std(0x1c232b, 0.1, 0.7), 0.1, 0.001, 0.112));
-  paste.position.set(3.15, 0.12, 3.95);
+  paste.position.set(-0.9, 0.12, 6.5);
   paste.rotation.z = 0.06;
   g.add(paste);
 
@@ -517,14 +523,14 @@ function buildConsumables(root: THREE.Group, cast: boolean): void {
   const bottle = new THREE.Group();
   bottle.add(cyl(0.16, 0.5, new THREE.MeshStandardMaterial({ color: 0xbfd9d2, metalness: 0.05, roughness: 0.25, transparent: true, opacity: 0.55 }), 'y', 0, 0.25, 0, 0.16, cast));
   bottle.add(cyl(0.05, 0.16, std(0x2c3138, 0.2, 0.5), 'y', 0, 0.58, 0, 0.05, cast));
-  bottle.position.set(3.3, deskY, 4.35);
+  bottle.position.set(-0.3, deskY, 6.9);
   g.add(bottle);
 
   // فرشاة تنظيف
   const brush = new THREE.Group();
   brush.add(box(0.9, 0.09, 0.14, std(0xe8a13c, 0.1, 0.6), 0, 0.045, 0, cast));
   brush.add(box(0.4, 0.11, 0.18, std(0x2c3138, 0, 0.9), 0.62, 0.055, 0, cast));
-  brush.position.set(3.0, deskY, 5.05);
+  brush.position.set(-1.8, deskY, 6.9);
   brush.rotation.y = 0.8;
   g.add(brush);
 
@@ -534,11 +540,11 @@ function buildConsumables(root: THREE.Group, cast: boolean): void {
   post.add(box(0.2, 0.09, 0.14, std(0x0c0f14, 0.05, 0.4), -0.18, 0.065, 0, cast));
   const digits = box(0.17, 0.02, 0.11, new THREE.MeshStandardMaterial({ color: 0xff4444, emissive: 0xff2222, emissiveIntensity: 0.9 }), -0.18, 0.115, 0);
   post.add(digits);
-  post.position.set(-0.7, matY, 5.3);
+  post.position.set(-0.75, matY, 4.85);
   post.rotation.y = -0.25;
   g.add(post);
 
-  // كوب براغٍ صغير فيه براغٍ — على السجادة
+  // كوب براغٍ صغير فيه براغٍ — على السجادة قرب واجهة الجهاز
   const cup = new THREE.Group();
   cup.add(cyl(0.18, 0.26, std(0x39424d, 0.5, 0.4), 'y', 0, 0.13, 0, 0.16, cast));
   for (let i = 0; i < 5; i++) {
@@ -546,22 +552,22 @@ function buildConsumables(root: THREE.Group, cast: boolean): void {
     s.rotation.z = i * 0.7;
     cup.add(s);
   }
-  cup.position.set(-0.2, matY, 5.6);
+  cup.position.set(0.15, matY, 4.95);
   g.add(cup);
 
   // سوار أرضي (ESD) ملقى على السجادة قرب الصينية
   const strap = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.045, 8, 22), std(0x2c6e8f, 0.1, 0.7));
   strap.rotation.x = Math.PI / 2;
   strap.rotation.z = 0.4;
-  strap.position.set(1.9, matY + 0.045, 6.7);
+  strap.position.set(2.6, matY + 0.045, 4.75);
   strap.castShadow = cast;
   strap.receiveShadow = true;
   g.add(strap);
-  g.add(box(0.26, 0.06, 0.2, std(0x1a1f26, 0.2, 0.6), 2.3, matY + 0.03, 6.85, cast));
+  g.add(box(0.26, 0.06, 0.2, std(0x1a1f26, 0.2, 0.6), 3.0, matY + 0.03, 4.9, cast));
 
-  // أربطة كابلات (شرائط رفيعة) قرب منظم البراغي
+  // أربطة كابلات (شرائط رفيعة) قرب منظم البراغي في زاويته الجديدة
   for (let i = 0; i < 3; i++) {
-    const tie = box(0.7, 0.015, 0.05, std(0xd8dce2, 0, 0.8), 4.45, 0.012, 4.55 + i * 0.14, false);
+    const tie = box(0.7, 0.015, 0.05, std(0xd8dce2, 0, 0.8), 6.7, 0.012, 7.0 + i * 0.14, false);
     tie.rotation.y = 0.35 + i * 0.5;
     g.add(tie);
   }
